@@ -3,6 +3,8 @@
 import readline from 'readline';
 import http from 'node:http';
 import https from 'node:https';
+import dns from 'node:dns/promises';
+import net from 'node:net';
 
 const DEFAULT_KEEP_ALIVE = '1h';
 const DEFAULT_OLLAMA_HOST = 'http://localhost:11434';
@@ -63,15 +65,23 @@ const BROWSER_HEADERS = {
   'Accept-Language': 'en-US,en;q=0.9'
 };
 
-function stripHtml(html) {
-  return html
-    .replace(/<[^>]+>/g, '')
-    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+function decodeEntities(text) {
+  const codePoint = (n) => {
+    try {
+      return String.fromCodePoint(n);
+    } catch (e) {
+      return '';
+    }
+  };
+  return text
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => codePoint(parseInt(d, 10)))
     .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&nbsp;/g, ' ')
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
+function stripHtml(html) {
+  return decodeEntities(html.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim();
 }
 
 // DuckDuckGo's official Instant Answer API: Wikipedia-style abstracts and
@@ -153,6 +163,144 @@ async function webSearch({ query, recency }) {
   return (await ddgHtmlSearch(query, df)) || `No results found for "${query}".`;
 }
 
+const FETCH_TIMEOUT_MS = 15000;
+const MAX_FETCH_BYTES = 3 * 1024 * 1024;
+const MAX_REDIRECTS = 5;
+// ~1500 tokens. Ollama's default context window is small (often 4096
+// tokens), so a whole page would push the conversation out of it.
+const MAX_PAGE_CHARS = 6000;
+
+// Pages the model reads can contain instructions aimed at it, so fetch_page
+// refuses addresses on this machine or the local network: otherwise a page
+// could get the model to read e.g. a router admin page and then leak it by
+// "fetching" an attacker's URL with the contents in the query string.
+// net.BlockList also matches IPv4-mapped IPv6 forms like ::ffff:7f00:1.
+const PRIVATE_ADDRESSES = new net.BlockList();
+for (const [prefix, bits] of [
+  ['0.0.0.0', 8], ['10.0.0.0', 8], ['127.0.0.0', 8], ['169.254.0.0', 16],
+  ['172.16.0.0', 12], ['192.168.0.0', 16], ['100.64.0.0', 10] // last: carrier-grade NAT
+]) PRIVATE_ADDRESSES.addSubnet(prefix, bits, 'ipv4');
+for (const [prefix, bits] of [['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10]]) {
+  PRIVATE_ADDRESSES.addSubnet(prefix, bits, 'ipv6');
+}
+
+function isPrivateAddress(ip) {
+  return PRIVATE_ADDRESSES.check(ip, net.isIPv6(ip) ? 'ipv6' : 'ipv4');
+}
+
+async function assertPublicUrl(url) {
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`only http and https URLs can be fetched (got ${url.protocol})`);
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  const addresses = net.isIP(host) ? [{ address: host }] : await dns.lookup(host, { all: true });
+  if (addresses.some(({ address }) => isPrivateAddress(address))) {
+    throw new Error(`refusing to fetch ${url.hostname}: it resolves to a local or private network address`);
+  }
+}
+
+// Reads at most MAX_FETCH_BYTES, so a huge download can't stall the chat.
+async function readCapped(res) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of res.body) {
+    chunks.push(chunk);
+    total += chunk.length;
+    if (total >= MAX_FETCH_BYTES) break;
+  }
+  const bytes = Buffer.concat(chunks).subarray(0, MAX_FETCH_BYTES);
+  const charset = res.headers.get('content-type')?.match(/charset=["']?([\w-]+)/i)?.[1];
+  try {
+    return new TextDecoder(charset || 'utf-8').decode(bytes);
+  } catch (e) {
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+}
+
+// Rough readable-text extraction: drops scripts/styles/navigation, prefers
+// <main>/<article> when they hold most of the text, and keeps line breaks
+// and headings so the model can tell headlines from body text.
+function htmlToText(html) {
+  const title = stripHtml(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '');
+  let body = html
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<(script|style|noscript|svg|template|iframe|head|nav|footer|aside)\b[\s\S]*?<\/\1>/gi, '')
+    // Drop attributes (quote-aware: values like Wikipedia's data-mw JSON
+    // contain '>'), so the simple tag patterns below can't be thrown off.
+    .replace(/<(\/?[a-z][\w-]*)(?:[^>"']|"[^"]*"|'[^']*')*>/gi, '<$1>');
+  const main = body.match(/<(main|article)\b[\s\S]*<\/\1>/i)?.[0];
+  if (main && stripHtml(main).length > 500) body = main;
+  const text = decodeEntities(body
+    .replace(/<h([1-6])\b[^>]*>/gi, (_, level) => `\n\n${'#'.repeat(Number(level))} `)
+    .replace(/<li\b[^>]*>/gi, '\n- ')
+    .replace(/<(br|hr)\b[^>]*>/gi, '\n')
+    .replace(/<\/?(p|div|section|article|main|header|h[1-6]|ul|ol|table|tr|blockquote|pre|figure|figcaption|dt|dd)\b[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, ''))
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter((line) => line && !/^#+$/.test(line) && line !== '-');
+  return { title, text: dropMenuRuns(text).join('\n') };
+}
+
+// Language pickers and nav menus come out as long runs of one- or two-word
+// list items, and would otherwise use up the character budget before the
+// page's actual content.
+const MENU_RUN_LENGTH = 10;
+function dropMenuRuns(lines) {
+  const isMenuItem = (line) => line.startsWith('- ') && line.split(' ').length <= 4;
+  const kept = [];
+  let run = [];
+  for (const line of [...lines, '']) {
+    if (isMenuItem(line)) {
+      run.push(line);
+      continue;
+    }
+    if (run.length < MENU_RUN_LENGTH) kept.push(...run);
+    run = [];
+    if (line) kept.push(line);
+  }
+  return kept;
+}
+
+async function fetchPage({ url }) {
+  if (!url || typeof url !== 'string') throw new Error("missing 'url' argument");
+  let target;
+  try {
+    target = new URL(url);
+  } catch (e) {
+    throw new Error(`not a valid URL: ${url}`);
+  }
+
+  // Redirects are followed by hand so each hop gets the private-address check.
+  let res;
+  for (let hop = 0; ; hop++) {
+    await assertPublicUrl(target);
+    res = await fetch(target, {
+      headers: { ...BROWSER_HEADERS, 'Accept': 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5' },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+    });
+    const location = res.headers.get('location');
+    if (res.status < 300 || res.status >= 400 || !location) break;
+    if (hop >= MAX_REDIRECTS) throw new Error('too many redirects');
+    target = new URL(location, target);
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${target.href}`);
+
+  const type = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  const isHtml = type === 'text/html' || type === 'application/xhtml+xml';
+  if (!isHtml && !type.startsWith('text/') && !/json|xml/.test(type)) {
+    throw new Error(`can't read ${type || 'unknown'} content, only web pages and text`);
+  }
+  const raw = await readCapped(res);
+  const { title, text } = isHtml ? htmlToText(raw) : { title: '', text: raw.trim() };
+  if (!text) return `No readable text found at ${target.href} (the page may need JavaScript).`;
+
+  const header = `${title ? `Title: ${title}\n` : ''}URL: ${target.href}\n\n`;
+  if (text.length <= MAX_PAGE_CHARS) return header + text;
+  return `${header}${text.slice(0, MAX_PAGE_CHARS)}\n\n[truncated: showing the first ${MAX_PAGE_CHARS} of ${text.length} characters]`;
+}
+
 // e.g. "Tuesday, September 29, 2026", in the local timezone.
 function formatToday() {
   return new Date().toLocaleDateString('en-US', {
@@ -175,8 +323,21 @@ const TOOLS = {
       },
       required: ['query']
     },
+    mentionsDate: true,
     describe: (args) => `searching: "${args.query}"${RECENCY_FILTERS[args.recency] ? ` (past ${args.recency})` : ''}`,
     run: webSearch
+  },
+  fetch_page: {
+    description: "Fetch a web page and return its readable text. Use it to read a web_search result's actual content, e.g. the headlines on a news site, instead of relying on its snippet. Long pages are truncated.",
+    parameters: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'The full http(s) URL to fetch' }
+      },
+      required: ['url']
+    },
+    describe: (args) => `fetching: ${args.url}`,
+    run: fetchPage
   }
 };
 
@@ -187,7 +348,7 @@ function toolDefinitions(today) {
     type: 'function',
     function: {
       name,
-      description: today ? `${tool.description} Today's date is ${today}.` : tool.description,
+      description: today && tool.mentionsDate ? `${tool.description} Today's date is ${today}.` : tool.description,
       parameters: tool.parameters
     }
   }));
@@ -943,7 +1104,7 @@ class OllamaChat {
     console.log('  /set nothink           Disable thinking');
     console.log('  /set showthinking      Show thinking output as it streams');
     console.log('  /set hidethinking      Hide thinking output');
-    console.log('  /set tools             Let the model call tools (web_search)');
+    console.log('  /set tools             Let the model call tools (web_search, fetch_page)');
     console.log('  /set notools           Disable tool calling');
     console.log("  /set date              Tell the model today's date (default: on with tools)");
     console.log("  /set nodate            Don't tell the model today's date");
@@ -1519,8 +1680,8 @@ Options:
                        (same effect as \`ollama stop\`)
   --hide-thinking      Don't stream thinking-model reasoning output
                        (shown by default; same as running \`/set hidethinking\`)
-  --tools              Let the model call tools - currently web_search via
-                       DuckDuckGo (same as running \`/set tools\`). Needs a
+  --tools              Let the model call tools - web_search (DuckDuckGo) and
+                       fetch_page (same as running \`/set tools\`). Needs a
                        tool-capable model (e.g. llama3.1, qwen3).
   --date, --no-date    Always / never tell the model today's date via the
                        system message (default: only when tools are on)

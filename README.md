@@ -10,7 +10,7 @@ A terminal-based Node.js chat interface for Ollama and OpenAI-compatible endpoin
 - ✅ Full `ollama run` command parity (`/set`, `/show`, `/load`, `/save`, `/clear`, `/bye`, `/?`, `/list`, ...)
 - ✅ Conversation history that's actually sent back to the model each turn (via `/api/chat`)
 - ✅ `--api openai` mode for OpenAI-compatible servers (vLLM, llama.cpp server, LM Studio, ...) — see [OpenAI-compatible servers](#openai-compatible-servers)
-- ✅ Opt-in tool calling with a built-in DuckDuckGo `web_search` tool — see [Tool calling and web search](#tool-calling-and-web-search)
+- ✅ Opt-in tool calling with built-in `web_search` (DuckDuckGo) and `fetch_page` tools — see [Tool calling and web search](#tool-calling-and-web-search)
 - ✅ Minimal dependencies (uses Node.js built-ins)
 
 ## Prerequisites
@@ -124,7 +124,7 @@ This client mirrors the command set of the native `ollama run` interactive termi
 | `/set verbose` / `/set quiet` | Show/hide token-count and timing stats after each response |
 | `/set think [level]` / `/set nothink` | Enable/disable extended thinking, for models that support it |
 | `/set showthinking` / `/set hidethinking` | Show/hide a thinking model's reasoning as it streams |
-| `/set tools` / `/set notools` | Let the model call tools (`web_search`), or disable |
+| `/set tools` / `/set notools` | Let the model call tools (`web_search`, `fetch_page`), or disable |
 | `/set date` / `/set nodate` | Tell the model today's date, or don't (default: only when tools are on) |
 
 `/set history`, `/set nohistory`, `/set wordwrap`, and `/set nowordwrap` are recognized but don't apply here — this client has no line-history recall and lets your terminal handle wrapping natively, so it prints a note instead of pretending to toggle something.
@@ -137,15 +137,18 @@ If generation runs out of its token/context budget while the model is still mid-
 
 ### Tool calling and web search
 
-Pass `--tools` (or run `/set tools` mid-session) to offer the model a `web_search` tool:
+Pass `--tools` (or run `/set tools` mid-session) to offer the model two tools:
+
+- `web_search` — searches the web with DuckDuckGo and returns result titles, URLs, and snippets.
+- `fetch_page` — fetches a URL and returns the page's readable text, so the model can read a search result instead of guessing from its snippet.
 
 ```bash
 ./thinai.js qwen3 --tools
 ```
 
-When the model decides to search, thinai runs the query itself, shows a dimmed `🔧 searching: "..."` line, sends the results back to the model, and streams its final answer. A single reply can involve several searches; after 5 rounds of tool calls, the model is asked to answer without tools. Tool calls and results are kept in the conversation history, so follow-up questions can refer to them.
+When the model calls a tool, thinai runs it, shows a dimmed line like `🔧 searching: "..."` or `🔧 fetching: <url>`, sends the result back to the model, and streams its final answer. A single reply can involve several tool calls; after 5 rounds of tool calls, the model is asked to answer without tools. Tool calls and results are kept in the conversation history, so follow-up questions can refer to them.
 
-This needs a model with the `tools` capability (check with `/show info`) — e.g. `llama3.1`, `llama3.2`, `qwen3`, `mistral-nemo`. Models without it make Ollama return an error; turn tools back off with `/set notools`. Small models like `llama3.2:3b` do call the tool, but they're unreliable at using the results well; 8B+ models do noticeably better. It works the same way under `--api openai`, for servers that support OpenAI-style `tools`.
+This needs a model with the `tools` capability (check with `/show info`) — e.g. `llama3.1`, `llama3.2`, `qwen3`, `mistral-nemo`. Models without it make Ollama return an error; turn tools back off with `/set notools`. Small models like `llama3.2:3b` do search, but in testing never chose to call `fetch_page` — even when asked to read a specific URL — so they answer from snippets; 8B+ models are much better at using the tools together. It works the same way under `--api openai`, for servers that support OpenAI-style `tools`.
 
 `web_search` takes an optional `recency` argument (`day`, `week`, `month`, or `year`), which limits results to that period via DuckDuckGo's date filter. The model decides when to use it, e.g. for news.
 
@@ -153,6 +156,14 @@ Search is done by DuckDuckGo, with no API key:
 
 1. The official [Instant Answer API](https://api.duckduckgo.com/api) is tried first. It returns encyclopedia-style summaries and direct answers, not web results, so many queries come back empty.
 2. Otherwise, thinai falls back to scraping `html.duckduckgo.com` for the top 8 results (title, URL, snippet). That endpoint is unofficial: it can break if DuckDuckGo changes its markup, and rapid or heavy use gets blocked as automated traffic. When that happens, the model is told the search failed.
+
+#### `fetch_page`
+
+`fetch_page` extracts readable text from HTML: it drops scripts, styles, navigation, and footers, prefers the page's `<main>` or `<article>` when there is one, removes long runs of menu-like links (e.g. language pickers), and keeps headings and list items as lines of text. Plain text, JSON, and XML are returned as-is; other types (images, PDFs, ...) are refused. Pages that build their content with JavaScript come back mostly empty.
+
+Only the first 6,000 characters of a page's text (about 1,500 tokens) are passed to the model, with a note saying it was truncated. Ollama's default context window is small, so if long conversations with several fetched pages start losing earlier context, raise it with `/set parameter num_ctx 16384` (or whatever your model and memory allow).
+
+Pages can contain text aimed at the model ("ignore your instructions and…"), and the model can't reliably tell that apart from your instructions. So `fetch_page` refuses URLs that point at this machine or the local network — `localhost`, `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, link-local and cloud-metadata addresses (`169.254.0.0/16`), carrier-grade NAT, and their IPv6 equivalents — checking the resolved address of every redirect too. Otherwise a malicious page could get the model to read, say, your router's admin page or your Ollama server and send the contents to an attacker's URL. This check doesn't stop DNS rebinding (a hostname that resolves differently between the check and the request), and nothing can stop a page from misleading the model about its content, so treat answers built from fetched pages with the same skepticism as the pages themselves.
 
 ### Today's date
 
