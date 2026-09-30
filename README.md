@@ -12,6 +12,8 @@ A terminal-based Node.js chat interface for Ollama and OpenAI-compatible endpoin
 - ✅ `--api openai` mode for OpenAI-compatible servers (vLLM, llama.cpp server, LM Studio, ...) — see [OpenAI-compatible servers](#openai-compatible-servers)
 - ✅ Opt-in tool calling with built-in `web_search` and `fetch_page` tools (DuckDuckGo, or Ollama's hosted search with an API key)
 - ✅ Ollama cloud models via `--host https://ollama.com` and `OLLAMA_API_KEY` — see [Ollama account](#ollama-account-cloud-models-and-hosted-search) — see [Tool calling and web search](#tool-calling-and-web-search)
+- ✅ Session saving to local Modelfiles (works with any server), optional autosave, and `/share` to an Ollama server
+- ✅ Defaults in `~/.thinai/.env`
 - ✅ Minimal dependencies (uses Node.js built-ins)
 
 ## Prerequisites
@@ -79,6 +81,37 @@ node thinai.js \
   --host http://localhost:11434
 ```
 
+### Default settings (`.env`)
+
+Put defaults in `~/.thinai/.env` (or `$THINAI_HOME/.env`) as `KEY=value` lines, so you don't have to repeat flags. Every flag has a variable:
+
+```bash
+# ~/.thinai/.env
+THINAI_MODEL=gemma4:31b
+THINAI_HOST=https://ollama.com
+OLLAMA_API_KEY=...
+THINAI_TOOLS=true
+THINAI_AUTOSAVE=true
+THINAI_MODEL_NORMAL_COLOR=#ff8800
+```
+
+| Variable | Flag |
+|----------|------|
+| `THINAI_MODEL` | model argument / `--model` |
+| `THINAI_HOST` | `--host` |
+| `THINAI_API` | `--api` |
+| `THINAI_KEEP_ALIVE` | `--keep-alive` |
+| `THINAI_TOOLS` | `--tools` / `--no-tools` |
+| `THINAI_DATE` | `--date` / `--no-date` |
+| `THINAI_MARKDOWN` | `--markdown` / `--no-markdown` |
+| `THINAI_IMAGES` | `--images` / `--no-images` |
+| `THINAI_AUTOSAVE` | `--autosave` / `--no-autosave` |
+| `THINAI_HIDE_THINKING` | `--hide-thinking` / `--show-thinking` |
+| `THINAI_STOP_ON_EXIT` | `--stop-on-exit` / `--no-stop-on-exit` |
+| `THINAI_USER_NORMAL_COLOR`, `THINAI_USER_ITALIC_COLOR`, `THINAI_MODEL_NORMAL_COLOR`, `THINAI_MODEL_ITALIC_COLOR` | the `--*-color` flags |
+
+On/off values accept `true`/`false`, `yes`/`no`, `on`/`off`, or `1`/`0`. Values can be quoted, lines can start with `export`, and `#` starts a comment (at the start of a line, or after a space). Variables already set in your environment take precedence over the file, and command-line flags take precedence over both — that's what the `--no-…` forms are for. `/show settings` shows which file was loaded.
+
 ## Keep-Alive Duration Formats
 
 Use any of these formats in the `--keep-alive` parameter:
@@ -107,8 +140,9 @@ This client mirrors the command set of the native `ollama run` interactive termi
 |---------|-------------|
 | `/set` | Set session variables (see below) |
 | `/show` | Show model information (see below) |
-| `/load <model>` | Switch to a different model, restoring its saved session/system message if any |
-| `/save <model>` | Save your current session as a new model |
+| `/load <name>` | Restore a saved session, or switch to a different model (restoring its saved session/system message if any) |
+| `/save [name]` | Save your current session to a local file (see below) |
+| `/share [name]` | Save your current session as a model on a self-hosted Ollama server |
 | `/clear` | Clear conversation history (keeps the system message, if one is set) |
 | `/list` | List locally available models |
 | `/model` | Show current model, keep-alive, and host (not in native `ollama`; a bonus command) |
@@ -180,16 +214,28 @@ It's on by default whenever tools are on. `--date` or `/set date` turns it on wi
 
 `/show settings` (not in `ollama run`) lists this session's own state instead — everything `/set` and the command-line flags control: host, keep-alive, system message, parameter overrides, format, think, thinking display, verbose, tools, date, markdown, images, and stop-on-exit. It works with `--api openai` too, since it doesn't ask the server.
 
-### `/save {name}`
+### `/save [name]` and `/share [name]`
 
-Matches the `/save` command in the native `ollama run` interactive terminal: it calls the Ollama `/api/create` endpoint with the current model as `from`, any system prompt as `system`, and the conversation history as `messages`, producing a new model that "remembers" this session's context. Run it mid-chat:
+`/save` writes the session — model, system message, parameters, and conversation — to `~/.thinai/sessions/<name>.Modelfile` (set `THINAI_HOME` to use another directory than `~/.thinai`). It works the same with every server: a local or cloud Ollama, or `--api openai`.
 
 ```
-> /save my-custom-model
-✅ Saved session as model 'my-custom-model'
+> /save trip-planning
+✅ Saved session 'trip-planning' to /Users/you/.thinai/sessions/trip-planning.Modelfile
+   Resume it with /load trip-planning, or start with: thinai.js trip-planning
 ```
 
-You can then start a new chat against it (`node thinai.js my-custom-model` or `ollama run my-custom-model`), and it will carry the saved conversation as its initial context. `/load <model>` does the same thing without leaving the current process — it switches models in place and restores whatever session that model has saved.
+- `/save` with no name saves under the session's current name — the one it was last saved or loaded as — or, for a session that hasn't been saved yet, a new name from the date and time, like `chat-2026-09-30-154907`.
+- `/save <new name>` is "save as": it writes a new file and leaves the old one as it was, and from then on `/save` (and autosave) update the new name. The exception is a session that still has a date-and-time name (from autosave or a bare `/save`): that file is renamed instead, so naming a session doesn't leave a stray copy behind.
+- If the name belongs to a different saved session, `/save` asks before overwriting it (`[y/N]`; anything but `y` keeps the existing file).
+- `/load <name>` or `thinai.js <name>` resumes a saved session: it switches to the session's `FROM` model and restores its system message, parameters, and conversation. `/list` shows saved sessions below the server's models. A saved session takes precedence over a server model with the same name.
+
+The file uses Ollama's Modelfile format — `FROM`, `PARAMETER`, `SYSTEM`, and `MESSAGE` lines — so it's readable, and can be turned into a model with `ollama create <name> -f <file>`. Tool calls and their raw results aren't saved (the format has no place for them), but the answers the model gave from them are.
+
+`/share` is what `/save` does in `ollama run`: it creates a model on the Ollama server (via `/api/create`) from the current model, system message, parameters, and conversation, so `ollama run <name>` resumes the session from anywhere that uses the server. It defaults to the session's current name, the same way `/save` does, and asks before replacing a model that already exists on the server. Only a self-hosted Ollama server supports this; with ollama.com or `--api openai`, `/share` explains that and points you to `/save`.
+
+#### Autosave
+
+With `--autosave` (or `/set autosave`, or `THINAI_AUTOSAVE=true`), the session is saved to a local file after every reply, so nothing is lost if you close the terminal. It saves under the session's current name, or — if it hasn't been saved yet — a new one from the date and time, like `chat-2026-09-30-154907`. `/save <name>` renames that file, and autosave carries on under the new name. Resuming a saved session with autosave on keeps updating that session's file, and `/clear` starts a new file for the new conversation.
 
 ### Conversation memory
 
@@ -273,7 +319,7 @@ security add-generic-password -a "$USER" -s OLLAMA_API_KEY -w   # prompts for th
 echo 'export OLLAMA_API_KEY="$(security find-generic-password -a "$USER" -s OLLAMA_API_KEY -w 2>/dev/null)"' >> ~/.zshrc
 ```
 
-**Cloud models:** point `--host` at ollama.com. `/list`, `/show`, and tool calling work the same as with a local server:
+**Cloud models:** point `--host` at ollama.com. `/list`, `/show`, and tool calling work the same as with a local server; `/save` and `/load` use local files as always, but `/share` isn't available:
 
 ```bash
 ./thinai.js gemma4:31b --host https://ollama.com --tools
@@ -301,8 +347,9 @@ Pass `--api openai` to talk to an OpenAI-compatible server (vLLM, llama.cpp's `s
 
 Several commands are Ollama-specific and have no OpenAI API equivalent, so they're disabled or degraded under `--api openai`:
 
-- `/save` and `/show info|license|modelfile|parameters|template` — no equivalent to `/api/create`/`/api/show`; these print an error. `/show system` and `/show settings` still work (they only report the session's own state).
-- `/load <model>` — switches the active model name and starts a fresh session, but can't restore saved context (nothing to fetch it from).
+- `/share` — no equivalent to `/api/create`; use `/save`, which works the same as with Ollama.
+- `/show info|license|modelfile|parameters|template` — no equivalent to `/api/show`; these print an error. `/show system` and `/show settings` still work (they only report the session's own state).
+- `/load <name>` — restores a saved session by that name; otherwise it switches the active model name and starts a fresh session.
 - `--keep-alive`/`-x`/`--stop-on-exit` — no equivalent concept; `--stop-on-exit` is a no-op.
 - `/set verbose` stats — only shows token counts (from the `usage` field, if the server returns one), not timing, since OpenAI's API doesn't report duration breakdowns.
 

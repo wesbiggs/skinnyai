@@ -5,19 +5,58 @@ import http from 'node:http';
 import https from 'node:https';
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const DEFAULT_KEEP_ALIVE = '1h';
 const DEFAULT_OLLAMA_HOST = 'http://localhost:11434';
+
+// Saved sessions and the .env defaults file live here.
+const THINAI_HOME = process.env.THINAI_HOME || path.join(os.homedir(), '.thinai');
+
+// Default settings can be kept in $THINAI_HOME/.env as KEY=value lines (see
+// ENV_SETTINGS and the README). Variables already in the environment win
+// over the file, and command-line flags win over both. It's loaded before
+// anything reads process.env, so OLLAMA_API_KEY can live there too.
+const ENV_FILE = path.join(THINAI_HOME, '.env');
+
+function loadEnvFile(file) {
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (error) {
+    return false;
+  }
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*(?:export\s+)?([A-Za-z_]\w*)\s*=\s*(.*?)\s*$/.exec(line);
+    if (!match) continue;
+    let value = match[2];
+    const quoted = /^(["'])(.*)\1$/.exec(value);
+    if (quoted) {
+      value = quoted[1] === '"' ? quoted[2].replace(/\\n/g, '\n').replace(/\\(["\\])/g, '$1') : quoted[2];
+    } else {
+      value = value.replace(/\s+#.*$/, ''); // trailing comment; a bare #ff8800 color stays
+    }
+    if (process.env[match[1]] === undefined) process.env[match[1]] = value;
+  }
+  return true;
+}
+const ENV_FILE_LOADED = loadEnvFile(ENV_FILE);
 
 // ollama.com (cloud models, web search/fetch) needs an API key. It's only
 // ever sent to ollama.com over https, never to other --host servers.
 const OLLAMA_API_KEY = process.env.OLLAMA_API_KEY || '';
 
+function isOllamaCom(url) {
+  const { hostname } = new URL(url);
+  return hostname === 'ollama.com' || hostname.endsWith('.ollama.com');
+}
+
 function ollamaAuthHeaders(url) {
   if (!OLLAMA_API_KEY) return {};
-  const { protocol, hostname } = new URL(url);
-  const isOllamaCom = hostname === 'ollama.com' || hostname.endsWith('.ollama.com');
-  return protocol === 'https:' && isOllamaCom ? { Authorization: `Bearer ${OLLAMA_API_KEY}` } : {};
+  return new URL(url).protocol === 'https:' && isOllamaCom(url) ? { Authorization: `Bearer ${OLLAMA_API_KEY}` } : {};
 }
 
 // fetch() for requests to the chat server, adding the API key when it's ollama.com.
@@ -1392,6 +1431,137 @@ function inputPosition(text) {
   return pending ? { row: row + 1, col: 0, pending } : { row, col, pending };
 }
 
+// Sessions saved on this machine, for servers that can't store them: only
+// a self-hosted Ollama has /api/create, not ollama.com or OpenAI-compatible
+// servers. They use the same Modelfile format /save creates on an Ollama
+// server (FROM, SYSTEM, PARAMETER, MESSAGE), one file per name, so a saved
+// session can also be turned into a real model with `ollama create -f`.
+const SESSION_DIR = path.join(THINAI_HOME, 'sessions');
+const SESSION_SUFFIX = '.Modelfile';
+
+// Names can hold anything a model name can (like 'me/chat:v2'), so they're
+// URL-encoded into safe filenames.
+function sessionPath(name) {
+  return path.join(SESSION_DIR, encodeURIComponent(name) + SESSION_SUFFIX);
+}
+
+// A triple-quoted Modelfile value. Ollama's format has no escape for a
+// literal """ inside one, so it's written as ""\" and turned back on load.
+function quoteModelfile(text) {
+  return `"""${text.replace(/"""/g, '""\\"')}"""`;
+}
+
+function formatModelfile({ from, system, parameters, messages }) {
+  const lines = [`# Saved by thinai on ${new Date().toISOString()}`, `FROM ${from}`];
+  for (const [name, value] of Object.entries(parameters)) {
+    for (const v of Array.isArray(value) ? value : [value]) {
+      lines.push(`PARAMETER ${name} ${typeof v === 'string' && /\s|"/.test(v) ? JSON.stringify(v) : v}`);
+    }
+  }
+  if (system) lines.push(`SYSTEM ${quoteModelfile(system)}`);
+  for (const { role, content } of messages) lines.push(`MESSAGE ${role} ${quoteModelfile(content)}`);
+  return lines.join('\n') + '\n';
+}
+
+// Reads the Modelfile subset formatModelfile writes (plus comments and
+// single-line values), returning { from, system, parameters: [[name, value]],
+// messages }. Other instructions (TEMPLATE, LICENSE, ...) are skipped.
+function parseModelfile(text) {
+  const session = { from: '', system: '', parameters: [], messages: [] };
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const match = /^\s*([A-Za-z]+)\s+(.*)$/.exec(lines[i]);
+    if (!match || lines[i].trimStart().startsWith('#')) continue;
+    const instruction = match[1].toUpperCase();
+    let args = match[2];
+    let role = '';
+    if (instruction === 'MESSAGE') {
+      [, role, args] = /^(\S+)\s*(.*)$/.exec(args) || [, '', ''];
+    }
+
+    // A value is either the rest of the line (optionally "quoted") or a
+    // """block""" that runs until a line ending in """.
+    let value = args.trim();
+    if (value.startsWith('"""')) {
+      const body = [value.slice(3)];
+      while (!/"""\s*$/.test(body[body.length - 1]) && i + 1 < lines.length) body.push(lines[++i]);
+      value = body.join('\n').replace(/"""\s*$/, '').replace(/""\\"/g, '"""');
+    } else if (/^".*"$/.test(value)) {
+      try {
+        value = JSON.parse(value);
+      } catch (e) {
+        value = value.slice(1, -1);
+      }
+    }
+
+    if (instruction === 'FROM') session.from = value;
+    else if (instruction === 'SYSTEM') session.system = value;
+    else if (instruction === 'PARAMETER') {
+      const [, name, rest] = /^(\S+)\s+(.*)$/s.exec(args.trim()) || [];
+      if (name) session.parameters.push([name, /^".*"$/.test(rest) ? JSON.parse(rest) : rest]);
+    } else if (instruction === 'MESSAGE' && role) session.messages.push({ role: role.toLowerCase(), content: value });
+  }
+  return session;
+}
+
+async function saveLocalSession(name, session) {
+  await fs.mkdir(SESSION_DIR, { recursive: true });
+  const file = sessionPath(name);
+  await fs.writeFile(file, formatModelfile(session));
+  return file;
+}
+
+// Returns the parsed session, or null if none is saved under that name.
+async function readLocalSession(name) {
+  try {
+    return parseModelfile(await fs.readFile(sessionPath(name), 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function localSessionExists(name) {
+  try {
+    await fs.access(sessionPath(name));
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function deleteLocalSession(name) {
+  await fs.rm(sessionPath(name), { force: true });
+}
+
+// Whether a session still has the name autosave gave it (see autosaveName).
+function isAutosaveName(name) {
+  return /^chat-\d{4}-\d{2}-\d{2}-\d{6}(-\d+)?$/.test(name);
+}
+
+// Name for a new autosaved session, from the local date and time, e.g.
+// 'chat-2026-09-30-154907', with a -2, -3, ... suffix if that's taken (say,
+// two conversations started within a second of each other via /clear).
+async function autosaveName() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const base = `chat-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-` +
+    `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  for (let n = 1; ; n++) {
+    const name = n === 1 ? base : `${base}-${n}`;
+    if (!await localSessionExists(name)) return name;
+  }
+}
+
+async function listLocalSessions() {
+  try {
+    const files = await fs.readdir(SESSION_DIR);
+    return files.filter((f) => f.endsWith(SESSION_SUFFIX)).map((f) => decodeURIComponent(f.slice(0, -SESSION_SUFFIX.length))).sort();
+  } catch (error) {
+    return [];
+  }
+}
+
 class OllamaChat {
   constructor(model, options = {}) {
     this.model = model;
@@ -1414,6 +1584,11 @@ class OllamaChat {
     // use that to send conversation details to a server in the URL.
     this.images = Boolean(options.images) && IMAGE_PROTOCOL !== null;
     this.inputHistory = []; // submitted messages/commands, for Up/Down recall
+    this.autosave = Boolean(options.autosave);
+    // The local session file this conversation is saved in, once it has one:
+    // set by autosave, a local /save, or loading a local session; cleared
+    // when a new conversation starts (/clear, loading a model).
+    this.sessionName = null;
   }
 
   shouldInjectDate() {
@@ -1497,26 +1672,49 @@ class OllamaChat {
 
     this.model = modelName;
     this.history = messages;
+    this.sessionName = null;
     this.options = {};
     this.format = '';
     this.think = undefined;
 
     if (messages.length > 0) {
-      await this.printRestoredHistory(messages);
+      await this.printRestoredHistory(messages, `📜 Restored conversation from '${this.model}':`);
     }
     return true;
   }
 
+  // Switches to a session saved on this machine (see saveLocalSession): its
+  // FROM model, system message, parameters, and conversation.
+  async applyLocalSession(name, session) {
+    this.model = session.from || this.model;
+    this.history = session.system ? [{ role: 'system', content: session.system }] : [];
+    this.history.push(...session.messages);
+    this.options = {};
+    for (const [param, value] of session.parameters) this.setParameter(param, [value]);
+    this.format = '';
+    this.think = undefined;
+    this.sessionName = name; // autosave keeps updating the same file
+    await this.printRestoredHistory(this.history, `📜 Restored saved session '${name}' (model: ${this.model}):`);
+  }
+
+  // At startup, a name with a locally saved session resumes it, the way
+  // `ollama run` resumes a model /save created; otherwise an Ollama server
+  // is asked for the model's own saved messages.
   async loadModelContext() {
     try {
-      await this.fetchAndApplyModelContext(this.model);
+      const session = await readLocalSession(this.model);
+      if (session) {
+        await this.applyLocalSession(this.model, session);
+      } else if (this.api === 'ollama') {
+        await this.fetchAndApplyModelContext(this.model);
+      }
     } catch (error) {
       // Non-fatal: just start with an empty session.
     }
   }
 
-  async printRestoredHistory(messages) {
-    console.log(`📜 Restored conversation from '${this.model}':\n`);
+  async printRestoredHistory(messages, heading) {
+    console.log(`${heading}\n`);
 
     for (const message of messages) {
       if (message.role === 'system') {
@@ -1618,6 +1816,34 @@ class OllamaChat {
       }
     } catch (error) {
       console.error(`\n❌ Error: ${error.message}\n`);
+    }
+    await this.autosaveSession();
+  }
+
+  // The conversation minus tool calls and results, which have no Modelfile
+  // form; the answers built from them are kept.
+  savableMessages() {
+    const system = this.getSystemMessage();
+    return (system ? this.history.slice(1) : this.history)
+      .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content);
+  }
+
+  sessionSnapshot() {
+    return { from: this.model, system: this.getSystemMessage(), parameters: this.options, messages: this.savableMessages() };
+  }
+
+  // With autosave on, writes the conversation to its local session file
+  // after each model turn, naming it from the date and time the first time.
+  async autosaveSession() {
+    if (!this.autosave || this.savableMessages().length === 0) return;
+    if (!this.sessionName) {
+      this.sessionName = await autosaveName();
+      process.stdout.write(`${CHROME_COLOR}💾 Autosaving as '${this.sessionName}' (/save <name> saves it under a new name)${ANSI.reset}\n\n`);
+    }
+    try {
+      await saveLocalSession(this.sessionName, this.sessionSnapshot());
+    } catch (error) {
+      console.log(`⚠️  Autosave failed: ${error.message}\n`);
     }
   }
 
@@ -1875,7 +2101,8 @@ class OllamaChat {
     console.log('  /set            Set session variables');
     console.log('  /show           Show model information');
     console.log('  /load <model>   Load a session or model');
-    console.log('  /save <model>   Save your current session');
+    console.log('  /save [name]    Save your current session to a file on this machine');
+    console.log('  /share [name]   Save your current session as a model on the Ollama server');
     console.log('  /clear          Clear session context');
     console.log('  /model          Show current model, keep-alive, and host');
     console.log('  /list           List locally available models');
@@ -1914,6 +2141,8 @@ class OllamaChat {
     console.log('  /set nomarkdown        Show responses as raw text');
     console.log('  /set images            Download and draw ![images](url) inline (iTerm2, WezTerm, kitty, Ghostty)');
     console.log('  /set noimages          Show images as links (default)');
+    console.log('  /set autosave          Save the session to a local file after each reply');
+    console.log('  /set noautosave        Stop autosaving (default)');
     console.log('\nUse /show settings to see the current values.');
     console.log('');
   }
@@ -1948,7 +2177,9 @@ class OllamaChat {
       ['date', dateSetting],
       ['markdown', onOff(this.markdown)],
       ['images', images],
-      ['stop on exit', onOff(this.stopOnExit)]
+      ['autosave', this.autosave ? `on (${this.sessionName ? `'${this.sessionName}'` : 'named after the next reply'})` : 'off'],
+      ['stop on exit', onOff(this.stopOnExit)],
+      ['defaults file', ENV_FILE_LOADED ? ENV_FILE : `none (${ENV_FILE})`]
     ];
     console.log('\nSession settings:');
     for (const [name, value] of rows) console.log(`  ${name.padEnd(16)} ${value}`);
@@ -1982,43 +2213,83 @@ class OllamaChat {
     console.log('');
   }
 
+  // Saves the session as a Modelfile on this machine: under `name`, or
+  // under its current name, or else a new date-and-time name. Saving a
+  // named session under a new name leaves the old file as it was (later
+  // saves, and autosave, go to the new one); a session that only has an
+  // autosave name is renamed instead, so it doesn't leave a stray copy.
+  // Asks before overwriting a different session's file.
   async save(name) {
-    if (!name) {
-      console.log('\n❌ Usage: /save <name>\n');
-      return;
-    }
-    if (this.api !== 'ollama') {
-      console.log("\n❌ /save isn't supported for --api openai (no /api/create equivalent)\n");
-      return;
-    }
-
-    const system = this.getSystemMessage();
-    const messages = system ? this.history.slice(1) : this.history;
-
+    const previous = this.sessionName;
+    const target = name || previous || await autosaveName();
+    const renaming = previous && previous !== target && isAutosaveName(previous);
     try {
-      const body = { model: name, from: this.model, stream: false };
-      if (system) body.system = system;
-      if (messages.length > 0) body.messages = messages;
-      if (Object.keys(this.options).length > 0) body.parameters = this.options;
+      if (target !== previous && await localSessionExists(target) &&
+          !await this.confirm(`\nA saved session named '${target}' already exists. Overwrite it?`)) {
+        console.log('Not saved.\n');
+        return;
+      }
+      const file = await saveLocalSession(target, this.sessionSnapshot());
+      if (renaming) await deleteLocalSession(previous);
+      this.sessionName = target;
+      if (renaming) console.log(`\n✅ Renamed session '${previous}' to '${target}' (${file})`);
+      else console.log(`\n✅ Saved session '${target}' to ${file}`);
+      if (previous && previous !== target && !renaming) console.log(`   '${previous}' is unchanged; from now on this session saves as '${target}'.`);
+      console.log(`   Resume it with /load ${target}, or start with: thinai.js ${target}\n`);
+    } catch (error) {
+      console.error(`\n❌ Error saving session: ${error.message}\n`);
+    }
+  }
 
-      const response = await hostFetch(`${this.host}/api/create`, {
+  // Pushes the session to the Ollama server as a model (via /api/create,
+  // like `/save` in `ollama run`), so `ollama run <name>` resumes it from
+  // anywhere that server is used. Only a self-hosted Ollama supports this.
+  async share(name) {
+    if (this.api !== 'ollama') {
+      console.log("\n❌ /share needs an Ollama server; OpenAI-compatible servers can't store sessions. Use /save to keep it locally.\n");
+      return;
+    }
+    if (isOllamaCom(this.host)) {
+      console.log("\n❌ ollama.com doesn't accept shared sessions; /share only works with a self-hosted Ollama server. Use /save to keep it locally.\n");
+      return;
+    }
+    const target = name || this.sessionName || await autosaveName();
+    try {
+      // /api/create silently replaces a model of the same name.
+      const existing = await hostFetch(`${this.host}/api/show`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
+        body: JSON.stringify({ model: target })
       });
-
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status} ${response.statusText}`);
+      if (existing.ok && !await this.confirm(`\nA model named '${target}' already exists on ${this.host}. Replace it?`)) {
+        console.log('Not shared.\n');
+        return;
       }
-
-      const result = await response.json();
-      if (result.status && result.status !== 'success') {
-        throw new Error(result.status);
-      }
-
-      console.log(`\n✅ Saved session as model '${name}'\n`);
+      await this.saveOnServer(target, this.getSystemMessage(), this.savableMessages());
+      console.log(`\n✅ Shared session as model '${target}' on ${this.host}`);
+      console.log(`   Resume it with /load ${target}, or: ollama run ${target}\n`);
     } catch (error) {
-      console.error(`\n❌ Error saving model: ${error.message}\n`);
+      console.error(`\n❌ Error sharing session: ${error.message}\n`);
+    }
+  }
+
+  async saveOnServer(name, system, messages) {
+    const body = { model: name, from: this.model, stream: false };
+    if (system) body.system = system;
+    if (messages.length > 0) body.messages = messages;
+    if (Object.keys(this.options).length > 0) body.parameters = this.options;
+
+    const response = await hostFetch(`${this.host}/api/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) {
+      throw new Error(`API error: ${response.status} ${response.statusText}`);
+    }
+    const result = await response.json();
+    if (result.status && result.status !== 'success') {
+      throw new Error(result.status);
     }
   }
 
@@ -2028,16 +2299,31 @@ class OllamaChat {
       return;
     }
 
+    // A session saved on this machine takes precedence over a model of the
+    // same name, since saving it was an explicit choice.
+    try {
+      const session = await readLocalSession(name);
+      if (session) {
+        console.log('');
+        await this.applyLocalSession(name, session);
+        return;
+      }
+    } catch (error) {
+      console.log(`\n❌ Error reading saved session '${name}': ${error.message}\n`);
+      return;
+    }
+
     // OpenAI-compatible servers have no /api/show equivalent to restore a
     // saved system message/history from, so /load there just switches the
     // active model name and starts a fresh session.
     if (this.api !== 'ollama') {
       this.model = name;
       this.history = [];
+      this.sessionName = null;
       this.options = {};
       this.format = '';
       this.think = undefined;
-      console.log(`\n📦 Switched to model '${name}' (session reset - context restore isn't supported for --api openai)\n`);
+      console.log(`\n📦 Switched to model '${name}' (no saved session by that name, so starting fresh)\n`);
       return;
     }
 
@@ -2066,23 +2352,28 @@ class OllamaChat {
         for (const m of data.data || []) {
           console.log(`  ${m.id}`);
         }
+      } else {
+        const response = await hostFetch(`${this.host}/api/tags`);
+        if (!response.ok) {
+          throw new Error(`API error: ${response.status} ${response.statusText}`);
+        }
+        const data = await response.json();
         console.log('');
-        return;
+        for (const m of data.models || []) {
+          const sizeGB = (m.size / 1e9).toFixed(1);
+          console.log(`  ${m.name.padEnd(35)} ${sizeGB} GB`);
+        }
       }
-      const response = await hostFetch(`${this.host}/api/tags`);
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status} ${response.statusText}`);
-      }
-      const data = await response.json();
-      console.log('');
-      for (const m of data.models || []) {
-        const sizeGB = (m.size / 1e9).toFixed(1);
-        console.log(`  ${m.name.padEnd(35)} ${sizeGB} GB`);
-      }
-      console.log('');
     } catch (error) {
-      console.log(`\n❌ Error: ${error.message}\n`);
+      console.log(`\n❌ Error: ${error.message}`);
     }
+
+    const sessions = await listLocalSessions();
+    if (sessions.length > 0) {
+      console.log(`\nSaved sessions (${SESSION_DIR}):`);
+      for (const name of sessions) console.log(`  ${name}`);
+    }
+    console.log('');
   }
 
   async show(args) {
@@ -2270,6 +2561,16 @@ class OllamaChat {
         this.images = false;
         console.log("Set 'noimages' mode.\n");
         break;
+      case 'autosave':
+        this.autosave = true;
+        console.log(this.sessionName
+          ? `Set 'autosave' mode (saving to '${this.sessionName}' after each reply).\n`
+          : "Set 'autosave' mode (the session is saved after each reply, named from the date and time).\n");
+        return this.autosaveSession();
+      case 'noautosave':
+        this.autosave = false;
+        console.log("Set 'noautosave' mode.\n");
+        break;
       case 'history':
       case 'nohistory':
         console.log(`\n'/set ${sub}' doesn't apply here - input history (Up/Down) lasts for this`);
@@ -2293,6 +2594,7 @@ class OllamaChat {
       case '/clear': {
         const system = this.getSystemMessage();
         this.history = system ? [{ role: 'system', content: system }] : [];
+        this.sessionName = null; // a new conversation gets its own autosave file
         console.log('🗑️  Conversation history cleared.\n');
         return true;
       }
@@ -2305,6 +2607,9 @@ class OllamaChat {
       case '/save':
         await this.save(rest.join(' '));
         return true;
+      case '/share':
+        await this.share(rest.join(' '));
+        return true;
       case '/load':
         await this.load(rest.join(' '));
         return true;
@@ -2315,7 +2620,7 @@ class OllamaChat {
         await this.show(rest);
         return true;
       case '/set':
-        this.handleSet(rest);
+        await this.handleSet(rest);
         return true;
       case '/help':
       case '/?':
@@ -2338,6 +2643,13 @@ class OllamaChat {
   // lose whatever its predecessor had already read. The line is echoed after
   // the prompt so the transcript reads like an interactive session.
   async readPipedLine() {
+    process.stdout.write(PROMPT);
+    const line = await this.nextPipedLine();
+    if (line !== null) process.stdout.write(`${line}\n`);
+    return line;
+  }
+
+  nextPipedLine() {
     if (!this.pipedInput) {
       const lines = [];
       const waiting = [];
@@ -2354,10 +2666,32 @@ class OllamaChat {
         return new Promise((resolve) => waiting.push(resolve));
       };
     }
-    process.stdout.write(PROMPT);
-    const line = await this.pipedInput();
-    if (line !== null) process.stdout.write(`${line}\n`);
-    return line;
+    return this.pipedInput();
+  }
+
+  // Asks a yes/no question; anything but 'y' is no. On a TTY it takes a
+  // single keypress; with piped input it reads (and echoes) the next line,
+  // so scripts can answer it.
+  async confirm(question) {
+    process.stdout.write(`${question} [y/N] `);
+    if (!process.stdin.isTTY) {
+      const line = await this.nextPipedLine();
+      process.stdout.write(`${line ?? ''}\n`);
+      return /^\s*y(es)?\s*$/i.test(line ?? '');
+    }
+    return new Promise((resolve) => {
+      const stdin = process.stdin;
+      readline.emitKeypressEvents(stdin);
+      stdin.setRawMode(true);
+      stdin.resume();
+      stdin.once('keypress', (str) => {
+        stdin.setRawMode(false);
+        stdin.pause();
+        const yes = /^y$/i.test(str || '');
+        process.stdout.write(yes ? 'yes\n' : 'no\n');
+        resolve(yes);
+      });
+    });
   }
 
   // A small line editor. Enter submits; Ctrl+J (and Shift+Enter, if the
@@ -2557,9 +2891,7 @@ class OllamaChat {
 
   async start() {
     this.printWelcome();
-    if (this.api === 'ollama') {
-      await this.loadModelContext();
-    }
+    await this.loadModelContext();
 
     while (true) {
       const input = await this.readTurnInput();
@@ -2594,10 +2926,61 @@ class OllamaChat {
   }
 }
 
-// Parse command line arguments
+// Settings the .env file (or the environment) can default, by variable
+// name: [option key, type]. Each matches a command-line flag.
+const ENV_SETTINGS = {
+  THINAI_MODEL: ['model', 'string'],
+  THINAI_HOST: ['host', 'string'],
+  THINAI_API: ['api', 'string'],
+  THINAI_KEEP_ALIVE: ['keepAlive', 'string'],
+  THINAI_TOOLS: ['tools', 'boolean'],
+  THINAI_DATE: ['date', 'boolean'],
+  THINAI_MARKDOWN: ['markdown', 'boolean'],
+  THINAI_IMAGES: ['images', 'boolean'],
+  THINAI_AUTOSAVE: ['autosave', 'boolean'],
+  THINAI_HIDE_THINKING: ['hideThinking', 'boolean'],
+  THINAI_STOP_ON_EXIT: ['stopOnExit', 'boolean'],
+  THINAI_USER_NORMAL_COLOR: ['userNormalColor', 'string'],
+  THINAI_USER_ITALIC_COLOR: ['userEmphasisColor', 'string'],
+  THINAI_MODEL_NORMAL_COLOR: ['modelNormalColor', 'string'],
+  THINAI_MODEL_ITALIC_COLOR: ['modelEmphasisColor', 'string']
+};
+
+function envOptions() {
+  const options = {};
+  for (const [name, [key, type]] of Object.entries(ENV_SETTINGS)) {
+    const value = process.env[name];
+    if (value === undefined || value === '') continue;
+    if (type === 'string') {
+      options[key] = value;
+    } else if (/^(1|true|yes|on)$/i.test(value)) {
+      options[key] = true;
+    } else if (/^(0|false|no|off)$/i.test(value)) {
+      options[key] = false;
+    } else {
+      console.error(`❌ Error: ${name} must be true or false (got '${value}')${ENV_FILE_LOADED ? ` - check ${ENV_FILE}` : ''}\n`);
+      process.exit(1);
+    }
+  }
+  return options;
+}
+
+// Boolean flags, each with a --no- (or opposite) form so a flag can
+// override a .env default either way.
+const BOOLEAN_FLAGS = {
+  '--tools': ['tools', true], '--no-tools': ['tools', false],
+  '--date': ['date', true], '--no-date': ['date', false],
+  '--markdown': ['markdown', true], '--no-markdown': ['markdown', false],
+  '--images': ['images', true], '--no-images': ['images', false],
+  '--autosave': ['autosave', true], '--no-autosave': ['autosave', false],
+  '--hide-thinking': ['hideThinking', true], '--show-thinking': ['hideThinking', false],
+  '-x': ['stopOnExit', true], '--stop-on-exit': ['stopOnExit', true], '--no-stop-on-exit': ['stopOnExit', false]
+};
+
+// Parse command line arguments, on top of the .env/environment defaults.
 function parseArgs() {
   const args = process.argv.slice(2);
-  const options = {};
+  const { model: defaultModel, ...options } = envOptions();
   let model = null;
 
   for (let i = 0; i < args.length; i++) {
@@ -2615,20 +2998,9 @@ function parseArgs() {
       options.modelEmphasisColor = args[++i];
     } else if (args[i] === '--model-normal-color') {
       options.modelNormalColor = args[++i];
-    } else if (args[i] === '-x' || args[i] === '--stop-on-exit') {
-      options.stopOnExit = true;
-    } else if (args[i] === '--hide-thinking') {
-      options.hideThinking = true;
-    } else if (args[i] === '--images') {
-      options.images = true;
-    } else if (args[i] === '--no-markdown') {
-      options.markdown = false;
-    } else if (args[i] === '--tools') {
-      options.tools = true;
-    } else if (args[i] === '--date') {
-      options.date = true;
-    } else if (args[i] === '--no-date') {
-      options.date = false;
+    } else if (BOOLEAN_FLAGS[args[i]]) {
+      const [key, value] = BOOLEAN_FLAGS[args[i]];
+      options[key] = value;
     } else if (args[i] === '--api') {
       options.api = args[++i];
     } else if (args[i] === '--help') {
@@ -2640,7 +3012,7 @@ function parseArgs() {
     }
   }
 
-  return { model, options };
+  return { model: model || defaultModel, options };
 }
 
 function printUsage() {
@@ -2673,6 +3045,9 @@ Options:
                        fetches whatever image URLs the model writes.
   -x, --stop-on-exit   Unload the model from Ollama when the session ends
                        (same effect as \`ollama stop\`)
+  --autosave           Save the session to a local file after each reply,
+                       named from the date and time; /save <name> renames it
+                       (same as running \`/set autosave\`)
   --hide-thinking      Don't stream thinking-model reasoning output
                        (shown by default; same as running \`/set hidethinking\`)
   --tools              Let the model call tools - web_search (DuckDuckGo) and
@@ -2688,6 +3063,20 @@ Options:
                        parameters/template, keep-alive, --stop-on-exit)
                        aren't supported there and are disabled/no-ops.
   --help              Show this message
+
+  Every on/off flag has an opposite (--no-tools, --no-images, --no-autosave,
+  --markdown, --show-thinking, --no-stop-on-exit), to override a default.
+
+Defaults:
+  Settings can be defaulted in ${ENV_FILE}
+  (or $THINAI_HOME/.env) as KEY=value lines, e.g.:
+    THINAI_MODEL=gemma4:31b        THINAI_HOST=https://ollama.com
+    THINAI_TOOLS=true              THINAI_AUTOSAVE=true
+    OLLAMA_API_KEY=...
+  Also: THINAI_API, THINAI_KEEP_ALIVE, THINAI_DATE, THINAI_MARKDOWN,
+  THINAI_IMAGES, THINAI_HIDE_THINKING, THINAI_STOP_ON_EXIT, and
+  THINAI_{USER,MODEL}_{NORMAL,ITALIC}_COLOR. Environment variables override
+  the file, and command-line flags override both.
 
 Examples:
   thinai.js llama2
