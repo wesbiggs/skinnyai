@@ -6,7 +6,8 @@ import https from 'node:https';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import fs from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -1087,7 +1088,7 @@ async function loadImage(url) {
 // the terminal width and at most ~60% of its height, followed by a newline.
 // Pixel-to-cell conversion assumes a typical 8x16 cell, since terminals
 // don't report their cell size in a way Node can read.
-function imageSequence(image) {
+function imageSequence(image, protocol = IMAGE_PROTOCOL) {
   const columns = process.stdout.columns || 80;
   const maxRows = Math.max(4, Math.min(30, Math.floor((process.stdout.rows || 40) * 0.6)));
   let rows = maxRows;
@@ -1097,7 +1098,7 @@ function imageSequence(image) {
     rows = Math.max(1, Math.round(natural * Math.min(1, maxRows / natural, columns / cols)));
   }
   const base64 = image.bytes.toString('base64');
-  if (IMAGE_PROTOCOL === 'iterm') {
+  if (protocol === 'iterm') {
     return `\x1b]1337;File=inline=1;size=${image.bytes.length};height=${rows};preserveAspectRatio=1:${base64}\x07\n`;
   }
   // kitty: PNG only (f=100), sent in 4 KB chunks; q=2 stops the terminal
@@ -1177,7 +1178,7 @@ function createMarkdownRenderer(role, startColumn = 0, { markdown = true, images
       if (need(/^`{0,2}$/)) return null;
       return rest.startsWith('```') ? { type: 'fence' } : { type: 'code' };
     }
-    if (need(/^$/) || need(/^`{1,2}$/) || need(/^#{1,6}$/) || need(/^\d{1,3}[.)]?$/) || need(/^>$/) ||
+    if (need(/^$/) || need(/^`{1,2}$/) || need(/^#{1,6}$/) || need(/^\d{1,3}[.)]?$/) || need(/^[>+]$/) ||
         need(/^([-*_])(\s*\1)*\s*$/)) {
       return null;
     }
@@ -1305,7 +1306,7 @@ function createMarkdownRenderer(role, startColumn = 0, { markdown = true, images
       // Images show as a clickable caption; the picture itself follows the line.
       const drawable = drawImages && /^(https?:|data:image\/)/i.test(url);
       if (drawable) queuedImages.push({ url });
-      linkText = `🖼  ${linkText || (drawable ? 'image' : url)}`;
+      linkText = `🖼\uFE0F ${linkText || (drawable ? 'image' : url)}`;
       if (/^data:/i.test(url)) {
         wrapper.write(linkText);
         return;
@@ -3115,4 +3116,24 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+// Run only when executed directly, not when imported (as the tests do).
+// argv[1] may be a symlink, like ~/.local/bin/thinai, so compare real paths.
+function invokedDirectly() {
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch (error) {
+    return false;
+  }
+}
+
+if (invokedDirectly()) main().catch(console.error);
+
+export {
+  charWidth, graphemeWidth, visibleWidth, createInlineStyler, styleLine, createWordWrapper,
+  splitTableRow, wrapStyled, renderTable, createMarkdownRenderer, inputPosition,
+  sniffImage, imageSequence, loadImage,
+  formatModelfile, parseModelfile, saveLocalSession, readLocalSession, listLocalSessions,
+  localSessionExists, isAutosaveName, autosaveName, sessionPath,
+  loadEnvFile, envOptions, parseArgs, isOllamaCom, OllamaChat,
+  PROMPT, SESSION_DIR, ENV_FILE
+};

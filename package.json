@@ -3,8 +3,22 @@
   "version": "0.9.0",
   "license": "Apache-2.0",
   "type": "module",
+  "bin": {
+    "thinai": "bin/thinai.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "ollama": "node thinai.js",
-    "openai": "node thinai.js --api openai"
+    "ollama": "node bin/thinai.js",
+    "openai": "node bin/thinai.js --api openai",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.3"
   }
 }

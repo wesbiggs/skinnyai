@@ -1,5 +1,7 @@
 # thinai: Thin Client for Ollama/OpenAI Interactive Chat
 
+[![CI](https://github.com/wesbiggs/thinai/actions/workflows/ci.yml/badge.svg)](https://github.com/wesbiggs/thinai/actions/workflows/ci.yml)
+
 A terminal-based Node.js chat interface for Ollama and OpenAI-compatible endpoints with session-specific model keep-alive control.
 
 ## Features
@@ -18,7 +20,7 @@ A terminal-based Node.js chat interface for Ollama and OpenAI-compatible endpoin
 
 ## Prerequisites
 
-- **Node.js 18+** (for native `fetch` support)
+- **Node.js 22+**
 - A server, such as **Ollama** running on your system with the `serve` daemon active
 
 Check that Ollama is running:
@@ -30,23 +32,25 @@ curl http://localhost:11434/api/tags
 
 ### 1. Make the script executable
 ```bash
-chmod +x thinai.js
+chmod +x bin/thinai.js
 ```
 
 ### 2. Optionally add to PATH
 ```bash
 # Copy or link to somewhere in your PATH
-cp thinai.js ~/.local/bin/
+cp bin/thinai.js ~/.local/bin/thinai
 # or
-ln -s $(pwd)/thinai.js ~/.local/bin/thinai
+ln -s $(pwd)/bin/thinai.js ~/.local/bin/thinai
+# or, from this directory, link it as `thinai` via npm
+npm link
 ```
 
 ## Usage
 
 ### Basic usage (default: `http://localhost:11434`, keep-alive 1 hour)
 ```bash
-node thinai.js llama2
-./thinai.js neural-chat
+node bin/thinai.js llama2
+./bin/thinai.js neural-chat
 ```
 
 Or via the `npm run` convenience scripts (note the `--` before your own args):
@@ -58,24 +62,24 @@ npm run openai -- my-model --host http://localhost:8000
 ### With custom keep-alive duration
 ```bash
 # Keep model loaded for 30 minutes
-node thinai.js llama2 --keep-alive 30m
+node bin/thinai.js llama2 --keep-alive 30m
 
 # Keep model loaded for 6 hours
-node thinai.js mistral -k 6h
+node bin/thinai.js mistral -k 6h
 
 # Keep model loaded for 5 minutes (minimal)
-node thinai.js neural-chat --keep-alive 5m
+node bin/thinai.js neural-chat --keep-alive 5m
 ```
 
 ### With custom host
 ```bash
 # Connect to remote Ollama instance
-node thinai.js llama2 --host http://192.168.1.100:11434
+node bin/thinai.js llama2 --host http://192.168.1.100:11434
 ```
 
 ### Combine options
 ```bash
-node thinai.js \
+node bin/thinai.js \
   --model mistral \
   --keep-alive 2h \
   --host http://localhost:11434
@@ -127,7 +131,7 @@ Use any of these formats in the `--keep-alive` parameter:
 By default the model stays loaded for its `--keep-alive` duration after you quit, same as `ollama run`. Pass `-x`/`--stop-on-exit` to unload it immediately when the session ends instead (same effect as running `ollama stop <model>`):
 
 ```bash
-node thinai.js llama2 --stop-on-exit
+node bin/thinai.js llama2 --stop-on-exit
 ```
 
 This fires on every way the session can end — `/exit`, `/bye`, Ctrl+D, and Ctrl+C — and is best-effort: if the unload request fails (e.g. the server already went away), it's reported but won't block the process from exiting.
@@ -178,7 +182,7 @@ Pass `--tools` (or run `/set tools` mid-session) to offer the model two tools:
 - `fetch_page` — fetches a URL and returns the page's readable text, so the model can read a search result instead of guessing from its snippet.
 
 ```bash
-./thinai.js qwen3 --tools
+./bin/thinai.js qwen3 --tools
 ```
 
 When the model calls a tool, thinai runs it, shows a dimmed line like `🔧 searching: "..."` or `🔧 fetching: <url>`, sends the result back to the model, and streams its final answer. A single reply can involve several tool calls; after 5 rounds of tool calls, the model is asked to answer without tools. Tool calls and results are kept in the conversation history, so follow-up questions can refer to them.
@@ -248,7 +252,7 @@ Each turn is sent via Ollama's `/api/chat` endpoint with the full message histor
   - `# Headings` are bold; `- ` / `* ` / `+ ` bullets become `•` (or `◦` when indented); numbered lists (`1.` / `1)`) and bullets get a hanging indent so wrapped lines line up with the item text.
   - `> quotes` get a `│` bar, `---` becomes a full-width rule, and fenced code blocks are shown in a code color, unwrapped, so they copy cleanly.
   - `[links](https://...)` become clickable [OSC 8 hyperlinks](https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda) (underlined) in terminals that support them — iTerm2, WezTerm, kitty, GNOME Terminal, Windows Terminal, and others; elsewhere you just see the link text.
-  - `![images](https://...)` show as a clickable `🖼 caption`. With `--images` (or `/set images`), terminals with an inline image protocol — iTerm2 and WezTerm (the protocol `imgcat` uses), kitty and Ghostty (kitty's graphics protocol; PNG only) — also draw the image below the line that mentions it, scaled to fit. It's off by default because it downloads whatever image URL the model writes: a prompt injection (say, in a page `fetch_page` read) could smuggle conversation details out in that URL. Like `fetch_page`, it refuses local/private network addresses and caps the download size. Inside tmux or screen, which don't pass image sequences through, images stay links.
+  - `![images](https://...)` show as a clickable `🖼️ caption`. With `--images` (or `/set images`), terminals with an inline image protocol — iTerm2 and WezTerm (the protocol `imgcat` uses), kitty and Ghostty (kitty's graphics protocol; PNG only) — also draw the image below the line that mentions it, scaled to fit. It's off by default because it downloads whatever image URL the model writes: a prompt injection (say, in a page `fetch_page` read) could smuggle conversation details out in that URL. Like `fetch_page`, it refuses local/private network addresses and caps the download size. Inside tmux or screen, which don't pass image sequences through, images stay links.
   - Tables are drawn with box-drawing borders, honoring `:---:` / `---:` alignment. Columns shrink to fit the terminal, wrapping cell text as needed. Emoji (✅, ⚠️, flags, 👩‍💻) are measured as the two columns terminals draw them in, so they don't push borders out of line. Since column widths depend on every row, a table is drawn once it's complete; until then a `⋯ receiving table (N rows)` placeholder shows progress.
   - `/set nomarkdown` (or `--no-markdown`) shows responses as raw text instead; `/set markdown` turns rendering back on. When output is redirected to a file or pipe, text is always written raw, so it stays valid markdown.
 - **RP-style narration**: `*single asterisks*` are italic *and* switch to a dimmer narration color, so role-play narration stays visually distinct from dialogue. Each speaker gets its own color so turns are easy to tell apart at a glance: your messages are yellow (bright for dialogue, dim for `*narration*`), and the assistant's are green (same bright/dim split). Markup is stripped from the display; the raw text is still what's stored in history and sent to the model.
@@ -271,7 +275,7 @@ Override any of the four colors on the command line:
 (`--user-emphasis-color` and `--model-emphasis-color` still work as aliases for the italic flags.) Each accepts a hex code (`#RRGGBB`), a 256-color palette index (`0`-`255`), or a basic name (`red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `black`, a `bright`-prefixed variant like `brightgreen`, or `gray`/`grey`):
 
 ```bash
-thinai.js llama2 --user-normal-color cyan --model-normal-color "#ff8800"
+./bin/thinai.js llama2 --user-normal-color cyan --model-normal-color "#ff8800"
 ```
 
 Colors are only applied on a real terminal; the flags are silently ignored when output is redirected to a file or pipe.
@@ -280,7 +284,7 @@ Colors are only applied on a real terminal; the flags are silently ignored when 
 
 ### Quick chat session
 ```bash
-$ ./thinai.js llama2
+$ ./bin/thinai.js llama2
 🚀 Ollama Interactive Chat
 📦 Model: llama2
 ⏱️  Keep-alive: 1h
@@ -301,13 +305,13 @@ Neural networks are inspired by biological neurons...
 ### Extended session
 ```bash
 # Keep a large model loaded for 3 hours of work
-node thinai.js mistral --keep-alive 3h
+node bin/thinai.js mistral --keep-alive 3h
 ```
 
 ### Remote connection
 ```bash
 # Chat with Ollama running on another machine
-./thinai.js neural-chat --host http://192.168.1.50:11434
+./bin/thinai.js neural-chat --host http://192.168.1.50:11434
 ```
 
 ## Ollama account: cloud models and hosted search
@@ -322,7 +326,7 @@ echo 'export OLLAMA_API_KEY="$(security find-generic-password -a "$USER" -s OLLA
 **Cloud models:** point `--host` at ollama.com. `/list`, `/show`, and tool calling work the same as with a local server; `/save` and `/load` use local files as always, but `/share` isn't available:
 
 ```bash
-./thinai.js gemma4:31b --host https://ollama.com --tools
+./bin/thinai.js gemma4:31b --host https://ollama.com --tools
 ```
 
 The key is only ever sent to `https://ollama.com`, never to other `--host` servers (a local or LAN Ollama, or an `--api openai` server).
@@ -340,7 +344,7 @@ If a hosted call fails — a usage limit, an outage, or an occasional page Ollam
 Pass `--api openai` to talk to an OpenAI-compatible server (vLLM, llama.cpp's `server`, LM Studio, etc.) instead of Ollama:
 
 ```bash
-./thinai.js my-model --api openai --host http://localhost:8000
+./bin/thinai.js my-model --api openai --host http://localhost:8000
 ```
 
 `--host` should be the server's base URL (no `/v1` suffix); requests go to `/v1/chat/completions` and `/v1/models`. Streaming, history, thinking-output display (via a de facto `reasoning_content` delta some servers emit for reasoning models — there's no standard field for it), and `/set parameter`/`/set format json`/`/set verbose` all still work, with sampling parameters passed through as top-level OpenAI-style fields.
@@ -386,6 +390,19 @@ This is much cleaner than globally changing Ollama's behavior—your session get
 - **Long sessions**: Use `--keep-alive 6h` or `24h` to keep the model hot throughout
 - **Limited RAM**: Use shorter durations like `--keep-alive 10m`
 
+## Tests
+
+The script itself has no dependencies; the tests use [Vitest](https://vitest.dev) as a dev dependency:
+
+```bash
+npm install
+npm test            # or: npm run test:watch
+```
+
+They cover markdown rendering (checked against a small terminal emulator, so wrapping and table borders are tested as they'd appear on screen), emoji widths, inline images, the line editor (driven with simulated keystrokes), the Modelfile format, `.env` and flag handling, and `/save`, `/load`, `/share`, and autosave. `test/cli.test.js` runs `bin/thinai.js` end to end against a mock server that speaks both the Ollama and OpenAI APIs. Tests use a temporary `THINAI_HOME`, so they never read or write your real `~/.thinai`.
+
+GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the suite on Node 22 and 24 for every push to `main` and every pull request. No real terminal is needed: the tests fake one, including the iTerm2 and kitty image support, so everything runs headless on Linux.
+
 ## Source
 
-The full source code is in `thinai.js`. It's a single-file tool with minimal dependencies—just copy it wherever you work.
+The whole tool is the single file `bin/thinai.js`, with no dependencies beyond Node.js itself — copy it wherever you work. Tests live in `test/`.
