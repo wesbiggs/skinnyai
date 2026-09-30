@@ -1,6 +1,6 @@
 # skinnyai: Get the Skinny, from a Thin Client for Ollama/OpenAI Chat
 
-[![CI](https://github.com/wesbiggs/thinai/actions/workflows/ci.yml/badge.svg)](https://github.com/wesbiggs/thinai/actions/workflows/ci.yml)
+[![CI](https://github.com/wesbiggs/skinnyai/actions/workflows/ci.yml/badge.svg)](https://github.com/wesbiggs/skinnyai/actions/workflows/ci.yml)
 
 A terminal-based Node.js chat interface for Ollama and OpenAI-compatible endpoints with session-specific model keep-alive control.
 

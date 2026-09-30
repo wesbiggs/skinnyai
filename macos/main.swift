@@ -343,7 +343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func showHelp(_ sender: Any?) {
-        NSWorkspace.shared.open(URL(string: "https://github.com/wesbiggs/thinai#readme")!)
+        NSWorkspace.shared.open(URL(string: "https://github.com/wesbiggs/skinnyai#readme")!)
     }
 
     private func buildMenu() {
