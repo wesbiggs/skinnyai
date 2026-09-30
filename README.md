@@ -125,6 +125,7 @@ This client mirrors the command set of the native `ollama run` interactive termi
 | `/set think [level]` / `/set nothink` | Enable/disable extended thinking, for models that support it |
 | `/set showthinking` / `/set hidethinking` | Show/hide a thinking model's reasoning as it streams |
 | `/set tools` / `/set notools` | Let the model call tools (`web_search`), or disable |
+| `/set date` / `/set nodate` | Tell the model today's date, or don't (default: only when tools are on) |
 
 `/set history`, `/set nohistory`, `/set wordwrap`, and `/set nowordwrap` are recognized but don't apply here — this client has no line-history recall and lets your terminal handle wrapping natively, so it prints a note instead of pretending to toggle something.
 
@@ -146,10 +147,20 @@ When the model decides to search, thinai runs the query itself, shows a dimmed `
 
 This needs a model with the `tools` capability (check with `/show info`) — e.g. `llama3.1`, `llama3.2`, `qwen3`, `mistral-nemo`. Models without it make Ollama return an error; turn tools back off with `/set notools`. Small models like `llama3.2:3b` do call the tool, but they're unreliable at using the results well; 8B+ models do noticeably better. It works the same way under `--api openai`, for servers that support OpenAI-style `tools`.
 
+`web_search` takes an optional `recency` argument (`day`, `week`, `month`, or `year`), which limits results to that period via DuckDuckGo's date filter. The model decides when to use it, e.g. for news.
+
 Search is done by DuckDuckGo, with no API key:
 
 1. The official [Instant Answer API](https://api.duckduckgo.com/api) is tried first. It returns encyclopedia-style summaries and direct answers, not web results, so many queries come back empty.
 2. Otherwise, thinai falls back to scraping `html.duckduckgo.com` for the top 8 results (title, URL, snippet). That endpoint is unofficial: it can break if DuckDuckGo changes its markup, and rapid or heavy use gets blocked as automated traffic. When that happens, the model is told the search failed.
+
+### Today's date
+
+Models only know their training cutoff, and many assume it's still that date — `llama3.2`'s template even tells it `Cutting Knowledge Date: December 2023` — so searches for "today's headlines" come back years out of date. To fix this, thinai tells the model the current date (e.g. `Today's date is Tuesday, September 29, 2026.`), both at the start of the system message and in the `web_search` tool description.
+
+The date is added to each outgoing request, not stored in the conversation, so it's always current, and `/save` and `/show system` only ever contain your own system message.
+
+It's on by default whenever tools are on. `--date` or `/set date` turns it on without tools (it also helps with questions like "how long ago was X"); `--no-date` or `/set nodate` turns it off. Under `--api openai`, sending the system message can replace a system prompt the server would otherwise apply by default.
 
 ### `/show`
 

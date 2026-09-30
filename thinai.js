@@ -96,7 +96,8 @@ async function ddgInstantAnswer(query) {
 
 // Unofficial: scrapes html.duckduckgo.com. May break if the markup changes,
 // and heavy use gets rate-limited/CAPTCHA'd.
-async function ddgHtmlSearch(query) {
+// `df` is DuckDuckGo's date filter: 'd' | 'w' | 'm' | 'y', or '' for any time.
+async function ddgHtmlSearch(query, df = '') {
   const res = await fetch('https://html.duckduckgo.com/html/', {
     method: 'POST',
     headers: {
@@ -104,7 +105,7 @@ async function ddgHtmlSearch(query) {
       'Content-Type': 'application/x-www-form-urlencoded',
       'Referer': 'https://html.duckduckgo.com/'
     },
-    body: new URLSearchParams({ q: query, b: '' }),
+    body: new URLSearchParams({ q: query, b: '', df }),
     signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS)
   });
   const html = await res.text();
@@ -131,16 +132,32 @@ async function ddgHtmlSearch(query) {
     .join('\n');
 }
 
-async function webSearch({ query }) {
+// Small models don't always stick to the schema's enum, so unrecognized
+// recency values just mean "any time" rather than an error.
+const RECENCY_FILTERS = { day: 'd', today: 'd', week: 'w', month: 'm', year: 'y' };
+
+async function webSearch({ query, recency }) {
   if (!query || typeof query !== 'string') throw new Error("missing 'query' argument");
-  let instant = '';
-  try {
-    instant = await ddgInstantAnswer(query);
-  } catch (e) {
-    // Fall through to the HTML search.
+  const df = RECENCY_FILTERS[String(recency ?? '').toLowerCase()] || '';
+  // Instant Answers are timeless encyclopedia summaries, so skip them when
+  // the model asked for recent results.
+  if (!df) {
+    let instant = '';
+    try {
+      instant = await ddgInstantAnswer(query);
+    } catch (e) {
+      // Fall through to the HTML search.
+    }
+    if (instant) return instant;
   }
-  if (instant) return instant;
-  return (await ddgHtmlSearch(query)) || `No results found for "${query}".`;
+  return (await ddgHtmlSearch(query, df)) || `No results found for "${query}".`;
+}
+
+// e.g. "Tuesday, September 29, 2026", in the local timezone.
+function formatToday() {
+  return new Date().toLocaleDateString('en-US', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+  });
 }
 
 const TOOLS = {
@@ -149,19 +166,32 @@ const TOOLS = {
     parameters: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'The search query' }
+        query: { type: 'string', description: "The search query, naming the topic (e.g. 'world news headlines'). Use recency for time limits instead of words like 'today'." },
+        recency: {
+          type: 'string',
+          enum: ['day', 'week', 'month', 'year'],
+          description: 'Only return results from the past day, week, month, or year. Use for news and other time-sensitive queries.'
+        }
       },
       required: ['query']
     },
-    describe: (args) => `searching: "${args.query}"`,
+    describe: (args) => `searching: "${args.query}"${RECENCY_FILTERS[args.recency] ? ` (past ${args.recency})` : ''}`,
     run: webSearch
   }
 };
 
-const TOOL_DEFINITIONS = Object.entries(TOOLS).map(([name, tool]) => ({
-  type: 'function',
-  function: { name, description: tool.description, parameters: tool.parameters }
-}));
+// Built per request so the date is current. Small models often weigh the
+// tool definition more than the system prompt, so it carries the date too.
+function toolDefinitions(today) {
+  return Object.entries(TOOLS).map(([name, tool]) => ({
+    type: 'function',
+    function: {
+      name,
+      description: today ? `${tool.description} Today's date is ${today}.` : tool.description,
+      parameters: tool.parameters
+    }
+  }));
+}
 
 // Tool output goes straight back to the model as a 'tool' message; errors are
 // reported the same way so the model can recover or tell the user.
@@ -421,6 +451,24 @@ class OllamaChat {
     this.stopOnExit = Boolean(options.stopOnExit);
     this.api = options.api === 'openai' ? 'openai' : 'ollama';
     this.toolsEnabled = Boolean(options.tools);
+    // undefined = automatic: tell the model today's date whenever tools are on.
+    this.injectDate = options.date;
+  }
+
+  shouldInjectDate() {
+    return this.injectDate ?? this.toolsEnabled;
+  }
+
+  // Models only know their training cutoff (llama3.2's template even states
+  // "Cutting Knowledge Date: December 2023"), so they assume it's still then.
+  // The date goes into the outgoing system message rather than into history,
+  // so it's always current and never ends up in /save or /show system.
+  requestMessages(today) {
+    if (!today) return this.history;
+    const dateLine = `Today's date is ${today}.`;
+    const system = this.getSystemMessage();
+    const rest = system ? this.history.slice(1) : this.history;
+    return [{ role: 'system', content: system ? `${dateLine}\n\n${system}` : dateLine }, ...rest];
   }
 
   // Unloads the current model from Ollama (same effect as `ollama stop`),
@@ -554,16 +602,17 @@ class OllamaChat {
   }
 
   buildOllamaChatBody() {
+    const today = this.shouldInjectDate() ? formatToday() : '';
     const body = {
       model: this.model,
-      messages: this.history,
+      messages: this.requestMessages(today),
       keep_alive: this.keepAlive,
       stream: true
     };
     if (Object.keys(this.options).length > 0) body.options = this.options;
     if (this.format) body.format = this.format;
     if (this.think !== undefined) body.think = this.think;
-    if (this.toolsEnabled) body.tools = TOOL_DEFINITIONS;
+    if (this.toolsEnabled) body.tools = toolDefinitions(today);
     return body;
   }
 
@@ -575,15 +624,16 @@ class OllamaChat {
   // stream_options.include_usage asks for a trailing token-count chunk, used
   // for /set verbose stats; servers that don't support it just ignore it.
   buildOpenAIChatBody() {
+    const today = this.shouldInjectDate() ? formatToday() : '';
     const body = {
       model: this.model,
-      messages: this.history,
+      messages: this.requestMessages(today),
       stream: true,
       stream_options: { include_usage: true },
       ...this.options
     };
     if (this.format === 'json') body.response_format = { type: 'json_object' };
-    if (this.toolsEnabled) body.tools = TOOL_DEFINITIONS;
+    if (this.toolsEnabled) body.tools = toolDefinitions(today);
     return body;
   }
 
@@ -895,6 +945,8 @@ class OllamaChat {
     console.log('  /set hidethinking      Hide thinking output');
     console.log('  /set tools             Let the model call tools (web_search)');
     console.log('  /set notools           Disable tool calling');
+    console.log("  /set date              Tell the model today's date (default: on with tools)");
+    console.log("  /set nodate            Don't tell the model today's date");
     console.log('');
   }
 
@@ -1173,6 +1225,14 @@ class OllamaChat {
         this.toolsEnabled = false;
         console.log("Set 'notools' mode.\n");
         break;
+      case 'date':
+        this.injectDate = true;
+        console.log("Set 'date' mode (the model is told today's date).\n");
+        break;
+      case 'nodate':
+        this.injectDate = false;
+        console.log("Set 'nodate' mode.\n");
+        break;
       case 'history':
       case 'nohistory':
       case 'wordwrap':
@@ -1418,6 +1478,10 @@ function parseArgs() {
       options.hideThinking = true;
     } else if (args[i] === '--tools') {
       options.tools = true;
+    } else if (args[i] === '--date') {
+      options.date = true;
+    } else if (args[i] === '--no-date') {
+      options.date = false;
     } else if (args[i] === '--api') {
       options.api = args[++i];
     } else if (args[i] === '--help') {
@@ -1458,6 +1522,8 @@ Options:
   --tools              Let the model call tools - currently web_search via
                        DuckDuckGo (same as running \`/set tools\`). Needs a
                        tool-capable model (e.g. llama3.1, qwen3).
+  --date, --no-date    Always / never tell the model today's date via the
+                       system message (default: only when tools are on)
   --api <ollama|openai>  Backend API to speak (default: ollama)
                        Use 'openai' for OpenAI-compatible servers (vLLM,
                        llama.cpp server, LM Studio, ...). Ollama-only
