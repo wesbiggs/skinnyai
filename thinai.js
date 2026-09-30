@@ -281,8 +281,28 @@ async function assertPublicUrl(url) {
   }
 }
 
+// Fetches a public URL, following redirects by hand so each hop gets the
+// private-address check.
+async function fetchPublic(target, accept) {
+  let res;
+  for (let hop = 0; ; hop++) {
+    await assertPublicUrl(target);
+    res = await fetch(target, {
+      headers: { ...BROWSER_HEADERS, 'Accept': accept },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+    });
+    const location = res.headers.get('location');
+    if (res.status < 300 || res.status >= 400 || !location) break;
+    if (hop >= MAX_REDIRECTS) throw new Error('too many redirects');
+    target = new URL(location, target);
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${target.href}`);
+  return { res, url: target };
+}
+
 // Reads at most MAX_FETCH_BYTES, so a huge download can't stall the chat.
-async function readCapped(res) {
+async function readCappedBytes(res) {
   const chunks = [];
   let total = 0;
   for await (const chunk of res.body) {
@@ -290,7 +310,11 @@ async function readCapped(res) {
     total += chunk.length;
     if (total >= MAX_FETCH_BYTES) break;
   }
-  const bytes = Buffer.concat(chunks).subarray(0, MAX_FETCH_BYTES);
+  return { bytes: Buffer.concat(chunks).subarray(0, MAX_FETCH_BYTES), truncated: total >= MAX_FETCH_BYTES };
+}
+
+async function readCapped(res) {
+  const { bytes } = await readCappedBytes(res);
   const charset = res.headers.get('content-type')?.match(/charset=["']?([\w-]+)/i)?.[1];
   try {
     return new TextDecoder(charset || 'utf-8').decode(bytes);
@@ -376,22 +400,8 @@ async function fetchPage({ url }) {
   return localFetchPage(target);
 }
 
-async function localFetchPage(target) {
-  // Redirects are followed by hand so each hop gets the private-address check.
-  let res;
-  for (let hop = 0; ; hop++) {
-    await assertPublicUrl(target);
-    res = await fetch(target, {
-      headers: { ...BROWSER_HEADERS, 'Accept': 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5' },
-      redirect: 'manual',
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
-    });
-    const location = res.headers.get('location');
-    if (res.status < 300 || res.status >= 400 || !location) break;
-    if (hop >= MAX_REDIRECTS) throw new Error('too many redirects');
-    target = new URL(location, target);
-  }
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${target.href}`);
+async function localFetchPage(page) {
+  const { res, url: target } = await fetchPublic(page, 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5');
 
   const type = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
   const isHtml = type === 'text/html' || type === 'application/xhtml+xml';
@@ -474,7 +484,7 @@ async function runTool(name, args) {
   }
 }
 
-// *Starred text* is narration in RP-style chats. Each speaker gets its own
+// *Italic text* doubles as narration in RP-style chats. Each speaker gets its own
 // dialogue/narration pair so turns are visually distinct: user = yellow, assistant = green.
 const supportsColor = Boolean(process.stdout.isTTY);
 const ANSI = {
@@ -488,6 +498,13 @@ const ANSI = {
     narration: supportsColor ? '\x1b[38;5;28m' : ''
   }
 };
+
+// Input prompt. Plain text for width math; styledPrompt() for display, read
+// at call time so --user-italic-color applies to it.
+const PROMPT = '> ';
+function styledPrompt() {
+  return ANSI.user.narration + PROMPT + ANSI.reset;
+}
 
 // Basic 16-color names, for --*-color flags. 'gray'/'grey' alias brightblack.
 const NAMED_COLORS = {
@@ -537,141 +554,229 @@ function applyColorOverrides(options) {
   if (options.modelEmphasisColor) ANSI.assistant.narration = parseColor(options.modelEmphasisColor, '--model-emphasis-color');
 }
 
-// Converts '*narration*' spans into colored, asterisk-free text. Stateful across
-// calls so streamed chunks that split a '*' pair still toggle correctly.
-function createStyler(role) {
+// Inline code, code blocks, and fence/rule/quote chrome get fixed colors of
+// their own, independent of the per-speaker palette.
+const CODE_COLOR = supportsColor ? '\x1b[38;5;117m' : '';
+const CHROME_COLOR = supportsColor ? '\x1b[38;5;244m' : '';
+
+const SGR_PATTERN = /\x1b\[[0-9;]*m/g;
+// SGR styles plus OSC 8 hyperlink open/close - everything that takes no columns.
+const ESCAPE_PATTERN = /\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*\x1b\\/g;
+
+// OSC 8 hyperlinks: terminals that support them (iTerm2, WezTerm, kitty,
+// GNOME Terminal, Windows Terminal, ...) make the text clickable; others
+// ignore the sequence and just show the text.
+const linkOpen = (url) => `\x1b]8;;${url}\x1b\\`;
+const LINK_CLOSE = '\x1b]8;;\x1b\\';
+// Markdown [text](url), for links that arrive whole (table cells).
+// A leading '!' (an image) is dropped: cells show images as links.
+const LINK_PATTERN = /!?\[([^\]]*)\]\(([^)\s]+)\)/g;
+
+// Terminal column width of one code point: 0 for combining marks and
+// zero-width joiners/variation selectors, 2 for East Asian wide characters,
+// 1 otherwise. Rough, but covers what models commonly emit.
+function charWidth(cp) {
+  if ((cp >= 0x300 && cp <= 0x36f) || (cp >= 0x200b && cp <= 0x200f) || (cp >= 0xfe00 && cp <= 0xfe0f) ||
+      (cp >= 0x1f3fb && cp <= 0x1f3ff)) return 0; // last: skin tone modifiers
+  if ((cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) ||
+      (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe30 && cp <= 0xfe4f) || (cp >= 0xff00 && cp <= 0xff60) ||
+      (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x20000 && cp <= 0x3fffd)) return 2;
+  return 1;
+}
+
+// Emoji are measured per grapheme cluster (what the terminal draws as one
+// glyph), since one can span several code points: ⚠️ is ⚠ plus a variation
+// selector, flags are two regional indicators, and 👩‍💻 is joined with a ZWJ.
+// Anything drawn as a color emoji takes 2 columns: characters that default
+// to emoji presentation (✅, ❌, 🚀, flags), and text-default ones like ⚠ or
+// digits when followed by the U+FE0F emoji selector.
+const graphemes = new Intl.Segmenter();
+const EMOJI_GLYPH = /^\p{Emoji_Presentation}|^\p{Emoji}️|‍\p{Extended_Pictographic}/u;
+
+function graphemeWidth(cluster) {
+  if (EMOJI_GLYPH.test(cluster)) return 2;
+  let width = 0;
+  for (const ch of cluster) width += charWidth(ch.codePointAt(0));
+  return width;
+}
+
+// Printed width of a string, ignoring escape sequences.
+function visibleWidth(text) {
+  let width = 0;
+  for (const { segment } of graphemes.segment(text.replace(ESCAPE_PATTERN, ''))) width += graphemeWidth(segment);
+  return width;
+}
+
+// Renders inline markdown within one word (or one whole table cell) at a
+// time: **bold**, *italic* / _italic_, ~~strike~~, `code`, and \-escapes.
+// Italic also switches to the role's narration color, so RP-style
+// '*narration*' keeps its distinct look. State carries across calls, so a
+// span can cover several words; endLine() drops it, so an unclosed marker
+// can't bleed into the next paragraph. Every SGR it emits is a full reset
+// plus the current state, so any emitted sequence alone restores the style.
+function createInlineStyler(role) {
   const colors = ANSI[role];
-  let inNarration = false;
+  let bold = false;
+  let italic = false;
+  let strike = false;
+  let codeRun = 0; // length of the backtick run that opened the current code span
+  let lineBold = false; // headings/table headers
+  let link = false; // underlined while inside a [link](url)
 
-  return function style(text) {
-    let out = '';
-    for (const ch of text) {
-      if (ch === '*') {
-        inNarration = !inNarration;
-        out += inNarration ? colors.narration : colors.dialogue;
-      } else {
-        out += ch;
-      }
-    }
-    return out;
-  };
-}
-
-function styleLine(role, text) {
-  return ANSI[role].dialogue + createStyler(role)(text) + ANSI.reset;
-}
-
-// A '*' at the start of a line (ignoring leading whitespace) with no closing
-// '*' later on that same line is a markdown list bullet, not narration -
-// replace it with a bullet glyph so it doesn't get misread as *narration*.
-// Operates on raw text, ahead of the narration styler/word-wrapper, so a
-// substituted bullet is just a plain character to everything downstream.
-// Only lines that open with '*' get buffered (to look ahead for a closing
-// '*'); ordinary text is forwarded to `sink` immediately, unbuffered.
-function createBulletFilter(sink) {
-  const BULLET = '•';
-  let atLineStart = true;
-  let leadingWhitespace = '';
-  let buffering = false;
-  let buffer = '';
-  let plain = '';
-
-  function flushPlain() {
-    if (plain) {
-      sink(plain);
-      plain = '';
-    }
+  function sgr() {
+    if (!supportsColor) return '';
+    const color = codeRun ? CODE_COLOR : italic ? colors.narration : colors.dialogue;
+    const params = ['0', color.slice(2, -1)];
+    if (bold || lineBold) params.push('1');
+    if (italic) params.push('3');
+    if (strike) params.push('9');
+    if (link) params.push('4');
+    return `\x1b[${params.join(';')}m`;
   }
 
-  function finalizeBuffer(hasClosingAsterisk) {
-    sink(hasClosingAsterisk ? buffer : buffer.replace('*', BULLET));
-    buffer = '';
-    buffering = false;
+  const isSpace = (ch) => ch === undefined || /\s/.test(ch);
+  const isWordChar = (ch) => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
+
+  function style(text) {
+    const chars = Array.from(text);
+    let out = '';
+    for (let i = 0; i < chars.length; i++) {
+      const ch = chars[i];
+      let run = 1;
+      while (chars[i + run] === ch) run++;
+
+      if (codeRun) {
+        if (ch === '`' && run === codeRun) {
+          codeRun = 0;
+          out += sgr();
+          i += run - 1;
+        } else {
+          out += ch;
+        }
+        continue;
+      }
+
+      if (ch === '\\' && i + 1 < chars.length && /[\\`*_~|#[\]()<>-]/.test(chars[i + 1])) {
+        out += chars[++i];
+        continue;
+      }
+
+      if (ch === '`') {
+        codeRun = run;
+        out += sgr();
+        i += run - 1;
+        continue;
+      }
+
+      if (ch === '*' || ch === '_' || (ch === '~' && run === 2)) {
+        const prev = chars[i - 1];
+        const next = chars[i + run];
+        let canOpen = !isSpace(next);
+        let canClose = !isSpace(prev);
+        if (ch === '_') {
+          // snake_case and the like: underscores inside a word are literal.
+          canOpen = canOpen && !isWordChar(prev);
+          canClose = canClose && !isWordChar(next);
+        }
+        // A marker closes a span that's on, or opens one that's off.
+        const toggle = (on) => (on ? canClose : canOpen);
+
+        let remaining = run;
+        let consumed = 0;
+        if (ch === '~') {
+          if (toggle(strike)) {
+            strike = !strike;
+            consumed = 2;
+          }
+        } else {
+          if (remaining >= 2 && toggle(bold)) {
+            bold = !bold;
+            remaining -= 2;
+            consumed += 2;
+          }
+          if (remaining >= 1 && toggle(italic)) {
+            italic = !italic;
+            consumed += 1;
+          }
+        }
+        if (consumed > 0) out += sgr();
+        out += ch.repeat(run - consumed);
+        i += run - 1;
+        continue;
+      }
+
+      out += ch;
+    }
+    return out;
   }
 
   return {
-    write(text) {
-      for (const ch of text) {
-        if (buffering) {
-          if (ch === '*') {
-            buffer += ch;
-            finalizeBuffer(true);
-          } else if (ch === '\n') {
-            finalizeBuffer(false);
-            plain += '\n';
-            atLineStart = true;
-          } else {
-            buffer += ch;
-          }
-          continue;
-        }
-
-        if (atLineStart) {
-          if (ch === ' ' || ch === '\t') {
-            leadingWhitespace += ch;
-            continue;
-          }
-          if (ch === '*') {
-            flushPlain();
-            buffering = true;
-            buffer = leadingWhitespace + ch;
-            leadingWhitespace = '';
-            atLineStart = false;
-            continue;
-          }
-          plain += leadingWhitespace;
-          leadingWhitespace = '';
-          atLineStart = false;
-          // fall through to plain handling below
-        }
-
-        plain += ch;
-        if (ch === '\n') {
-          atLineStart = true;
-        }
-      }
-      flushPlain();
+    style,
+    sgr,
+    setLink(on) {
+      link = on;
     },
-    end() {
-      if (buffering) {
-        finalizeBuffer(false); // stream ended - no closing '*' is coming
-      }
-      plain += leadingWhitespace;
-      leadingWhitespace = '';
-      flushPlain();
+    setLineBold(on) {
+      lineBold = on;
+    },
+    endLine() {
+      bold = italic = strike = lineBold = link = false;
+      codeRun = 0;
     }
   };
+}
+
+// Styles a line (or several, split on '\n') of user input for echoing back.
+function styleLine(role, text) {
+  return text.split('\n').map((line) => {
+    const styler = createInlineStyler(role);
+    return styler.sgr() + styler.style(line);
+  }).join('\n') + ANSI.reset;
 }
 
 // Word-wraps text at the terminal width as it's written, so long lines break
 // on a space instead of relying on the terminal's own mid-word hard wrap.
-// `style` is a stateful per-character styler (see createStyler) applied to
-// each word once its width is known; spaces/newlines pass through as-is.
+// `style` is a stateful styler (see createInlineStyler) applied to each whole
+// word; its width is measured after styling, so markup characters don't count.
+// raw() writes a prefix (list marker, indentation) that isn't wrapped, and
+// setHang() sets what continuation lines start with, for hanging indents.
+// setLink() makes each following word a hyperlink: `link.open()` is written
+// just before each word is styled (so it can capture the style state going
+// in) and `link.close` just after.
 // Only wraps on a real TTY - piped/redirected output is left unwrapped.
-function createWordWrapper(style, startColumn = 0) {
+function createWordWrapper(style, startColumn = 0, emit = (text) => process.stdout.write(text)) {
   if (!process.stdout.isTTY) {
-    return { write: (text) => process.stdout.write(style(text)), end() {} };
+    return { write: (text) => emit(style(text)), raw: emit, setHang() {}, setLink() {}, end() {} };
   }
 
   const columns = process.stdout.columns || 80;
   let column = startColumn;
   let pending = '';
+  let spaceBefore = false;
+  let hang = '';
+  let link = null;
 
   function flushWord() {
     if (!pending) return;
-    const wordLen = pending.length;
-    if (column > 0) {
-      if (column + 1 + wordLen > columns) {
-        process.stdout.write('\n');
-        column = 0;
+    const open = link ? link.open() : '';
+    const styled = style(pending);
+    const width = visibleWidth(styled);
+    const hangWidth = visibleWidth(hang);
+    if (column > 0 && spaceBefore) {
+      if (column + 1 + width > columns && column > hangWidth) {
+        emit('\n' + hang);
+        column = hangWidth;
       } else {
-        process.stdout.write(' ');
+        emit(' ');
         column += 1;
       }
     }
-    process.stdout.write(style(pending));
-    column += wordLen;
+    emit(link ? open + styled + link.close : styled);
+    column += width;
+    // A word wider than the terminal gets hard-wrapped by the terminal itself.
+    if (column > columns) column %= columns;
     pending = '';
+    spaceBefore = false;
   }
 
   return {
@@ -679,14 +784,33 @@ function createWordWrapper(style, startColumn = 0) {
       for (const ch of text) {
         if (ch === '\n') {
           flushWord();
-          process.stdout.write('\n');
+          emit('\n');
           column = 0;
+          spaceBefore = false;
+          hang = '';
         } else if (ch === ' ' || ch === '\t') {
           flushWord();
+          spaceBefore = true;
         } else {
           pending += ch;
         }
       }
+    },
+    raw(text) {
+      flushWord();
+      emit(text);
+      const width = visibleWidth(text);
+      if (width > 0) {
+        column += width;
+        spaceBefore = false;
+      }
+    },
+    setHang(prefix) {
+      hang = prefix;
+    },
+    setLink(value) {
+      flushWord();
+      link = value;
     },
     end() {
       flushWord();
@@ -694,16 +818,578 @@ function createWordWrapper(style, startColumn = 0) {
   };
 }
 
-// Rows a prompt label + (possibly multi-line, possibly wrapped) text will occupy
-// in the terminal, so we know how far to move up to erase and redraw it.
-function computeRows(promptLabel, text) {
+// Splits a markdown table row into trimmed cell strings, honoring \| escapes
+// and pipes inside `code`.
+function splitTableRow(line) {
+  let text = line.trim();
+  if (text.startsWith('|')) text = text.slice(1);
+  if (text.endsWith('|') && !text.endsWith('\\|')) text = text.slice(0, -1);
+  const cells = [];
+  let cell = '';
+  let inCode = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\\' && text[i + 1] === '|') {
+      cell += '|';
+      i++;
+    } else if (ch === '`') {
+      inCode = !inCode;
+      cell += ch;
+    } else if (ch === '|' && !inCode) {
+      cells.push(cell.trim());
+      cell = '';
+    } else {
+      cell += ch;
+    }
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+// Wraps an already-styled string to `width` columns, returning its lines.
+// Each line starts with the SGR state in effect where it begins, so it can be
+// printed on its own (e.g. between table borders). Words wider than `width`
+// are hard-broken.
+function wrapStyled(styled, width) {
+  const lines = [];
+  let line = '';
+  let lineWidth = 0;
+  let state = '';
+
+  const place = (piece, pieceWidth, pieceState) => {
+    if (lineWidth > 0 && lineWidth + 1 + pieceWidth > width) {
+      lines.push(line);
+      line = '';
+      lineWidth = 0;
+    }
+    if (lineWidth > 0) {
+      line += ' ';
+      lineWidth += 1;
+    } else {
+      line = pieceState;
+    }
+    line += piece;
+    lineWidth += pieceWidth;
+  };
+
+  for (const word of styled.split(' ')) {
+    if (visibleWidth(word) <= width) {
+      const wordState = state;
+      for (const m of word.matchAll(SGR_PATTERN)) state = m[0];
+      if (word.replace(ESCAPE_PATTERN, '')) place(word, visibleWidth(word), wordState);
+      else line += word;
+      continue;
+    }
+    // Hard-break an overlong word, one code point or SGR sequence at a time.
+    let piece = '';
+    let pieceWidth = 0;
+    let pieceState = state;
+    const tokens = word.split(/(\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*\x1b\\)/)
+      .flatMap((part) => (part.startsWith('\x1b') ? [part] : Array.from(graphemes.segment(part), (g) => g.segment)));
+    for (const token of tokens) {
+      if (token.startsWith('\x1b')) {
+        piece += token;
+        if (token.startsWith('\x1b[')) state = token;
+        continue;
+      }
+      const w = graphemeWidth(token);
+      if (pieceWidth + w > width && pieceWidth > 0) {
+        place(piece, pieceWidth, pieceState);
+        piece = '';
+        pieceWidth = 0;
+        pieceState = state;
+      }
+      piece += token;
+      pieceWidth += w;
+    }
+    if (pieceWidth > 0) place(piece, pieceWidth, pieceState);
+  }
+  lines.push(line);
+  return lines;
+}
+
+// Draws buffered markdown table rows with box-drawing borders. Columns are
+// sized to their content, shrinking the widest ones (and wrapping their
+// cells) when the table would be wider than the terminal.
+function renderTable(rows, role) {
+  const parsed = rows.map(splitTableRow);
+  const isSeparator = (cells) => cells.every((c) => /^:?-+:?$/.test(c));
+  let header = null;
+  let aligns = [];
+  if (parsed.length >= 2 && isSeparator(parsed[1])) {
+    header = parsed[0];
+    aligns = parsed[1].map((c) => (c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : 'left'));
+  }
+  const body = (header ? parsed.slice(2) : parsed).filter((cells) => !isSeparator(cells));
+  const allRows = header ? [header, ...body] : body;
+  const count = Math.max(...allRows.map((cells) => cells.length));
+
+  // Each word of a link's text is its own hyperlink, so a cell that wraps
+  // never leaves one open across the borders drawn between its lines.
+  const styleCell = (text, bold) => {
+    const styler = createInlineStyler(role);
+    styler.setLineBold(bold);
+    let out = styler.sgr();
+    let last = 0;
+    for (const m of text.matchAll(LINK_PATTERN)) {
+      out += styler.style(text.slice(last, m.index));
+      styler.setLink(true);
+      out += m[1].split(' ').map((word) => linkOpen(m[2]) + styler.sgr() + styler.style(word) + LINK_CLOSE).join(' ');
+      styler.setLink(false);
+      out += styler.sgr();
+      last = m.index + m[0].length;
+    }
+    return out + styler.style(text.slice(last));
+  };
+  const styledRows = allRows.map((cells, r) =>
+    Array.from({ length: count }, (_, c) => styleCell(cells[c] ?? '', header !== null && r === 0)));
+
+  const widths = Array.from({ length: count }, (_, c) =>
+    Math.max(1, ...styledRows.map((cells) => visibleWidth(cells[c]))));
+  const available = (process.stdout.columns || 80) - (3 * count + 1);
+  const MIN_WIDTH = 3;
+  while (widths.reduce((a, b) => a + b, 0) > available) {
+    const widest = widths.indexOf(Math.max(...widths));
+    if (widths[widest] <= MIN_WIDTH) break;
+    widths[widest]--;
+  }
+
+  const border = CHROME_COLOR || ANSI[role].dialogue;
+  const edge = (left, mid, right) =>
+    ANSI.reset + border + left + widths.map((w) => '─'.repeat(w + 2)).join(mid) + right + ANSI.reset + '\n';
+  const pad = (text, width, align) => {
+    const gap = width - visibleWidth(text);
+    const left = align === 'right' ? gap : align === 'center' ? Math.floor(gap / 2) : 0;
+    return ' '.repeat(left) + text + ANSI.reset + ' '.repeat(gap - left);
+  };
+  const row = (cells) => {
+    const wrapped = cells.map((cell, c) => wrapStyled(cell, widths[c]));
+    const height = Math.max(...wrapped.map((lines) => lines.length));
+    let out = '';
+    for (let i = 0; i < height; i++) {
+      out += ANSI.reset + border + '│';
+      wrapped.forEach((lines, c) => {
+        out += ' ' + pad(lines[i] ?? '', widths[c], aligns[c]) + border + ' │';
+      });
+      out += ANSI.reset + '\n';
+    }
+    return out;
+  };
+
+  let out = edge('┌', '┬', '┐');
+  styledRows.forEach((cells, r) => {
+    out += row(cells);
+    if (header && r === 0 && styledRows.length > 1) out += edge('├', '┼', '┤');
+  });
+  out += edge('└', '┴', '┘');
+  return out;
+}
+
+// Inline images, for markdown ![alt](url). Two escape-sequence protocols
+// cover the terminals that can draw them: iTerm2's (the one imgcat uses;
+// also WezTerm) and kitty's graphics protocol (kitty, Ghostty). Returns
+// null for other terminals, and inside tmux/screen, which don't pass these
+// sequences through.
+function detectImageProtocol() {
+  const env = process.env;
+  if (!process.stdout.isTTY || env.TMUX || /^screen/.test(env.TERM || '')) return null;
+  if (env.TERM_PROGRAM === 'iTerm.app' || env.LC_TERMINAL === 'iTerm2' || env.TERM_PROGRAM === 'WezTerm') return 'iterm';
+  if (env.TERM === 'xterm-kitty' || env.KITTY_WINDOW_ID || env.TERM_PROGRAM === 'ghostty') return 'kitty';
+  return null;
+}
+const IMAGE_PROTOCOL = detectImageProtocol();
+
+// Identifies an image by its magic bytes and reads its pixel size.
+// Returns null for anything that isn't a PNG, GIF, JPEG, or WebP.
+function sniffImage(bytes) {
+  if (bytes.length >= 24 && bytes.readUInt32BE(0) === 0x89504e47) {
+    return { format: 'png', width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  }
+  if (bytes.length >= 10 && bytes.toString('latin1', 0, 4) === 'GIF8') {
+    return { format: 'gif', width: bytes.readUInt16LE(6), height: bytes.readUInt16LE(8) };
+  }
+  if (bytes.length >= 12 && bytes.toString('latin1', 0, 4) === 'RIFF' && bytes.toString('latin1', 8, 12) === 'WEBP') {
+    return { format: 'webp' }; // size varies by encoding; not needed to draw it
+  }
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    // Walk the JPEG segments to the start-of-frame, which holds the size.
+    for (let i = 2; i + 9 < bytes.length;) {
+      if (bytes[i] !== 0xff) break;
+      const marker = bytes[i + 1];
+      if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
+        return { format: 'jpeg', width: bytes.readUInt16BE(i + 7), height: bytes.readUInt16BE(i + 5) };
+      }
+      i += 2 + bytes.readUInt16BE(i + 2);
+    }
+    return { format: 'jpeg' };
+  }
+  return null;
+}
+
+// Fetches an image from an http(s) or data: URL. Web images get the same
+// guards as fetch_page: public addresses only, and a size cap.
+async function loadImage(url) {
+  let bytes;
+  const data = /^data:image\/[\w.+-]+;base64,(.*)$/is.exec(url);
+  if (data) {
+    bytes = Buffer.from(data[1], 'base64');
+  } else {
+    const { res } = await fetchPublic(new URL(url), 'image/png,image/jpeg,image/gif,image/webp;q=0.9,image/*;q=0.5');
+    const read = await readCappedBytes(res);
+    if (read.truncated) throw new Error(`larger than ${MAX_FETCH_BYTES / 1024 / 1024} MB`);
+    bytes = read.bytes;
+  }
+  const info = sniffImage(bytes);
+  if (!info) throw new Error('not a PNG, JPEG, GIF, or WebP image');
+  return { bytes, ...info };
+}
+
+// Escape sequence that draws an image at the cursor, scaled down to fit
+// the terminal width and at most ~60% of its height, followed by a newline.
+// Pixel-to-cell conversion assumes a typical 8x16 cell, since terminals
+// don't report their cell size in a way Node can read.
+function imageSequence(image) {
   const columns = process.stdout.columns || 80;
-  const prefixLen = promptLabel.length;
-  const lines = text.split('\n');
-  return lines.reduce((total, line, i) => {
-    const len = (i === 0 ? prefixLen : 0) + line.length;
-    return total + Math.max(1, Math.ceil(len / columns));
-  }, 0);
+  const maxRows = Math.max(4, Math.min(30, Math.floor((process.stdout.rows || 40) * 0.6)));
+  let rows = maxRows;
+  if (image.width && image.height) {
+    const cols = Math.ceil(image.width / 8);
+    const natural = Math.ceil(image.height / 16);
+    rows = Math.max(1, Math.round(natural * Math.min(1, maxRows / natural, columns / cols)));
+  }
+  const base64 = image.bytes.toString('base64');
+  if (IMAGE_PROTOCOL === 'iterm') {
+    return `\x1b]1337;File=inline=1;size=${image.bytes.length};height=${rows};preserveAspectRatio=1:${base64}\x07\n`;
+  }
+  // kitty: PNG only (f=100), sent in 4 KB chunks; q=2 stops the terminal
+  // from answering on stdin, where the replies would look like keystrokes.
+  let out = '';
+  for (let i = 0; i < base64.length; i += 4096) {
+    const more = i + 4096 < base64.length ? 1 : 0;
+    const keys = i === 0 ? `a=T,f=100,q=2,r=${rows},m=${more}` : `m=${more}`;
+    out += `\x1b_G${keys};${base64.slice(i, i + 4096)}\x1b\\`;
+  }
+  return out + '\n';
+}
+
+// Loads and draws images queued by the markdown renderer. Failures are
+// reported in place of the image rather than interrupting the response.
+async function showImages(images) {
+  for (const { url } of images) {
+    try {
+      const image = await loadImage(url);
+      if (IMAGE_PROTOCOL === 'kitty' && image.format !== 'png') {
+        throw new Error(`this terminal's image protocol only takes PNG (got ${image.format.toUpperCase()})`);
+      }
+      process.stdout.write(imageSequence(image));
+    } catch (error) {
+      process.stdout.write(`${CHROME_COLOR}   (couldn't show image: ${error.message})${ANSI.reset}\n`);
+    }
+  }
+}
+
+// Streams markdown to the terminal as it arrives: inline styling (see
+// createInlineStyler), word wrapping, headings, bullet and numbered lists
+// with hanging indents, block quotes, horizontal rules, fenced code blocks,
+// tables, [links](url) as clickable OSC 8 hyperlinks, and - with `images`
+// on - ![images](url) drawn inline after the line that mentions them. Each
+// line's first few characters are held back until they say what kind of
+// line it is; the rest streams through word by word. Tables are the
+// exception - they're buffered whole (with a progress placeholder), since
+// every column's width depends on every row. With `markdown` off (/set
+// nomarkdown), or when stdout isn't a TTY, the text passes through raw, so
+// it's still valid markdown. write() and end() are async only so they can
+// wait for images to load; await them.
+function createMarkdownRenderer(role, startColumn = 0, { markdown = true, images = false } = {}) {
+  if (!markdown || !process.stdout.isTTY) {
+    return { write: async (text) => { process.stdout.write(text); }, async end() {} };
+  }
+
+  let out = '';
+  const emit = (text) => { out += text; };
+  const flush = () => {
+    if (out) process.stdout.write(out);
+    out = '';
+  };
+
+  const styler = createInlineStyler(role);
+  const wrapper = createWordWrapper(styler.style, startColumn, emit);
+  const columns = process.stdout.columns || 80;
+
+  let mode = 'start'; // 'start' (classifying line) | 'text' | 'code' | 'table' | 'fence'
+  let head = '';
+  let inFence = false;
+  let tableRows = [];
+  let inCode = false; // inside an inline `code` span, where [x](y) isn't a link
+  let link = null; // { text, url, image, phase: 'text' | 'paren' | 'url' } while a link is arriving
+  let bang = false; // held-back '!' that may start an ![image](url)
+  const queuedImages = []; // drawn once the current line ends
+  const drawImages = images && IMAGE_PROTOCOL !== null;
+
+  // Decides what kind of line `head` begins, or returns null if more
+  // characters are needed to tell. `complete` means the line has ended.
+  function classify(complete) {
+    const indent = /^[ \t]*/.exec(head)[0];
+    const rest = head.slice(indent.length);
+    const need = (pattern) => !complete && pattern.test(rest);
+    let m;
+
+    if (inFence) {
+      if (need(/^`{0,2}$/)) return null;
+      return rest.startsWith('```') ? { type: 'fence' } : { type: 'code' };
+    }
+    if (need(/^$/) || need(/^`{1,2}$/) || need(/^#{1,6}$/) || need(/^\d{1,3}[.)]?$/) || need(/^>$/) ||
+        need(/^([-*_])(\s*\1)*\s*$/)) {
+      return null;
+    }
+    if (rest.startsWith('|')) return { type: 'table' };
+    if (rest.startsWith('```')) return { type: 'fence' };
+    if (/^([-*_])(\s*\1){2,}\s*$/.test(rest)) return { type: 'rule', indent };
+    if ((m = /^#{1,6} +/.exec(rest))) return { type: 'heading', indent, content: rest.slice(m[0].length) };
+    if ((m = /^(\d{1,3}[.)]) +/.exec(rest))) return { type: 'list', indent, marker: m[1], content: rest.slice(m[0].length) };
+    if ((m = /^[-*+] +/.exec(rest))) return { type: 'list', indent, marker: indent ? '◦' : '•', content: rest.slice(m[0].length) };
+    if ((m = /^> ?/.exec(rest))) return { type: 'quote', indent, content: rest.slice(m[0].length) };
+    return { type: 'text', indent, content: rest };
+  }
+
+  // Shown in place of a table while its rows arrive; the table overwrites it.
+  function showTableProgress() {
+    const rows = tableRows.filter((row) => !/^[\s|:-]*$/.test(row)).length;
+    const label = rows ? `⋯ receiving table (${rows} row${rows === 1 ? '' : 's'})` : '⋯ receiving table';
+    emit(`\r\x1b[2K${CHROME_COLOR || ''}${label}${ANSI.reset}`);
+  }
+
+  function flushTable() {
+    if (tableRows.length === 0) return;
+    emit('\r\x1b[2K');
+    emit(renderTable(tableRows, role));
+    emit(styler.sgr());
+    tableRows = [];
+  }
+
+  function begin(line) {
+    if (line.type !== 'table') flushTable();
+    switch (line.type) {
+      case 'table':
+        if (tableRows.length === 0) showTableProgress();
+        mode = line.type;
+        return;
+      case 'fence':
+        mode = line.type;
+        return;
+      case 'code':
+        wrapper.raw(CODE_COLOR + head);
+        mode = 'code';
+        return;
+      case 'rule':
+        wrapper.raw(line.indent + CHROME_COLOR + '─'.repeat(Math.max(3, columns - visibleWidth(line.indent))) + styler.sgr());
+        break;
+      case 'heading':
+        wrapper.raw(line.indent);
+        styler.setLineBold(true);
+        wrapper.raw(styler.sgr());
+        wrapper.setHang(line.indent);
+        break;
+      case 'list': {
+        const prefix = `${line.indent}${line.marker} `;
+        wrapper.raw(prefix);
+        wrapper.setHang(' '.repeat(visibleWidth(prefix)));
+        break;
+      }
+      case 'quote': {
+        const bar = CHROME_COLOR + '│ ' + styler.sgr();
+        wrapper.raw(line.indent + bar);
+        wrapper.setHang(line.indent + bar);
+        break;
+      }
+      default:
+        wrapper.raw(line.indent);
+        wrapper.setHang(line.indent);
+    }
+    mode = 'text';
+    for (const ch of line.content ?? '') text(ch);
+  }
+
+  // Inline text, watching for [text](url). A candidate link is held back
+  // until it either completes - and is written as a hyperlink - or turns
+  // out not to be one, and is written as the plain text it was.
+  function text(ch) {
+    if (!link) {
+      const image = bang;
+      if (bang && ch !== '[') wrapper.write('!');
+      bang = false;
+      if (ch === '`') inCode = !inCode;
+      if (ch === '!' && !inCode) {
+        bang = true;
+      } else if (ch === '[' && !inCode) {
+        link = { text: '', url: '', image, phase: 'text' };
+      } else {
+        wrapper.write(ch);
+      }
+      return;
+    }
+    if (link.phase === 'text' && ch === ']') {
+      link.phase = 'paren';
+    } else if (link.phase === 'text' && ch !== '[' && link.text.length < 500) {
+      link.text += ch;
+    } else if (link.phase === 'paren' && ch === '(') {
+      link.phase = 'url';
+    } else if (link.phase === 'url' && ch === ')') {
+      writeLink(link.text, link.url, link.image);
+      link = null;
+    } else if (link.phase === 'url' && !/\s/.test(ch) && link.url.length < (link.url.startsWith('data:') ? MAX_FETCH_BYTES * 2 : 2000)) {
+      link.url += ch;
+    } else {
+      abandonLink();
+      text(ch);
+    }
+  }
+
+  function abandonLink() {
+    if (!link) return;
+    const { text: linkText, url, image, phase } = link;
+    link = null;
+    wrapper.write(image ? '![' : '[');
+    for (const ch of linkText) text(ch);
+    if (phase !== 'text') text(']');
+    if (phase === 'url') for (const ch of '(' + url) text(ch);
+  }
+
+  function flushPending() {
+    abandonLink();
+    if (bang) wrapper.write('!');
+    bang = false;
+  }
+
+  function writeLink(linkText, url, image) {
+    if (image) {
+      // Images show as a clickable caption; the picture itself follows the line.
+      const drawable = drawImages && /^(https?:|data:image\/)/i.test(url);
+      if (drawable) queuedImages.push({ url });
+      linkText = `🖼  ${linkText || (drawable ? 'image' : url)}`;
+      if (/^data:/i.test(url)) {
+        wrapper.write(linkText);
+        return;
+      }
+    }
+    // Only web/mail/file links; anything else is shown as plain text.
+    if (!/^(https?|mailto|ftp|file):/i.test(url)) {
+      wrapper.write(linkText);
+      return;
+    }
+    const target = url.replace(/[\x00-\x1f\x7f]/g, '');
+    styler.setLink(true);
+    wrapper.setLink({ open: () => linkOpen(target) + styler.sgr(), close: LINK_CLOSE });
+    wrapper.write(linkText);
+    wrapper.setLink(null);
+    styler.setLink(false);
+    wrapper.raw(styler.sgr());
+  }
+
+  function endLine() {
+    flushPending();
+    inCode = false;
+    if (mode === 'table') {
+      tableRows.push(head);
+      showTableProgress();
+    } else if (mode === 'fence') {
+      emit(CHROME_COLOR + head + '\n');
+      inFence = !inFence;
+    } else {
+      wrapper.write('\n');
+    }
+    styler.endLine();
+    emit(styler.sgr());
+    mode = 'start';
+    head = '';
+  }
+
+  function handle(ch) {
+    if (ch === '\r') return;
+    if (mode === 'start') {
+      if (ch === '\n') {
+        begin(classify(true));
+        endLine();
+        return;
+      }
+      head += ch;
+      const line = classify(false);
+      if (line) begin(line);
+      return;
+    }
+    if (ch === '\n') {
+      endLine();
+    } else if (mode === 'table' || mode === 'fence') {
+      head += ch;
+    } else if (mode === 'code') {
+      wrapper.raw(ch);
+    } else {
+      text(ch);
+    }
+  }
+
+  async function drawQueuedImages() {
+    flush();
+    await showImages(queuedImages.splice(0));
+    emit(styler.sgr());
+  }
+
+  return {
+    async write(text) {
+      for (const ch of text) {
+        handle(ch);
+        if (queuedImages.length && mode === 'start') await drawQueuedImages();
+      }
+      flush();
+    },
+    async end() {
+      if (mode === 'start' && head) begin(classify(true));
+      flushPending();
+      if (mode === 'table') {
+        tableRows.push(head);
+      } else if (mode === 'fence') {
+        emit(CHROME_COLOR + head);
+      }
+      flushTable();
+      wrapper.end();
+      if (queuedImages.length) {
+        emit('\n');
+        await drawQueuedImages();
+      }
+      emit(ANSI.reset);
+      flush();
+    }
+  };
+}
+
+// Where the terminal cursor ends up after printing PROMPT + text from the
+// start of a row, as { row, col } relative to the prompt's row. Accounts for
+// embedded newlines, soft wrapping at the terminal width, and wide
+// characters. Text that exactly fills a row leaves the real cursor parked at
+// the right edge ("pending wrap"); that's reported as the start of the next
+// row, with `pending` set so the caller can nudge the cursor there.
+function inputPosition(text) {
+  const columns = process.stdout.columns || 80;
+  let row = 0;
+  let col = visibleWidth(PROMPT);
+  let pending = false;
+  for (const { segment: ch } of graphemes.segment(text)) {
+    if (ch === '\n') {
+      row++;
+      col = 0;
+      pending = false;
+      continue;
+    }
+    const width = graphemeWidth(ch);
+    if (pending || col + width > columns) {
+      row++;
+      col = 0;
+      pending = false;
+    }
+    col += width;
+    if (col >= columns) pending = true;
+  }
+  return pending ? { row: row + 1, col: 0, pending } : { row, col, pending };
 }
 
 class OllamaChat {
@@ -722,6 +1408,12 @@ class OllamaChat {
     this.toolsEnabled = Boolean(options.tools);
     // undefined = automatic: tell the model today's date whenever tools are on.
     this.injectDate = options.date;
+    this.markdown = options.markdown !== false;
+    // Off by default: drawing an image means fetching whatever URL the model
+    // wrote, and a prompt injection (say, in a page fetch_page read) could
+    // use that to send conversation details to a server in the URL.
+    this.images = Boolean(options.images) && IMAGE_PROTOCOL !== null;
+    this.inputHistory = []; // submitted messages/commands, for Up/Down recall
   }
 
   shouldInjectDate() {
@@ -810,7 +1502,7 @@ class OllamaChat {
     this.think = undefined;
 
     if (messages.length > 0) {
-      this.printRestoredHistory(messages);
+      await this.printRestoredHistory(messages);
     }
     return true;
   }
@@ -823,31 +1515,33 @@ class OllamaChat {
     }
   }
 
-  printRestoredHistory(messages) {
+  async printRestoredHistory(messages) {
     console.log(`📜 Restored conversation from '${this.model}':\n`);
 
     for (const message of messages) {
       if (message.role === 'system') {
         console.log(`💬 System: ${message.content}\n`);
       } else if (message.role === 'user') {
-        process.stdout.write('You: ');
-        this.writeWrapped('user', message.content, 'You: '.length);
+        process.stdout.write(styledPrompt());
+        await this.writeWrapped('user', message.content, PROMPT.length);
         process.stdout.write('\n');
       } else if (message.role === 'assistant' && message.content) {
         process.stdout.write('\n');
-        this.writeWrapped('assistant', message.content, 0);
+        await this.writeWrapped('assistant', message.content, 0);
         process.stdout.write('\n\n');
       }
     }
   }
 
-  writeWrapped(role, text, startColumn = 0) {
-    const wrapper = createWordWrapper(createStyler(role), startColumn);
-    const bullets = createBulletFilter((t) => wrapper.write(t));
+  renderOptions() {
+    return { markdown: this.markdown, images: this.images };
+  }
+
+  async writeWrapped(role, text, startColumn = 0) {
+    const renderer = createMarkdownRenderer(role, startColumn, this.renderOptions());
     process.stdout.write(ANSI[role].dialogue);
-    bullets.write(text);
-    bullets.end();
-    wrapper.end();
+    await renderer.write(text);
+    await renderer.end();
     process.stdout.write(ANSI.reset);
   }
 
@@ -1000,10 +1694,9 @@ class OllamaChat {
       let thinkingEnded = false;
       let stats = null;
       const decoder = new TextDecoder();
-      const wrapper = createWordWrapper(createStyler('assistant'));
-      const bullets = createBulletFilter((t) => wrapper.write(t));
-      // Thinking text is the model's raw internal monologue, not RP dialogue,
-      // so it's wrapped plain (no *narration* toggling) in a constant dim color.
+      const renderer = createMarkdownRenderer('assistant', 0, this.renderOptions());
+      // Thinking text is the model's raw internal monologue, so it's wrapped
+      // plain (no markdown rendering) in a constant dim color.
       const thinkingWrapper = createWordWrapper((t) => t);
 
       // `truncated` is set when the stream ended (done_reason !== 'stop')
@@ -1039,7 +1732,7 @@ class OllamaChat {
         }
       };
 
-      const handleLine = (line) => {
+      const handleLine = async (line) => {
         if (!line.trim()) return;
         let json;
         if (isOpenAI) {
@@ -1075,7 +1768,7 @@ class OllamaChat {
             process.stdout.write(ANSI.assistant.dialogue);
             started = true;
           }
-          bullets.write(content);
+          await renderer.write(content);
           fullResponse += content;
         }
         if (isOpenAI) {
@@ -1098,19 +1791,18 @@ class OllamaChat {
         const lines = lineBuffer.split('\n');
         lineBuffer = lines.pop();
         for (const line of lines) {
-          handleLine(line);
+          await handleLine(line);
         }
       }
       if (lineBuffer) {
-        handleLine(lineBuffer);
+        await handleLine(lineBuffer);
       }
       if (isOpenAI) {
         stats = { done_reason: openaiFinishReason || 'stop', usage: openaiUsage };
       }
       const doneReason = stats?.done_reason;
       endThinking(Boolean(doneReason && doneReason !== 'stop' && doneReason !== 'tool_calls'));
-      bullets.end();
-      wrapper.end();
+      await renderer.end();
 
       if (started) {
         process.stdout.write(ANSI.reset);
@@ -1218,6 +1910,48 @@ class OllamaChat {
     console.log('  /set notools           Disable tool calling');
     console.log("  /set date              Tell the model today's date (default: on with tools)");
     console.log("  /set nodate            Don't tell the model today's date");
+    console.log('  /set markdown          Render markdown in responses (default)');
+    console.log('  /set nomarkdown        Show responses as raw text');
+    console.log('  /set images            Download and draw ![images](url) inline (iTerm2, WezTerm, kitty, Ghostty)');
+    console.log('  /set noimages          Show images as links (default)');
+    console.log('\nUse /show settings to see the current values.');
+    console.log('');
+  }
+
+  // Everything /set (and the matching command-line flags) can change, with
+  // the current value and, where it isn't obvious, what it comes from.
+  printSettings() {
+    const onOff = (value) => (value ? 'on' : 'off');
+    const sys = this.getSystemMessage();
+    const dateSetting = this.injectDate === undefined
+      ? `${onOff(this.shouldInjectDate())} (automatic: follows tools)`
+      : onOff(this.injectDate);
+    const think = this.think === undefined ? 'model default' : this.think === false ? 'off' : this.think === true ? 'on' : this.think;
+    const protocols = { iterm: 'iTerm2 inline images', kitty: 'kitty graphics' };
+    const images = IMAGE_PROTOCOL
+      ? `${onOff(this.images)} (terminal supports ${protocols[IMAGE_PROTOCOL]})`
+      : "off (this terminal can't draw images)";
+    const rows = [
+      ['model', this.model],
+      ['api', this.api === 'openai' ? 'openai-compatible' : 'ollama'],
+      ['host', this.host],
+      ...(this.api === 'ollama' ? [['keep-alive', this.keepAlive]] : []),
+      ['system message', sys ? `set, ${sys.length} characters (/show system)` : 'none'],
+      ['parameters', Object.keys(this.options).length
+        ? Object.entries(this.options).map(([k, v]) => `${k}=${Array.isArray(v) ? JSON.stringify(v) : v}`).join(', ')
+        : 'model defaults'],
+      ['format', this.format || 'none'],
+      ['think', think],
+      ['show thinking', onOff(this.showThinking)],
+      ['verbose', onOff(this.verbose)],
+      ['tools', this.toolsEnabled ? `on (${Object.keys(TOOLS).join(', ')}; ${OLLAMA_API_KEY ? 'Ollama web search' : 'DuckDuckGo'})` : 'off'],
+      ['date', dateSetting],
+      ['markdown', onOff(this.markdown)],
+      ['images', images],
+      ['stop on exit', onOff(this.stopOnExit)]
+    ];
+    console.log('\nSession settings:');
+    for (const [name, value] of rows) console.log(`  ${name.padEnd(16)} ${value}`);
     console.log('');
   }
 
@@ -1227,6 +1961,7 @@ class OllamaChat {
     console.log('  /show license      Show model license');
     console.log('  /show modelfile    Show Modelfile for this model');
     console.log('  /show parameters   Show parameters for this model');
+    console.log('  /show settings     Show this session\'s settings (/set toggles, host, ...)');
     console.log('  /show system       Show system message');
     console.log('  /show template     Show prompt template');
     console.log('');
@@ -1236,6 +1971,12 @@ class OllamaChat {
     console.log('\nAvailable keyboard shortcuts:');
     console.log('  Enter               Send your message');
     console.log('  Ctrl + j            Insert a new line without sending');
+    console.log('  Left / Right        Move the cursor');
+    console.log('  Ctrl/Alt + arrows   Move a word at a time (also Alt + b / f)');
+    console.log('  Home / End          Start / end of line (also Ctrl + a / e)');
+    console.log('  Up / Down           Previous / next line, then message history');
+    console.log('  Ctrl + w            Delete the previous word');
+    console.log('  Ctrl + u / k        Delete to the start / end of the line');
     console.log('  Ctrl + c            Exit immediately');
     console.log('  Ctrl + d            Exit (on an empty line)');
     console.log('');
@@ -1348,6 +2089,10 @@ class OllamaChat {
     const sub = (args[0] || '').toLowerCase();
     if (!sub) {
       this.printShowUsage();
+      return;
+    }
+    if (sub === 'settings') {
+      this.printSettings();
       return;
     }
 
@@ -1504,12 +2249,31 @@ class OllamaChat {
         this.injectDate = false;
         console.log("Set 'nodate' mode.\n");
         break;
+      case 'markdown':
+        this.markdown = true;
+        console.log("Set 'markdown' mode.\n");
+        break;
+      case 'nomarkdown':
+        this.markdown = false;
+        console.log("Set 'nomarkdown' mode (responses are shown as raw text).\n");
+        break;
+      case 'images':
+        if (!IMAGE_PROTOCOL) {
+          console.log("This terminal can't draw inline images (iTerm2, WezTerm, kitty, and Ghostty can;");
+          console.log('tmux and screen block them). Images are shown as links instead.\n');
+          break;
+        }
+        this.images = true;
+        console.log("Set 'images' mode (markdown images are downloaded and drawn inline).\n");
+        break;
+      case 'noimages':
+        this.images = false;
+        console.log("Set 'noimages' mode.\n");
+        break;
       case 'history':
       case 'nohistory':
-      case 'wordwrap':
-      case 'nowordwrap':
-        console.log(`\n'/set ${sub}' doesn't apply here - this client doesn't keep its own input`);
-        console.log('history or do manual word-wrapping; your terminal already handles that.\n');
+        console.log(`\n'/set ${sub}' doesn't apply here - input history (Up/Down) lasts for this`);
+        console.log('session only and is never written to disk.\n');
         break;
       default:
         console.log(`Unknown command '/set ${sub}'. Type /help for help\n`);
@@ -1562,36 +2326,108 @@ class OllamaChat {
     }
   }
 
-  // Reads one turn of input. On a real TTY this is a small hand-rolled editor
-  // supporting multi-line messages: plain Enter submits, Ctrl+J always inserts
-  // a newline, and Shift+Enter inserts one too if the terminal happens to send
-  // a distinguishable sequence for it (most don't by default - Ctrl+J is the
-  // reliable option). Falls back to plain line reading when stdin isn't a TTY
-  // (piped input). Resolves null on Ctrl+D / Ctrl+C to signal "quit".
-  async readTurnInput(promptLabel) {
-    if (!process.stdin.isTTY) {
-      return new Promise((resolve) => {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
-        process.stdout.write(promptLabel);
-        rl.once('line', (line) => {
-          rl.close();
-          resolve(line);
-        });
-        rl.once('close', () => resolve(null));
-      });
-    }
+  // Reads one turn of input. On a real TTY this is a small line editor (see
+  // editLine); otherwise it reads a line from piped stdin. Resolves null on
+  // Ctrl+D / end of input to signal "quit".
+  async readTurnInput() {
+    return process.stdin.isTTY ? this.editLine() : this.readPipedLine();
+  }
 
+  // Piped stdin gets one readline interface for the whole session: each
+  // interface reads ahead and buffers lines, so a fresh one per turn would
+  // lose whatever its predecessor had already read. The line is echoed after
+  // the prompt so the transcript reads like an interactive session.
+  async readPipedLine() {
+    if (!this.pipedInput) {
+      const lines = [];
+      const waiting = [];
+      let closed = false;
+      const rl = readline.createInterface({ input: process.stdin, terminal: false });
+      rl.on('line', (line) => (waiting.length ? waiting.shift()(line) : lines.push(line)));
+      rl.on('close', () => {
+        closed = true;
+        while (waiting.length) waiting.shift()(null);
+      });
+      this.pipedInput = () => {
+        if (lines.length) return Promise.resolve(lines.shift());
+        if (closed) return Promise.resolve(null);
+        return new Promise((resolve) => waiting.push(resolve));
+      };
+    }
+    process.stdout.write(PROMPT);
+    const line = await this.pipedInput();
+    if (line !== null) process.stdout.write(`${line}\n`);
+    return line;
+  }
+
+  // A small line editor. Enter submits; Ctrl+J (and Shift+Enter, if the
+  // terminal sends a distinguishable sequence for it - most don't) inserts a
+  // newline. Supports cursor movement (arrows, Home/End, Ctrl+A/E, word jumps
+  // with Ctrl/Alt+arrows or Alt+B/F), deletion (Backspace, Delete, Ctrl+W,
+  // Ctrl+U, Ctrl+K), history recall with Up/Down (from the first/last line of
+  // a multi-line message), and bracketed paste, so pasted line breaks become
+  // part of the message instead of submitting it. The whole input is redrawn
+  // after each change, which keeps wrapping and wide characters simple.
+  async editLine() {
     return new Promise((resolve) => {
       const stdin = process.stdin;
+      const history = this.inputHistory;
       let buffer = '';
+      let cursor = 0; // UTF-16 index into buffer, always on a grapheme boundary
+      let cursorRow = 0; // terminal row the cursor is on, relative to the prompt's
+      let historyIndex = history.length;
+      let draft = ''; // unsent input, kept while browsing history
+      let pasting = false;
 
-      const SPECIAL_KEYS = new Set([
-        'up', 'down', 'left', 'right', 'home', 'end', 'pageup', 'pagedown',
-        'insert', 'delete', 'tab', 'escape',
-        'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12'
-      ]);
+      const render = () => {
+        const end = inputPosition(buffer);
+        const target = inputPosition(buffer.slice(0, cursor));
+        let out = cursorRow > 0 ? `\x1b[${cursorRow}A` : '';
+        // Raw mode disables automatic CR-on-LF, so embedded newlines need an explicit \r.
+        out += '\r\x1b[J' + styledPrompt() + buffer.replace(/\n/g, '\r\n');
+        if (end.pending) out += ' \r'; // move off the right edge onto the next row
+        if (end.row > target.row) out += `\x1b[${end.row - target.row}A`;
+        out += '\r' + (target.col > 0 ? `\x1b[${target.col}C` : '');
+        cursorRow = target.row;
+        process.stdout.write(out);
+      };
+
+      // Cursor steps and deletes whole grapheme clusters, so an emoji like ⚠️
+      // or 👩‍💻 behaves as the single character it looks like.
+      const boundaries = () => [...Array.from(graphemes.segment(buffer), (g) => g.index), buffer.length];
+      const prev = (i) => boundaries().filter((b) => b < i).pop() ?? 0;
+      const next = (i) => boundaries().find((b) => b > i) ?? buffer.length;
+      const snap = (i) => boundaries().filter((b) => b <= i).pop() ?? 0;
+      const lineStart = (i) => buffer.lastIndexOf('\n', i - 1) + 1;
+      const lineEnd = (i) => (buffer.indexOf('\n', i) === -1 ? buffer.length : buffer.indexOf('\n', i));
+      const wordLeft = (i) => {
+        while (i > 0 && /\s/.test(buffer[i - 1])) i--;
+        while (i > 0 && !/\s/.test(buffer[i - 1])) i--;
+        return i;
+      };
+      const wordRight = (i) => {
+        while (i < buffer.length && /\s/.test(buffer[i])) i++;
+        while (i < buffer.length && !/\s/.test(buffer[i])) i++;
+        return i;
+      };
+
+      const insert = (text) => {
+        buffer = buffer.slice(0, cursor) + text + buffer.slice(cursor);
+        cursor += text.length;
+      };
+      const remove = (from, to) => {
+        buffer = buffer.slice(0, from) + buffer.slice(to);
+        cursor = from;
+      };
+      const recall = (index) => {
+        if (historyIndex === history.length) draft = buffer;
+        historyIndex = index;
+        buffer = index === history.length ? draft : history[index];
+        cursor = buffer.length;
+      };
 
       const cleanup = () => {
+        process.stdout.write('\x1b[?2004l'); // bracketed paste off
         stdin.removeListener('keypress', onKeypress);
         stdin.setRawMode(false);
         stdin.pause();
@@ -1599,6 +2435,22 @@ class OllamaChat {
 
       const onKeypress = async (str, key) => {
         key = key || {};
+
+        if (key.name === 'paste-start') {
+          pasting = true;
+          return;
+        }
+        if (key.name === 'paste-end') {
+          pasting = false;
+          render();
+          return;
+        }
+        if (pasting) {
+          // Terminals send pasted line breaks as \r; keep them as newlines.
+          if (key.name === 'return' || key.name === 'enter') insert('\n');
+          else if (str && !/[\x00-\x08\x0b-\x1f\x7f]/.test(str)) insert(str);
+          return;
+        }
 
         if (key.ctrl && key.name === 'c') {
           cleanup();
@@ -1617,49 +2469,70 @@ class OllamaChat {
           return;
         }
 
+        // Enter sends \r ('return'); Ctrl+J sends a bare \n, which Node names 'enter'.
         const isNewlineInsert =
-          (key.name === 'return' && key.shift) || // best-effort: few terminals report this
-          str === '\x1b\r' || str === '\x1b\n' || str === '\x1b[13;2u' || // best-effort shift+enter sequences
-          (key.ctrl && key.name === 'j'); // guaranteed: Ctrl+J always sends a real linefeed
-
-        const isSubmit = !isNewlineInsert && (key.name === 'return' || key.name === 'enter');
-
+          key.name === 'enter' ||
+          (key.name === 'return' && (key.shift || key.meta)) || // best-effort shift+enter
+          str === '\x1b[13;2u';
         if (isNewlineInsert) {
-          buffer += '\n';
-          process.stdout.write('\r\n');
-          return;
-        }
-
-        if (isSubmit) {
+          insert('\n');
+        } else if (key.name === 'return') {
+          cursor = buffer.length;
+          render();
           cleanup();
           process.stdout.write('\r\n');
+          if (buffer.trim() && buffer !== history[history.length - 1]) history.push(buffer);
           resolve(buffer);
           return;
+        } else if (key.name === 'backspace') {
+          if (key.meta) remove(wordLeft(cursor), cursor);
+          else if (cursor > 0) remove(prev(cursor), cursor);
+        } else if (key.name === 'delete' || (key.ctrl && key.name === 'd')) {
+          if (cursor < buffer.length) remove(cursor, next(cursor));
+        } else if (key.ctrl && key.name === 'w') {
+          remove(wordLeft(cursor), cursor);
+        } else if (key.ctrl && key.name === 'u') {
+          remove(lineStart(cursor), cursor);
+        } else if (key.ctrl && key.name === 'k') {
+          const end = lineEnd(cursor);
+          buffer = buffer.slice(0, cursor) + buffer.slice(end === cursor && end < buffer.length ? end + 1 : end);
+        } else if ((key.name === 'left' && (key.ctrl || key.meta)) || (key.meta && key.name === 'b')) {
+          cursor = wordLeft(cursor);
+        } else if ((key.name === 'right' && (key.ctrl || key.meta)) || (key.meta && key.name === 'f')) {
+          cursor = wordRight(cursor);
+        } else if (key.name === 'left' || (key.ctrl && key.name === 'b')) {
+          cursor = prev(cursor);
+        } else if (key.name === 'right' || (key.ctrl && key.name === 'f')) {
+          cursor = next(cursor);
+        } else if (key.name === 'home' || (key.ctrl && key.name === 'a')) {
+          cursor = lineStart(cursor);
+        } else if (key.name === 'end' || (key.ctrl && key.name === 'e')) {
+          cursor = lineEnd(cursor);
+        } else if (key.name === 'up' || (key.ctrl && key.name === 'p')) {
+          const start = lineStart(cursor);
+          if (start > 0) {
+            const above = lineStart(start - 1);
+            cursor = snap(Math.min(above + (cursor - start), start - 1));
+          } else if (historyIndex > 0) {
+            recall(historyIndex - 1);
+          }
+        } else if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
+          const end = lineEnd(cursor);
+          if (end < buffer.length) {
+            const below = end + 1;
+            cursor = snap(Math.min(below + (cursor - lineStart(cursor)), lineEnd(below)));
+          } else if (historyIndex < history.length) {
+            recall(historyIndex + 1);
+          }
+        } else if (str && !key.ctrl && !key.meta && !/[\x00-\x1f\x7f]/.test(str)) {
+          insert(str);
+        } else {
+          return; // Unhandled key (Tab, Escape, function keys, ...)
         }
-
-        if (key.name === 'backspace') {
-          if (buffer.length === 0) return;
-          const priorRows = computeRows(promptLabel, buffer);
-          buffer = buffer.slice(0, -1);
-          process.stdout.moveCursor(0, -(priorRows - 1));
-          process.stdout.cursorTo(0);
-          process.stdout.clearScreenDown();
-          // Raw mode disables automatic CR-on-LF, so embedded newlines need an explicit \r.
-          process.stdout.write((promptLabel + buffer).replace(/\n/g, '\r\n'));
-          return;
-        }
-
-        if (SPECIAL_KEYS.has(key.name)) {
-          return; // Arrow-key/mid-line editing isn't supported by this simple editor.
-        }
-
-        if (str) {
-          buffer += str;
-          process.stdout.write(str);
-        }
+        render();
       };
 
-      process.stdout.write(promptLabel);
+      process.stdout.write(styledPrompt() + '\x1b[?2004h'); // bracketed paste on
       readline.emitKeypressEvents(stdin);
       stdin.setRawMode(true);
       stdin.resume();
@@ -1674,13 +2547,12 @@ class OllamaChat {
   rewriteInputLine(input) {
     if (!supportsColor || !process.stdin.isTTY || !process.stdout.isTTY) return;
 
-    const promptLabel = 'You: ';
-    const rows = computeRows(promptLabel, input);
+    const rows = inputPosition(input).row + 1;
 
     process.stdout.moveCursor(0, -rows);
     process.stdout.cursorTo(0);
     process.stdout.clearScreenDown();
-    process.stdout.write(`${promptLabel}${styleLine('user', input)}`.replace(/\n/g, '\r\n') + '\r\n');
+    process.stdout.write(`${styledPrompt()}${styleLine('user', input)}`.replace(/\n/g, '\r\n') + '\r\n');
   }
 
   async start() {
@@ -1690,7 +2562,7 @@ class OllamaChat {
     }
 
     while (true) {
-      const input = await this.readTurnInput('You: ');
+      const input = await this.readTurnInput();
 
       if (input === null) {
         console.log('\n👋 Goodbye!\n');
@@ -1735,11 +2607,11 @@ function parseArgs() {
       options.keepAlive = args[++i];
     } else if (args[i] === '--host' || args[i] === '-h') {
       options.host = args[++i];
-    } else if (args[i] === '--user-emphasis-color') {
+    } else if (args[i] === '--user-italic-color' || args[i] === '--user-emphasis-color') {
       options.userEmphasisColor = args[++i];
     } else if (args[i] === '--user-normal-color') {
       options.userNormalColor = args[++i];
-    } else if (args[i] === '--model-emphasis-color') {
+    } else if (args[i] === '--model-italic-color' || args[i] === '--model-emphasis-color') {
       options.modelEmphasisColor = args[++i];
     } else if (args[i] === '--model-normal-color') {
       options.modelNormalColor = args[++i];
@@ -1747,6 +2619,10 @@ function parseArgs() {
       options.stopOnExit = true;
     } else if (args[i] === '--hide-thinking') {
       options.hideThinking = true;
+    } else if (args[i] === '--images') {
+      options.images = true;
+    } else if (args[i] === '--no-markdown') {
+      options.markdown = false;
     } else if (args[i] === '--tools') {
       options.tools = true;
     } else if (args[i] === '--date') {
@@ -1781,13 +2657,20 @@ Options:
   -h, --host URL      Ollama API host (default: http://localhost:11434)
                        Use https://ollama.com for cloud models; needs the
                        OLLAMA_API_KEY environment variable
-  --user-emphasis-color COLOR   Color for *narration* in your messages (default: 136 / dim yellow)
+  --user-italic-color COLOR     Color for *italic*/narration in your messages (default: 136 / dim yellow)
   --user-normal-color COLOR     Color for dialogue in your messages (default: 226 / bright yellow)
-  --model-emphasis-color COLOR  Color for *narration* in model responses (default: 28 / dim green)
+  --model-italic-color COLOR    Color for *italic*/narration in model responses (default: 28 / dim green)
   --model-normal-color COLOR    Color for dialogue in model responses (default: 83 / bright green)
                        COLOR can be a hex code (#RRGGBB), a 256-color index (0-255),
                        or a name (red, green, yellow, blue, magenta, cyan, white, black,
                        or bright- prefixed, e.g. brightgreen; gray/grey aliases brightblack)
+                       (--user-emphasis-color / --model-emphasis-color still work as aliases)
+  --no-markdown        Show responses as raw text instead of rendering markdown
+                       (same as running \`/set nomarkdown\`)
+  --images             Download and draw markdown images inline, in terminals
+                       that support it: iTerm2, WezTerm, kitty, Ghostty (same
+                       as running \`/set images\`). Off by default, since it
+                       fetches whatever image URLs the model writes.
   -x, --stop-on-exit   Unload the model from Ollama when the session ends
                        (same effect as \`ollama stop\`)
   --hide-thinking      Don't stream thinking-model reasoning output

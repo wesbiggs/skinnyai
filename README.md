@@ -178,12 +178,14 @@ It's on by default whenever tools are on. `--date` or `/set date` turns it on wi
 
 `/show info`, `/show license`, `/show modelfile`, `/show parameters`, `/show system`, and `/show template` all query the current model via `/api/show` and print the relevant field.
 
+`/show settings` (not in `ollama run`) lists this session's own state instead — everything `/set` and the command-line flags control: host, keep-alive, system message, parameter overrides, format, think, thinking display, verbose, tools, date, markdown, images, and stop-on-exit. It works with `--api openai` too, since it doesn't ask the server.
+
 ### `/save {name}`
 
 Matches the `/save` command in the native `ollama run` interactive terminal: it calls the Ollama `/api/create` endpoint with the current model as `from`, any system prompt as `system`, and the conversation history as `messages`, producing a new model that "remembers" this session's context. Run it mid-chat:
 
 ```
-You: /save my-custom-model
+> /save my-custom-model
 ✅ Saved session as model 'my-custom-model'
 ```
 
@@ -193,13 +195,20 @@ You can then start a new chat against it (`node thinai.js my-custom-model` or `o
 
 Each turn is sent via Ollama's `/api/chat` endpoint with the full message history (not just the latest prompt), so the model actually remembers earlier turns in the conversation — matching how native `ollama run` behaves.
 
-## Multi-line input and RP-style formatting
+## Markdown rendering, multi-line input, and RP-style formatting
 
-Useful for role-play-style chats:
-
-- **Pseudo-markdown**: text wrapped in `*single asterisks*` is treated as narration and rendered dimmer than dialogue. Each speaker gets its own color so turns are easy to tell apart at a glance: your messages are yellow (bright for dialogue, dim for `*narration*`), and the assistant's are green (same bright/dim split). Asterisks are stripped from the display; the raw text (asterisks included) is still what's stored in history and sent to the model. A `*` at the start of a line with no closing `*` on that same line is treated as a markdown list bullet instead (rendered as `•`), not narration.
+- **Markdown**: responses (and your own messages) are rendered as they stream, with no third-party library:
+  - `**bold**`, `*italic*` / `_italic_`, `~~strikethrough~~`, and `` `inline code` `` use ANSI styles. Underscores inside words (`snake_case`) and a lone `*` surrounded by spaces (`5 * 3`) stay literal, and `\*` escapes a marker.
+  - `# Headings` are bold; `- ` / `* ` / `+ ` bullets become `•` (or `◦` when indented); numbered lists (`1.` / `1)`) and bullets get a hanging indent so wrapped lines line up with the item text.
+  - `> quotes` get a `│` bar, `---` becomes a full-width rule, and fenced code blocks are shown in a code color, unwrapped, so they copy cleanly.
+  - `[links](https://...)` become clickable [OSC 8 hyperlinks](https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda) (underlined) in terminals that support them — iTerm2, WezTerm, kitty, GNOME Terminal, Windows Terminal, and others; elsewhere you just see the link text.
+  - `![images](https://...)` show as a clickable `🖼 caption`. With `--images` (or `/set images`), terminals with an inline image protocol — iTerm2 and WezTerm (the protocol `imgcat` uses), kitty and Ghostty (kitty's graphics protocol; PNG only) — also draw the image below the line that mentions it, scaled to fit. It's off by default because it downloads whatever image URL the model writes: a prompt injection (say, in a page `fetch_page` read) could smuggle conversation details out in that URL. Like `fetch_page`, it refuses local/private network addresses and caps the download size. Inside tmux or screen, which don't pass image sequences through, images stay links.
+  - Tables are drawn with box-drawing borders, honoring `:---:` / `---:` alignment. Columns shrink to fit the terminal, wrapping cell text as needed. Emoji (✅, ⚠️, flags, 👩‍💻) are measured as the two columns terminals draw them in, so they don't push borders out of line. Since column widths depend on every row, a table is drawn once it's complete; until then a `⋯ receiving table (N rows)` placeholder shows progress.
+  - `/set nomarkdown` (or `--no-markdown`) shows responses as raw text instead; `/set markdown` turns rendering back on. When output is redirected to a file or pipe, text is always written raw, so it stays valid markdown.
+- **RP-style narration**: `*single asterisks*` are italic *and* switch to a dimmer narration color, so role-play narration stays visually distinct from dialogue. Each speaker gets its own color so turns are easy to tell apart at a glance: your messages are yellow (bright for dialogue, dim for `*narration*`), and the assistant's are green (same bright/dim split). Markup is stripped from the display; the raw text is still what's stored in history and sent to the model.
 - **Multi-line messages**: press **Ctrl+J** to insert a new line without sending the message; plain **Enter** sends it. (Shift+Enter is also detected if your terminal happens to send a distinguishable sequence for it, but most terminals — including the macOS Terminal.app/iTerm2 defaults — don't, so Ctrl+J is the reliable option.)
-- This is a minimal line editor: no arrow-key cursor movement or history recall mid-line, only typing and backspace-from-the-end. Pasting multi-line text may submit early at each line break rather than pasting the whole block.
+- **Line editing**: Left/Right move the cursor (Ctrl/Alt+arrows or Alt+B/F by word), Home/End or Ctrl+A/E jump to the start/end of the line, and Ctrl+W, Ctrl+U, and Ctrl+K delete the previous word, to the start of the line, and to the end of the line. Up/Down move between lines of a multi-line message, and past its first/last line recall earlier messages from this session. `/? shortcuts` lists them all.
+- **Pasting**: multi-line pastes are kept whole (via bracketed paste) rather than sending at the first line break — supported by essentially all modern terminals.
 - **Word wrap**: streamed responses and redisplayed history wrap on word boundaries at your terminal width, instead of hard-wrapping mid-word. This doesn't apply to your own live input line, which your terminal wraps natively as you type.
 
 ### Customizing colors
@@ -209,11 +218,11 @@ Override any of the four colors on the command line:
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--user-normal-color` | `226` (bright yellow) | Your dialogue |
-| `--user-emphasis-color` | `136` (dim yellow) | Your `*narration*` |
+| `--user-italic-color` | `136` (dim yellow) | Your `*italic*` / narration |
 | `--model-normal-color` | `83` (bright green) | Model dialogue |
-| `--model-emphasis-color` | `28` (dim green) | Model `*narration*` |
+| `--model-italic-color` | `28` (dim green) | Model `*italic*` / narration |
 
-Each accepts a hex code (`#RRGGBB`), a 256-color palette index (`0`-`255`), or a basic name (`red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `black`, a `bright`-prefixed variant like `brightgreen`, or `gray`/`grey`):
+(`--user-emphasis-color` and `--model-emphasis-color` still work as aliases for the italic flags.) Each accepts a hex code (`#RRGGBB`), a 256-color palette index (`0`-`255`), or a basic name (`red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `black`, a `bright`-prefixed variant like `brightgreen`, or `gray`/`grey`):
 
 ```bash
 thinai.js llama2 --user-normal-color cyan --model-normal-color "#ff8800"
@@ -233,13 +242,13 @@ $ ./thinai.js llama2
 
 ==================================================
 
-You: What is machine learning?
+> What is machine learning?
 Machine learning is a subset of artificial intelligence...
 
-You: Tell me more about neural networks
+> Tell me more about neural networks
 Neural networks are inspired by biological neurons...
 
-You: /exit
+> /exit
 👋 Goodbye!
 ```
 
@@ -292,7 +301,7 @@ Pass `--api openai` to talk to an OpenAI-compatible server (vLLM, llama.cpp's `s
 
 Several commands are Ollama-specific and have no OpenAI API equivalent, so they're disabled or degraded under `--api openai`:
 
-- `/save` and `/show info|license|modelfile|parameters|template` — no equivalent to `/api/create`/`/api/show`; these print an error. `/show system` still works (it just echoes the session's own system message).
+- `/save` and `/show info|license|modelfile|parameters|template` — no equivalent to `/api/create`/`/api/show`; these print an error. `/show system` and `/show settings` still work (they only report the session's own state).
 - `/load <model>` — switches the active model name and starts a fresh session, but can't restore saved context (nothing to fetch it from).
 - `--keep-alive`/`-x`/`--stop-on-exit` — no equivalent concept; `--stop-on-exit` is a no-op.
 - `/set verbose` stats — only shows token counts (from the `usage` field, if the server returns one), not timing, since OpenAI's API doesn't report duration breakdowns.
