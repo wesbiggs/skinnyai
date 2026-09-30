@@ -4,7 +4,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "ollama": "node ollama-chat.js",
-    "openai": "node ollama-chat.js --api openai"
+    "ollama": "node thinai.js",
+    "openai": "node thinai.js --api openai"
   }
 }
