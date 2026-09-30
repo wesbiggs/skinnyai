@@ -1,4 +1,4 @@
-# thinai: Thin Client for Ollama/OpenAI Interactive Chat
+# skinnyai: Get the Skinny, from a Thin Client for Ollama/OpenAI Chat
 
 [![CI](https://github.com/wesbiggs/thinai/actions/workflows/ci.yml/badge.svg)](https://github.com/wesbiggs/thinai/actions/workflows/ci.yml)
 
@@ -15,7 +15,7 @@ A terminal-based Node.js chat interface for Ollama and OpenAI-compatible endpoin
 - ✅ Opt-in tool calling with built-in `web_search` and `fetch_page` tools (DuckDuckGo, or Ollama's hosted search with an API key)
 - ✅ Ollama cloud models via `--host https://ollama.com` and `OLLAMA_API_KEY` — see [Ollama account](#ollama-account-cloud-models-and-hosted-search) — see [Tool calling and web search](#tool-calling-and-web-search)
 - ✅ Session saving to local Modelfiles (works with any server), optional autosave, and `/share` to an Ollama server
-- ✅ Defaults in `~/.thinai/.env`
+- ✅ Defaults in `~/.skinny/.env`
 - ✅ Minimal dependencies (uses Node.js built-ins)
 
 ## Prerequisites
@@ -32,16 +32,16 @@ curl http://localhost:11434/api/tags
 
 ### 1. Make the script executable
 ```bash
-chmod +x bin/thinai.js
+chmod +x bin/skinnyai.js
 ```
 
 ### 2. Optionally add to PATH
 ```bash
 # Copy or link to somewhere in your PATH
-cp bin/thinai.js ~/.local/bin/thinai
+cp bin/skinnyai.js ~/.local/bin/skinnyai
 # or
-ln -s $(pwd)/bin/thinai.js ~/.local/bin/thinai
-# or, from this directory, link it as `thinai` via npm
+ln -s $(pwd)/bin/skinnyai.js ~/.local/bin/skinnyai
+# or, from this directory, link it as `skinnyai` via npm
 npm link
 ```
 
@@ -49,8 +49,8 @@ npm link
 
 ### Basic usage (default: `http://localhost:11434`, keep-alive 1 hour)
 ```bash
-node bin/thinai.js llama2
-./bin/thinai.js neural-chat
+node bin/skinnyai.js llama2
+./bin/skinnyai.js neural-chat
 ```
 
 Or via the `npm run` convenience scripts (note the `--` before your own args):
@@ -62,24 +62,24 @@ npm run openai -- my-model --host http://localhost:8000
 ### With custom keep-alive duration
 ```bash
 # Keep model loaded for 30 minutes
-node bin/thinai.js llama2 --keep-alive 30m
+node bin/skinnyai.js llama2 --keep-alive 30m
 
 # Keep model loaded for 6 hours
-node bin/thinai.js mistral -k 6h
+node bin/skinnyai.js mistral -k 6h
 
 # Keep model loaded for 5 minutes (minimal)
-node bin/thinai.js neural-chat --keep-alive 5m
+node bin/skinnyai.js neural-chat --keep-alive 5m
 ```
 
 ### With custom host
 ```bash
 # Connect to remote Ollama instance
-node bin/thinai.js llama2 --host http://192.168.1.100:11434
+node bin/skinnyai.js llama2 --host http://192.168.1.100:11434
 ```
 
 ### Combine options
 ```bash
-node bin/thinai.js \
+node bin/skinnyai.js \
   --model mistral \
   --keep-alive 2h \
   --host http://localhost:11434
@@ -87,32 +87,32 @@ node bin/thinai.js \
 
 ### Default settings (`.env`)
 
-Put defaults in `~/.thinai/.env` (or `$THINAI_HOME/.env`) as `KEY=value` lines, so you don't have to repeat flags. Every flag has a variable:
+Put defaults in `~/.skinny/.env` (or `$SKINNY_HOME/.env`) as `KEY=value` lines, so you don't have to repeat flags. Every flag has a variable:
 
 ```bash
-# ~/.thinai/.env
-THINAI_MODEL=gemma4:31b
-THINAI_HOST=https://ollama.com
+# ~/.skinny/.env
+SKINNY_MODEL=gemma4:31b
+SKINNY_HOST=https://ollama.com
 OLLAMA_API_KEY=...
-THINAI_TOOLS=true
-THINAI_AUTOSAVE=true
-THINAI_MODEL_NORMAL_COLOR=#ff8800
+SKINNY_TOOLS=true
+SKINNY_AUTOSAVE=true
+SKINNY_MODEL_NORMAL_COLOR=#ff8800
 ```
 
 | Variable | Flag |
 |----------|------|
-| `THINAI_MODEL` | model argument / `--model` |
-| `THINAI_HOST` | `--host` |
-| `THINAI_API` | `--api` |
-| `THINAI_KEEP_ALIVE` | `--keep-alive` |
-| `THINAI_TOOLS` | `--tools` / `--no-tools` |
-| `THINAI_DATE` | `--date` / `--no-date` |
-| `THINAI_MARKDOWN` | `--markdown` / `--no-markdown` |
-| `THINAI_IMAGES` | `--images` / `--no-images` |
-| `THINAI_AUTOSAVE` | `--autosave` / `--no-autosave` |
-| `THINAI_HIDE_THINKING` | `--hide-thinking` / `--show-thinking` |
-| `THINAI_STOP_ON_EXIT` | `--stop-on-exit` / `--no-stop-on-exit` |
-| `THINAI_USER_NORMAL_COLOR`, `THINAI_USER_ITALIC_COLOR`, `THINAI_MODEL_NORMAL_COLOR`, `THINAI_MODEL_ITALIC_COLOR` | the `--*-color` flags |
+| `SKINNY_MODEL` | model argument / `--model` |
+| `SKINNY_HOST` | `--host` |
+| `SKINNY_API` | `--api` |
+| `SKINNY_KEEP_ALIVE` | `--keep-alive` |
+| `SKINNY_TOOLS` | `--tools` / `--no-tools` |
+| `SKINNY_DATE` | `--date` / `--no-date` |
+| `SKINNY_MARKDOWN` | `--markdown` / `--no-markdown` |
+| `SKINNY_IMAGES` | `--images` / `--no-images` |
+| `SKINNY_AUTOSAVE` | `--autosave` / `--no-autosave` |
+| `SKINNY_HIDE_THINKING` | `--hide-thinking` / `--show-thinking` |
+| `SKINNY_STOP_ON_EXIT` | `--stop-on-exit` / `--no-stop-on-exit` |
+| `SKINNY_USER_NORMAL_COLOR`, `SKINNY_USER_ITALIC_COLOR`, `SKINNY_MODEL_NORMAL_COLOR`, `SKINNY_MODEL_ITALIC_COLOR` | the `--*-color` flags |
 
 On/off values accept `true`/`false`, `yes`/`no`, `on`/`off`, or `1`/`0`. Values can be quoted, lines can start with `export`, and `#` starts a comment (at the start of a line, or after a space). Variables already set in your environment take precedence over the file, and command-line flags take precedence over both — that's what the `--no-…` forms are for. `/show settings` shows which file was loaded.
 
@@ -131,7 +131,7 @@ Use any of these formats in the `--keep-alive` parameter:
 By default the model stays loaded for its `--keep-alive` duration after you quit, same as `ollama run`. Pass `-x`/`--stop-on-exit` to unload it immediately when the session ends instead (same effect as running `ollama stop <model>`):
 
 ```bash
-node bin/thinai.js llama2 --stop-on-exit
+node bin/skinnyai.js llama2 --stop-on-exit
 ```
 
 This fires on every way the session can end — `/exit`, `/bye`, Ctrl+D, and Ctrl+C — and is best-effort: if the unload request fails (e.g. the server already went away), it's reported but won't block the process from exiting.
@@ -182,10 +182,10 @@ Pass `--tools` (or run `/set tools` mid-session) to offer the model two tools:
 - `fetch_page` — fetches a URL and returns the page's readable text, so the model can read a search result instead of guessing from its snippet.
 
 ```bash
-./bin/thinai.js qwen3 --tools
+./bin/skinnyai.js qwen3 --tools
 ```
 
-When the model calls a tool, thinai runs it, shows a dimmed line like `🔧 searching: "..."` or `🔧 fetching: <url>`, sends the result back to the model, and streams its final answer. A single reply can involve several tool calls; after 5 rounds of tool calls, the model is asked to answer without tools. Tool calls and results are kept in the conversation history, so follow-up questions can refer to them.
+When the model calls a tool, skinnyai runs it, shows a dimmed line like `🔧 searching: "..."` or `🔧 fetching: <url>`, sends the result back to the model, and streams its final answer. A single reply can involve several tool calls; after 5 rounds of tool calls, the model is asked to answer without tools. Tool calls and results are kept in the conversation history, so follow-up questions can refer to them.
 
 This needs a model with the `tools` capability (check with `/show info`) — e.g. `llama3.1`, `llama3.2`, `qwen3`, `mistral-nemo`. Models without it make Ollama return an error; turn tools back off with `/set notools`. Small local models rarely chain the tools: in testing, `llama3.2:3b` never called `fetch_page`, even when asked to read a specific URL, and `llama3.1:8b` fetched a URL it was given but never read a page after its own search, so both answered from snippets. Ollama's hosted search (below) sidesteps this by returning page text with each result; larger models like `gemma4:31b` use the tools well either way. It works the same way under `--api openai`, for servers that support OpenAI-style `tools`.
 
@@ -194,7 +194,7 @@ This needs a model with the `tools` capability (check with `/show info`) — e.g
 With `OLLAMA_API_KEY` set, both tools use Ollama's hosted APIs — see [Ollama account](#ollama-account-cloud-models-and-hosted-search). Without it, search is done by DuckDuckGo, with no API key:
 
 1. The official [Instant Answer API](https://api.duckduckgo.com/api) is tried first. It returns encyclopedia-style summaries and direct answers, not web results, so many queries come back empty.
-2. Otherwise, thinai falls back to scraping `html.duckduckgo.com` for the top 8 results (title, URL, snippet). That endpoint is unofficial: it can break if DuckDuckGo changes its markup, and rapid or heavy use gets blocked as automated traffic. When that happens, the model is told the search failed.
+2. Otherwise, skinnyai falls back to scraping `html.duckduckgo.com` for the top 8 results (title, URL, snippet). That endpoint is unofficial: it can break if DuckDuckGo changes its markup, and rapid or heavy use gets blocked as automated traffic. When that happens, the model is told the search failed.
 
 #### `fetch_page`
 
@@ -206,7 +206,7 @@ Pages can contain text aimed at the model ("ignore your instructions and…"), a
 
 ### Today's date
 
-Models only know their training cutoff, and many assume it's still that date — `llama3.2`'s template even tells it `Cutting Knowledge Date: December 2023` — so searches for "today's headlines" come back years out of date. To fix this, thinai tells the model the current date (e.g. `Today's date is Tuesday, September 29, 2026.`), both at the start of the system message and in the `web_search` tool description.
+Models only know their training cutoff, and many assume it's still that date — `llama3.2`'s template even tells it `Cutting Knowledge Date: December 2023` — so searches for "today's headlines" come back years out of date. To fix this, skinnyai tells the model the current date (e.g. `Today's date is Tuesday, September 29, 2026.`), both at the start of the system message and in the `web_search` tool description.
 
 The date is added to each outgoing request, not stored in the conversation, so it's always current, and `/save` and `/show system` only ever contain your own system message.
 
@@ -220,18 +220,18 @@ It's on by default whenever tools are on. `--date` or `/set date` turns it on wi
 
 ### `/save [name]` and `/share [name]`
 
-`/save` writes the session — model, system message, parameters, and conversation — to `~/.thinai/sessions/<name>.Modelfile` (set `THINAI_HOME` to use another directory than `~/.thinai`). It works the same with every server: a local or cloud Ollama, or `--api openai`.
+`/save` writes the session — model, system message, parameters, and conversation — to `~/.skinny/sessions/<name>.Modelfile` (set `SKINNY_HOME` to use another directory than `~/.skinny`). It works the same with every server: a local or cloud Ollama, or `--api openai`.
 
 ```
 > /save trip-planning
-✅ Saved session 'trip-planning' to /Users/you/.thinai/sessions/trip-planning.Modelfile
-   Resume it with /load trip-planning, or start with: thinai.js trip-planning
+✅ Saved session 'trip-planning' to /Users/you/.skinny/sessions/trip-planning.Modelfile
+   Resume it with /load trip-planning, or start with: skinnyai.js trip-planning
 ```
 
 - `/save` with no name saves under the session's current name — the one it was last saved or loaded as — or, for a session that hasn't been saved yet, a new name from the date and time, like `chat-2026-09-30-154907`.
 - `/save <new name>` is "save as": it writes a new file and leaves the old one as it was, and from then on `/save` (and autosave) update the new name. The exception is a session that still has a date-and-time name (from autosave or a bare `/save`): that file is renamed instead, so naming a session doesn't leave a stray copy behind.
 - If the name belongs to a different saved session, `/save` asks before overwriting it (`[y/N]`; anything but `y` keeps the existing file).
-- `/load <name>` or `thinai.js <name>` resumes a saved session: it switches to the session's `FROM` model and restores its system message, parameters, and conversation. `/list` shows saved sessions below the server's models. A saved session takes precedence over a server model with the same name.
+- `/load <name>` or `skinnyai.js <name>` resumes a saved session: it switches to the session's `FROM` model and restores its system message, parameters, and conversation. `/list` shows saved sessions below the server's models. A saved session takes precedence over a server model with the same name.
 
 The file uses Ollama's Modelfile format — `FROM`, `PARAMETER`, `SYSTEM`, and `MESSAGE` lines — so it's readable, and can be turned into a model with `ollama create <name> -f <file>`. Tool calls and their raw results aren't saved (the format has no place for them), but the answers the model gave from them are.
 
@@ -239,7 +239,7 @@ The file uses Ollama's Modelfile format — `FROM`, `PARAMETER`, `SYSTEM`, and `
 
 #### Autosave
 
-With `--autosave` (or `/set autosave`, or `THINAI_AUTOSAVE=true`), the session is saved to a local file after every reply, so nothing is lost if you close the terminal. It saves under the session's current name, or — if it hasn't been saved yet — a new one from the date and time, like `chat-2026-09-30-154907`. `/save <name>` renames that file, and autosave carries on under the new name. Resuming a saved session with autosave on keeps updating that session's file, and `/clear` starts a new file for the new conversation.
+With `--autosave` (or `/set autosave`, or `SKINNY_AUTOSAVE=true`), the session is saved to a local file after every reply, so nothing is lost if you close the terminal. It saves under the session's current name, or — if it hasn't been saved yet — a new one from the date and time, like `chat-2026-09-30-154907`. `/save <name>` renames that file, and autosave carries on under the new name. Resuming a saved session with autosave on keeps updating that session's file, and `/clear` starts a new file for the new conversation.
 
 ### Conversation memory
 
@@ -275,7 +275,7 @@ Override any of the four colors on the command line:
 (`--user-emphasis-color` and `--model-emphasis-color` still work as aliases for the italic flags.) Each accepts a hex code (`#RRGGBB`), a 256-color palette index (`0`-`255`), or a basic name (`red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `black`, a `bright`-prefixed variant like `brightgreen`, or `gray`/`grey`):
 
 ```bash
-./bin/thinai.js llama2 --user-normal-color cyan --model-normal-color "#ff8800"
+./bin/skinnyai.js llama2 --user-normal-color cyan --model-normal-color "#ff8800"
 ```
 
 Colors are only applied on a real terminal; the flags are silently ignored when output is redirected to a file or pipe.
@@ -284,7 +284,7 @@ Colors are only applied on a real terminal; the flags are silently ignored when 
 
 ### Quick chat session
 ```bash
-$ ./bin/thinai.js llama2
+$ ./bin/skinnyai.js llama2
 🚀 Ollama Interactive Chat
 📦 Model: llama2
 ⏱️  Keep-alive: 1h
@@ -305,18 +305,18 @@ Neural networks are inspired by biological neurons...
 ### Extended session
 ```bash
 # Keep a large model loaded for 3 hours of work
-node bin/thinai.js mistral --keep-alive 3h
+node bin/skinnyai.js mistral --keep-alive 3h
 ```
 
 ### Remote connection
 ```bash
 # Chat with Ollama running on another machine
-./bin/thinai.js neural-chat --host http://192.168.1.50:11434
+./bin/skinnyai.js neural-chat --host http://192.168.1.50:11434
 ```
 
 ## Ollama account: cloud models and hosted search
 
-A free [ollama.com](https://ollama.com) account gives you an API key with usage-limited access to cloud models (e.g. `gemma4:31b`) and to Ollama's web search and fetch APIs. thinai reads the key from the `OLLAMA_API_KEY` environment variable. Rather than putting the key in a plain-text file, you can keep it in the macOS Keychain and load it from `~/.zshrc`:
+A free [ollama.com](https://ollama.com) account gives you an API key with usage-limited access to cloud models (e.g. `gemma4:31b`) and to Ollama's web search and fetch APIs. skinnyai reads the key from the `OLLAMA_API_KEY` environment variable. Rather than putting the key in a plain-text file, you can keep it in the macOS Keychain and load it from `~/.zshrc`:
 
 ```bash
 security add-generic-password -a "$USER" -s OLLAMA_API_KEY -w   # prompts for the key
@@ -326,7 +326,7 @@ echo 'export OLLAMA_API_KEY="$(security find-generic-password -a "$USER" -s OLLA
 **Cloud models:** point `--host` at ollama.com. `/list`, `/show`, and tool calling work the same as with a local server; `/save` and `/load` use local files as always, but `/share` isn't available:
 
 ```bash
-./bin/thinai.js gemma4:31b --host https://ollama.com --tools
+./bin/skinnyai.js gemma4:31b --host https://ollama.com --tools
 ```
 
 The key is only ever sent to `https://ollama.com`, never to other `--host` servers (a local or LAN Ollama, or an `--api openai` server).
@@ -337,14 +337,14 @@ The key is only ever sent to `https://ollama.com`, never to other `--host` serve
 - Searches and fetches count against your account's usage limits, and your queries and the URLs the model reads go to Ollama.
 - The hosted fetch runs on Ollama's servers, so it can't reach your machine or local network.
 
-If a hosted call fails — a usage limit, an outage, or an occasional page Ollama can't fetch — thinai prints a `⚠️` note and falls back to DuckDuckGo or the local fetcher for that call. To use DuckDuckGo only, unset the key for that run: `OLLAMA_API_KEY= ./thinai.js ...`.
+If a hosted call fails — a usage limit, an outage, or an occasional page Ollama can't fetch — skinnyai prints a `⚠️` note and falls back to DuckDuckGo or the local fetcher for that call. To use DuckDuckGo only, unset the key for that run: `OLLAMA_API_KEY= ./skinnyai.js ...`.
 
 ## OpenAI-compatible servers
 
 Pass `--api openai` to talk to an OpenAI-compatible server (vLLM, llama.cpp's `server`, LM Studio, etc.) instead of Ollama:
 
 ```bash
-./bin/thinai.js my-model --api openai --host http://localhost:8000
+./bin/skinnyai.js my-model --api openai --host http://localhost:8000
 ```
 
 `--host` should be the server's base URL (no `/v1` suffix); requests go to `/v1/chat/completions` and `/v1/models`. Streaming, history, thinking-output display (via a de facto `reasoning_content` delta some servers emit for reasoning models — there's no standard field for it), and `/set parameter`/`/set format json`/`/set verbose` all still work, with sampling parameters passed through as top-level OpenAI-style fields.
@@ -399,10 +399,27 @@ npm install
 npm test            # or: npm run test:watch
 ```
 
-They cover markdown rendering (checked against a small terminal emulator, so wrapping and table borders are tested as they'd appear on screen), emoji widths, inline images, the line editor (driven with simulated keystrokes), the Modelfile format, `.env` and flag handling, and `/save`, `/load`, `/share`, and autosave. `test/cli.test.js` runs `bin/thinai.js` end to end against a mock server that speaks both the Ollama and OpenAI APIs. Tests use a temporary `THINAI_HOME`, so they never read or write your real `~/.thinai`.
+They cover markdown rendering (checked against a small terminal emulator, so wrapping and table borders are tested as they'd appear on screen), emoji widths, inline images, the line editor (driven with simulated keystrokes), the Modelfile format, `.env` and flag handling, and `/save`, `/load`, `/share`, and autosave. `test/cli.test.js` runs `bin/skinnyai.js` end to end against a mock server that speaks both the Ollama and OpenAI APIs. Tests use a temporary `SKINNY_HOME`, so they never read or write your real `~/.skinny`.
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the suite on Node 22 and 24 for every push to `main` and every pull request. No real terminal is needed: the tests fake one, including the iTerm2 and kitty image support, so everything runs headless on Linux.
 
 ## Source
 
-The whole tool is the single file `bin/thinai.js`, with no dependencies beyond Node.js itself — copy it wherever you work. Tests live in `test/`.
+The whole tool is the single file `bin/skinnyai.js`, with no runtime dependencies beyond Node.js itself — copy it wherever you work (esbuild and postject are only used to build the standalone binary). Tests live in `test/`.
+
+## macOS app
+
+`npm run build:app` builds `dist/SkinnyAI.app`: a small native shell around a standalone `skinnyai` binary (Node is embedded, so nothing needs installing). Opening it starts a chat in a new Terminal window, or iTerm if it's installed (**Settings… → Open chats in** overrides that). **SkinnyAI → Settings…** (⌘,) edits `~/.skinny/.env`: API key, server, model, and the on/off options. It keeps comments and any variables it doesn't know about, and writes the file readable only by you. On first launch, with no model set, Settings opens automatically.
+
+```bash
+npm run build:app          # ad-hoc signed: runs on this Mac only
+scripts/build-app.sh --dmg # also dist/SkinnyAI-<version>.dmg
+```
+
+To distribute it, sign and notarize with an Apple Developer ID (Gatekeeper blocks unsigned apps on other Macs):
+
+```bash
+SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE=skinnyai scripts/build-app.sh --dmg
+```
+
+`npm run build:sea` builds just the standalone binary (`build/skinnyai`). Both builds are for the architecture of the Mac they run on; an Intel build needs an x64 Node binary.

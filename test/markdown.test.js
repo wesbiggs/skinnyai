@@ -1,23 +1,23 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { captureOutput, fakeTTY, render, setColumns, stripAnsi, Terminal } from './helpers/tty.js';
 
-let thinai;
+let skinnyai;
 
 beforeAll(async () => {
   fakeTTY({ columns: 60 });
-  thinai = await import('../bin/thinai.js');
+  skinnyai = await import('../bin/skinnyai.js');
 });
 
 // What a 60-column terminal shows after `markdown` is rendered.
 async function screen(markdown, options = {}) {
   setColumns(options.columns ?? 60);
-  const output = await render(thinai, markdown, options);
-  return new Terminal(options.columns ?? 60, { widthOf: thinai.graphemeWidth, onlcr: true }).write(output).screen;
+  const output = await render(skinnyai, markdown, options);
+  return new Terminal(options.columns ?? 60, { widthOf: skinnyai.graphemeWidth, onlcr: true }).write(output).screen;
 }
 
 describe('inline styles', () => {
   it('renders bold, italic, strike, and code with SGR codes and hides the markers', async () => {
-    const output = await render(thinai, 'Some **bold**, *italic*, ~~gone~~, and `code`.');
+    const output = await render(skinnyai, 'Some **bold**, *italic*, ~~gone~~, and `code`.');
     expect(stripAnsi(output)).toBe('Some bold, italic, gone, and code.');
     expect(output).toMatch(/\x1b\[0;38;5;83;1mbold/);
     expect(output).toMatch(/\x1b\[0;38;5;28;3mitalic/); // italic uses the narration color
@@ -26,37 +26,37 @@ describe('inline styles', () => {
   });
 
   it('keeps a span going across words', async () => {
-    const output = await render(thinai, '*italic narration spanning words* then plain');
+    const output = await render(skinnyai, '*italic narration spanning words* then plain');
     expect(stripAnsi(output)).toBe('italic narration spanning words then plain');
     expect(output).toMatch(/3mitalic narration spanning words\x1b\[0;38;5;83m then/);
   });
 
   it('leaves snake_case, a lone asterisk, and escaped markers literal', async () => {
-    const output = await render(thinai, 'snake_case_name and 5 * 3 = 15 and \\*not italic\\*');
+    const output = await render(skinnyai, 'snake_case_name and 5 * 3 = 15 and \\*not italic\\*');
     expect(stripAnsi(output)).toBe('snake_case_name and 5 * 3 = 15 and *not italic*');
     expect(output).not.toMatch(/;3m/);
   });
 
   it('treats __dunder__ as bold, like CommonMark', async () => {
-    const output = await render(thinai, 'and __dunder__ is bold');
+    const output = await render(skinnyai, 'and __dunder__ is bold');
     expect(stripAnsi(output)).toBe('and dunder is bold');
     expect(output).toMatch(/1mdunder/);
   });
 
   it("doesn't style markers inside inline code", async () => {
-    const output = await render(thinai, 'run `a *b* c` now');
+    const output = await render(skinnyai, 'run `a *b* c` now');
     expect(stripAnsi(output)).toBe('run a *b* c now');
   });
 
   it("doesn't let an unclosed marker bleed into the next line", async () => {
-    const output = await render(thinai, '*unclosed\nnext line');
+    const output = await render(skinnyai, '*unclosed\nnext line');
     expect(output).toMatch(/\n\x1b\[0;38;5;83mnext line/);
   });
 });
 
 describe('blocks', () => {
   it('renders headings bold without the #s', async () => {
-    const output = await render(thinai, '## Getting started\nbody');
+    const output = await render(skinnyai, '## Getting started\nbody');
     expect(stripAnsi(output)).toBe('Getting started\nbody');
     expect(output).toMatch(/1mGetting/);
   });
@@ -103,7 +103,7 @@ describe('blocks', () => {
 
   it('shows fenced code unwrapped and unstyled, with the fences dimmed', async () => {
     const code = '```python\ndef hello():\n    print("hi *not italic*")\n```\nDone.';
-    const output = await render(thinai, code);
+    const output = await render(skinnyai, code);
     expect(stripAnsi(output)).toBe(code);
     expect(output).toMatch(/\x1b\[38;5;117m {4}print\("hi \*not italic\*"\)/);
   });
@@ -124,7 +124,7 @@ describe('blocks', () => {
 
 describe('links', () => {
   it('turns [text](url) into an underlined OSC 8 hyperlink per word', async () => {
-    const output = await render(thinai, 'See [the Node docs](https://nodejs.org/api/). Done.');
+    const output = await render(skinnyai, 'See [the Node docs](https://nodejs.org/api/). Done.');
     expect(stripAnsi(output)).toBe('See the Node docs. Done.');
     for (const word of ['the', 'Node', 'docs']) {
       expect(output).toContain(`\x1b]8;;https://nodejs.org/api/\x1b\\\x1b[0;38;5;83;4m${word}\x1b]8;;\x1b\\`);
@@ -132,13 +132,13 @@ describe('links', () => {
   });
 
   it('leaves [brackets] without a URL, and links inside code, alone', async () => {
-    const output = await render(thinai, 'Also [not a link] here and `[x](y)` in code.');
+    const output = await render(skinnyai, 'Also [not a link] here and `[x](y)` in code.');
     expect(stripAnsi(output)).toBe('Also [not a link] here and [x](y) in code.');
     expect(output).not.toContain('\x1b]8;;');
   });
 
   it('shows links with other schemes as plain text', async () => {
-    const output = await render(thinai, '[bad](javascript:alert) text');
+    const output = await render(skinnyai, '[bad](javascript:alert) text');
     expect(stripAnsi(output)).toBe('bad text');
     expect(output).not.toContain('\x1b]8;;');
   });
@@ -152,20 +152,20 @@ describe('streaming', () => {
   ].join('\n');
 
   it('produces the same output however the text is split into chunks', async () => {
-    const reference = await render(thinai, sample, { chunk: 1 });
+    const reference = await render(skinnyai, sample, { chunk: 1 });
     for (const chunk of [2, 3, 5, 7, 50, sample.length]) {
-      expect(await render(thinai, sample, { chunk })).toBe(reference);
+      expect(await render(skinnyai, sample, { chunk })).toBe(reference);
     }
   });
 
   it('passes text through raw with markdown off', async () => {
-    expect(await render(thinai, sample, { markdown: false })).toBe(sample);
+    expect(await render(skinnyai, sample, { markdown: false })).toBe(sample);
   });
 
   it('passes text through raw when stdout is not a terminal', async () => {
     process.stdout.isTTY = false;
     try {
-      expect(await render(thinai, sample)).toBe(sample);
+      expect(await render(skinnyai, sample)).toBe(sample);
     } finally {
       process.stdout.isTTY = true;
     }
@@ -176,7 +176,7 @@ describe('styleLine', () => {
   it('styles echoed user input per line', () => {
     const capture = captureOutput();
     capture.stop();
-    const styled = thinai.styleLine('user', 'hi *there*\nline **two**');
+    const styled = skinnyai.styleLine('user', 'hi *there*\nline **two**');
     expect(stripAnsi(styled)).toBe('hi there\nline two');
     expect(styled).toMatch(/\x1b\[0;38;5;136;3mthere/);
   });

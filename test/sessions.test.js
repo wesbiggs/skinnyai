@@ -3,20 +3,20 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { captureOutput, fakeTTY, stripAnsi } from './helpers/tty.js';
 import { startMockServer } from './helpers/mock-server.js';
 
-let thinai;
+let skinnyai;
 let server;
 let capture;
 
 beforeAll(async () => {
   fakeTTY({ columns: 80 });
-  thinai = await import('../bin/thinai.js');
+  skinnyai = await import('../bin/skinnyai.js');
   server = await startMockServer();
 });
 
 afterAll(() => server.close());
 
 beforeEach(() => {
-  fs.rmSync(thinai.SESSION_DIR, { recursive: true, force: true });
+  fs.rmSync(skinnyai.SESSION_DIR, { recursive: true, force: true });
   capture = captureOutput();
 });
 
@@ -27,11 +27,11 @@ afterEach(() => {
 });
 
 const output = () => stripAnsi(capture.text);
-const sessionFiles = () => (fs.existsSync(thinai.SESSION_DIR) ? fs.readdirSync(thinai.SESSION_DIR).sort() : []);
-const readSession = (name) => thinai.parseModelfile(fs.readFileSync(thinai.sessionPath(name), 'utf8'));
+const sessionFiles = () => (fs.existsSync(skinnyai.SESSION_DIR) ? fs.readdirSync(skinnyai.SESSION_DIR).sort() : []);
+const readSession = (name) => skinnyai.parseModelfile(fs.readFileSync(skinnyai.sessionPath(name), 'utf8'));
 
 function openaiChat(options = {}) {
-  return new thinai.OllamaChat('some-model', { api: 'openai', host: server.url, ...options });
+  return new skinnyai.OllamaChat('some-model', { api: 'openai', host: server.url, ...options });
 }
 
 function withHistory(chat, ...contents) {
@@ -196,7 +196,7 @@ describe('/load', () => {
 
   it('prefers a saved session over a server model of the same name', async () => {
     await withHistory(openaiChat(), 'saved').save('llama');
-    const chat = new thinai.OllamaChat('m', { host: server.url });
+    const chat = new skinnyai.OllamaChat('m', { host: server.url });
     await chat.load('llama');
     expect(chat.history[0].content).toBe('saved');
   });
@@ -212,7 +212,7 @@ describe('/load', () => {
 
   it('resumes a saved session named on the command line at startup', async () => {
     await withHistory(openaiChat(), 'q', 'a').save('resume-me');
-    const chat = new thinai.OllamaChat('resume-me', { api: 'openai', host: server.url });
+    const chat = new skinnyai.OllamaChat('resume-me', { api: 'openai', host: server.url });
     await chat.loadModelContext();
     expect(chat.model).toBe('some-model');
     expect(chat.sessionName).toBe('resume-me');
@@ -238,7 +238,7 @@ describe('/share', () => {
   });
 
   it('is refused for ollama.com, without contacting it', async () => {
-    const chat = withHistory(new thinai.OllamaChat('m', { host: 'https://ollama.com' }), 'q');
+    const chat = withHistory(new skinnyai.OllamaChat('m', { host: 'https://ollama.com' }), 'q');
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     await chat.share('x');
     expect(output()).toContain("ollama.com doesn't accept shared sessions");
@@ -246,7 +246,7 @@ describe('/share', () => {
   });
 
   it("reports an error when the server can't create models", async () => {
-    await withHistory(new thinai.OllamaChat('m', { host: server.url }), 'q').share('nope');
+    await withHistory(new skinnyai.OllamaChat('m', { host: server.url }), 'q').share('nope');
     expect(output()).toContain('❌ Error sharing session: API error: 404 Not Found');
   });
 
@@ -258,7 +258,7 @@ describe('/share', () => {
     afterEach(() => creator.close());
 
     it('creates a model from the session', async () => {
-      const chat = new thinai.OllamaChat('base', { host: creator.url });
+      const chat = new skinnyai.OllamaChat('base', { host: creator.url });
       chat.setSystemMessage('sys');
       chat.setParameter('temperature', ['0.5']);
       chat.history.push({ role: 'user', content: 'q' }, { role: 'assistant', content: 'a' }, { role: 'tool', content: 'x' });
@@ -272,14 +272,14 @@ describe('/share', () => {
     });
 
     it('defaults to the session name', async () => {
-      const chat = withHistory(new thinai.OllamaChat('base', { host: creator.url }), 'q');
+      const chat = withHistory(new skinnyai.OllamaChat('base', { host: creator.url }), 'q');
       chat.sessionName = 'my-session';
       await chat.share('');
       expect(creator.created[0].model).toBe('my-session');
     });
 
     it('asks before replacing an existing model', async () => {
-      const chat = withHistory(new thinai.OllamaChat('base', { host: creator.url }), 'q');
+      const chat = withHistory(new skinnyai.OllamaChat('base', { host: creator.url }), 'q');
       chat.confirm = vi.fn(async () => false);
       await chat.share('taken');
       expect(chat.confirm).toHaveBeenCalledWith(expect.stringContaining("A model named 'taken' already exists"));

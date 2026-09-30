@@ -1,18 +1,18 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { fakeTTY, render, setColumns, stripAnsi, Terminal } from './helpers/tty.js';
 
-let thinai;
+let skinnyai;
 
 beforeAll(async () => {
   fakeTTY({ columns: 100 });
-  thinai = await import('../bin/thinai.js');
+  skinnyai = await import('../bin/skinnyai.js');
 });
 
 async function screen(markdown, columns = 100) {
   setColumns(columns);
-  const output = await render(thinai, markdown);
+  const output = await render(skinnyai, markdown);
   // Drop the "receiving table" placeholder the table overwrites.
-  const lines = new Terminal(columns, { widthOf: thinai.graphemeWidth, onlcr: true }).write(output).screen;
+  const lines = new Terminal(columns, { widthOf: skinnyai.graphemeWidth, onlcr: true }).write(output).screen;
   return { output, lines };
 }
 
@@ -22,25 +22,25 @@ describe('graphemeWidth', () => {
     ['✅', 2], ['❌', 2], ['🚀', 2], ['⚠️', 2], ['⚠', 1], ['1️⃣', 2],
     ['🇺🇸', 2], ['👩‍💻', 2], ['👍🏽', 2], ['©', 1]
   ])('%s is %i column(s) wide', (text, width) => {
-    expect(thinai.visibleWidth(text)).toBe(width);
+    expect(skinnyai.visibleWidth(text)).toBe(width);
   });
 
   it('ignores SGR and hyperlink escape sequences', () => {
-    expect(thinai.visibleWidth('\x1b[0;38;5;83;1mbold\x1b[0m \x1b]8;;https://x\x1b\\link\x1b]8;;\x1b\\')).toBe(9);
+    expect(skinnyai.visibleWidth('\x1b[0;38;5;83;1mbold\x1b[0m \x1b]8;;https://x\x1b\\link\x1b]8;;\x1b\\')).toBe(9);
   });
 });
 
 describe('splitTableRow', () => {
   it('splits on pipes, trimming cells', () => {
-    expect(thinai.splitTableRow('| a | b  |c|')).toEqual(['a', 'b', 'c']);
+    expect(skinnyai.splitTableRow('| a | b  |c|')).toEqual(['a', 'b', 'c']);
   });
 
   it('keeps escaped pipes and pipes inside code', () => {
-    expect(thinai.splitTableRow('| a \\| b | `x|y` |')).toEqual(['a | b', '`x|y`']);
+    expect(skinnyai.splitTableRow('| a \\| b | `x|y` |')).toEqual(['a | b', '`x|y`']);
   });
 
   it('handles a missing space before the closing pipe', () => {
-    expect(thinai.splitTableRow('| **Llama.cpp**| Local |')).toEqual(['**Llama.cpp**', 'Local']);
+    expect(skinnyai.splitTableRow('| **Llama.cpp**| Local |')).toEqual(['**Llama.cpp**', 'Local']);
   });
 });
 
@@ -96,7 +96,7 @@ describe('tables', () => {
       '| **Mods** | ❌ No | ✅ Yes |'
     ].join('\n'));
     const table = lines.filter((line) => line);
-    const widths = table.map((line) => thinai.visibleWidth(line));
+    const widths = table.map((line) => skinnyai.visibleWidth(line));
     expect(widths, table.join('\n')).toEqual(widths.map(() => widths[0]));
     expect(table[3]).toBe('│ Ollama │ ✅ Yes     │ ❌ No     │');
     expect(table[4]).toBe('│ Aider  │ ⚠️ Both    │ ✅ Yes    │');

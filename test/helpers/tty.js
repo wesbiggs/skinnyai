@@ -3,7 +3,7 @@ import { PassThrough } from 'node:stream';
 import { vi } from 'vitest';
 
 // Makes process.stdout look like a terminal of the given size. Must run
-// before thinai.js is imported, since it decides on colors at load time.
+// before skinnyai.js is imported, since it decides on colors at load time.
 export function fakeTTY({ columns = 60, rows = 40 } = {}) {
   Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true, writable: true });
   Object.defineProperty(process.stdout, 'columns', { value: columns, configurable: true, writable: true });
@@ -46,10 +46,10 @@ export function stripAnsi(text) {
 
 // Renders markdown through a fresh renderer, fed in chunks of `chunk`
 // characters, and returns the raw terminal output.
-export async function render(thinai, markdown, { chunk = 3, role = 'assistant', ...options } = {}) {
+export async function render(skinnyai, markdown, { chunk = 3, role = 'assistant', ...options } = {}) {
   const capture = captureOutput();
   try {
-    const renderer = thinai.createMarkdownRenderer(role, 0, options);
+    const renderer = skinnyai.createMarkdownRenderer(role, 0, options);
     for (let i = 0; i < markdown.length; i += chunk) await renderer.write(markdown.slice(i, i + chunk));
     await renderer.end();
   } finally {
@@ -58,7 +58,7 @@ export async function render(thinai, markdown, { chunk = 3, role = 'assistant', 
   return capture.text;
 }
 
-// A minimal terminal emulator: enough of VT100 to replay what thinai
+// A minimal terminal emulator: enough of VT100 to replay what skinnyai
 // writes (cursor moves, erase, soft wrap with the right-margin "pending
 // wrap" state, wide characters) and read back what's on screen. Escape
 // sequences it doesn't need (colors, hyperlinks, images) are ignored.

@@ -15,13 +15,13 @@ const DEFAULT_KEEP_ALIVE = '1h';
 const DEFAULT_OLLAMA_HOST = 'http://localhost:11434';
 
 // Saved sessions and the .env defaults file live here.
-const THINAI_HOME = process.env.THINAI_HOME || path.join(os.homedir(), '.thinai');
+const SKINNY_HOME = process.env.SKINNY_HOME || path.join(os.homedir(), '.skinny');
 
-// Default settings can be kept in $THINAI_HOME/.env as KEY=value lines (see
+// Default settings can be kept in $SKINNY_HOME/.env as KEY=value lines (see
 // ENV_SETTINGS and the README). Variables already in the environment win
 // over the file, and command-line flags win over both. It's loaded before
 // anything reads process.env, so OLLAMA_API_KEY can live there too.
-const ENV_FILE = path.join(THINAI_HOME, '.env');
+const ENV_FILE = path.join(SKINNY_HOME, '.env');
 
 function loadEnvFile(file) {
   let text;
@@ -1437,7 +1437,7 @@ function inputPosition(text) {
 // servers. They use the same Modelfile format /save creates on an Ollama
 // server (FROM, SYSTEM, PARAMETER, MESSAGE), one file per name, so a saved
 // session can also be turned into a real model with `ollama create -f`.
-const SESSION_DIR = path.join(THINAI_HOME, 'sessions');
+const SESSION_DIR = path.join(SKINNY_HOME, 'sessions');
 const SESSION_SUFFIX = '.Modelfile';
 
 // Names can hold anything a model name can (like 'me/chat:v2'), so they're
@@ -1453,7 +1453,7 @@ function quoteModelfile(text) {
 }
 
 function formatModelfile({ from, system, parameters, messages }) {
-  const lines = [`# Saved by thinai on ${new Date().toISOString()}`, `FROM ${from}`];
+  const lines = [`# Saved by skinnyai on ${new Date().toISOString()}`, `FROM ${from}`];
   for (const [name, value] of Object.entries(parameters)) {
     for (const v of Array.isArray(value) ? value : [value]) {
       lines.push(`PARAMETER ${name} ${typeof v === 'string' && /\s|"/.test(v) ? JSON.stringify(v) : v}`);
@@ -2236,7 +2236,7 @@ class OllamaChat {
       if (renaming) console.log(`\n✅ Renamed session '${previous}' to '${target}' (${file})`);
       else console.log(`\n✅ Saved session '${target}' to ${file}`);
       if (previous && previous !== target && !renaming) console.log(`   '${previous}' is unchanged; from now on this session saves as '${target}'.`);
-      console.log(`   Resume it with /load ${target}, or start with: thinai.js ${target}\n`);
+      console.log(`   Resume it with /load ${target}, or start with: skinnyai.js ${target}\n`);
     } catch (error) {
       console.error(`\n❌ Error saving session: ${error.message}\n`);
     }
@@ -2930,21 +2930,21 @@ class OllamaChat {
 // Settings the .env file (or the environment) can default, by variable
 // name: [option key, type]. Each matches a command-line flag.
 const ENV_SETTINGS = {
-  THINAI_MODEL: ['model', 'string'],
-  THINAI_HOST: ['host', 'string'],
-  THINAI_API: ['api', 'string'],
-  THINAI_KEEP_ALIVE: ['keepAlive', 'string'],
-  THINAI_TOOLS: ['tools', 'boolean'],
-  THINAI_DATE: ['date', 'boolean'],
-  THINAI_MARKDOWN: ['markdown', 'boolean'],
-  THINAI_IMAGES: ['images', 'boolean'],
-  THINAI_AUTOSAVE: ['autosave', 'boolean'],
-  THINAI_HIDE_THINKING: ['hideThinking', 'boolean'],
-  THINAI_STOP_ON_EXIT: ['stopOnExit', 'boolean'],
-  THINAI_USER_NORMAL_COLOR: ['userNormalColor', 'string'],
-  THINAI_USER_ITALIC_COLOR: ['userEmphasisColor', 'string'],
-  THINAI_MODEL_NORMAL_COLOR: ['modelNormalColor', 'string'],
-  THINAI_MODEL_ITALIC_COLOR: ['modelEmphasisColor', 'string']
+  SKINNY_MODEL: ['model', 'string'],
+  SKINNY_HOST: ['host', 'string'],
+  SKINNY_API: ['api', 'string'],
+  SKINNY_KEEP_ALIVE: ['keepAlive', 'string'],
+  SKINNY_TOOLS: ['tools', 'boolean'],
+  SKINNY_DATE: ['date', 'boolean'],
+  SKINNY_MARKDOWN: ['markdown', 'boolean'],
+  SKINNY_IMAGES: ['images', 'boolean'],
+  SKINNY_AUTOSAVE: ['autosave', 'boolean'],
+  SKINNY_HIDE_THINKING: ['hideThinking', 'boolean'],
+  SKINNY_STOP_ON_EXIT: ['stopOnExit', 'boolean'],
+  SKINNY_USER_NORMAL_COLOR: ['userNormalColor', 'string'],
+  SKINNY_USER_ITALIC_COLOR: ['userEmphasisColor', 'string'],
+  SKINNY_MODEL_NORMAL_COLOR: ['modelNormalColor', 'string'],
+  SKINNY_MODEL_ITALIC_COLOR: ['modelEmphasisColor', 'string']
 };
 
 function envOptions() {
@@ -3018,7 +3018,7 @@ function parseArgs() {
 
 function printUsage() {
   console.log(`
-Usage: thinai.js [model] [options]
+Usage: skinnyai.js [model] [options]
 
 Arguments:
   model                Model name (e.g., llama2, neural-chat)
@@ -3070,22 +3070,22 @@ Options:
 
 Defaults:
   Settings can be defaulted in ${ENV_FILE}
-  (or $THINAI_HOME/.env) as KEY=value lines, e.g.:
-    THINAI_MODEL=gemma4:31b        THINAI_HOST=https://ollama.com
-    THINAI_TOOLS=true              THINAI_AUTOSAVE=true
+  (or $SKINNY_HOME/.env) as KEY=value lines, e.g.:
+    SKINNY_MODEL=gemma4:31b        SKINNY_HOST=https://ollama.com
+    SKINNY_TOOLS=true              SKINNY_AUTOSAVE=true
     OLLAMA_API_KEY=...
-  Also: THINAI_API, THINAI_KEEP_ALIVE, THINAI_DATE, THINAI_MARKDOWN,
-  THINAI_IMAGES, THINAI_HIDE_THINKING, THINAI_STOP_ON_EXIT, and
-  THINAI_{USER,MODEL}_{NORMAL,ITALIC}_COLOR. Environment variables override
+  Also: SKINNY_API, SKINNY_KEEP_ALIVE, SKINNY_DATE, SKINNY_MARKDOWN,
+  SKINNY_IMAGES, SKINNY_HIDE_THINKING, SKINNY_STOP_ON_EXIT, and
+  SKINNY_{USER,MODEL}_{NORMAL,ITALIC}_COLOR. Environment variables override
   the file, and command-line flags override both.
 
 Examples:
-  thinai.js llama2
-  thinai.js neural-chat --keep-alive 30m
-  thinai.js --model mistral --keep-alive 2h --host http://192.168.1.100:11434
-  thinai.js llama2 --user-normal-color cyan --model-normal-color "#ff8800"
-  thinai.js llama2 --stop-on-exit
-  thinai.js qwen3 --tools
+  skinnyai.js llama2
+  skinnyai.js neural-chat --keep-alive 30m
+  skinnyai.js --model mistral --keep-alive 2h --host http://192.168.1.100:11434
+  skinnyai.js llama2 --user-normal-color cyan --model-normal-color "#ff8800"
+  skinnyai.js llama2 --stop-on-exit
+  skinnyai.js qwen3 --tools
 `);
 }
 
@@ -3117,7 +3117,7 @@ async function main() {
 }
 
 // Run only when executed directly, not when imported (as the tests do).
-// argv[1] may be a symlink, like ~/.local/bin/thinai, so compare real paths.
+// argv[1] may be a symlink, like ~/.local/bin/skinnyai, so compare real paths.
 function invokedDirectly() {
   try {
     return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -3134,6 +3134,6 @@ export {
   sniffImage, imageSequence, loadImage,
   formatModelfile, parseModelfile, saveLocalSession, readLocalSession, listLocalSessions,
   localSessionExists, isAutosaveName, autosaveName, sessionPath,
-  loadEnvFile, envOptions, parseArgs, isOllamaCom, OllamaChat,
+  loadEnvFile, envOptions, parseArgs, isOllamaCom, OllamaChat, main,
   PROMPT, SESSION_DIR, ENV_FILE
 };

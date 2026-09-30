@@ -1,4 +1,4 @@
-// End-to-end: runs thinai.js as a real process with piped input, against
+// End-to-end: runs skinnyai.js as a real process with piped input, against
 // the mock server. Output isn't a terminal here, so markdown stays raw.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { startMockServer } from './helpers/mock-server.js';
 
-const SCRIPT = fileURLToPath(new URL('../bin/thinai.js', import.meta.url));
+const SCRIPT = fileURLToPath(new URL('../bin/skinnyai.js', import.meta.url));
 let server;
 let home;
 
@@ -19,14 +19,14 @@ beforeAll(async () => {
 afterAll(() => server.close());
 
 beforeEach(() => {
-  home = fs.mkdtempSync(path.join(os.tmpdir(), 'thinai-cli-'));
+  home = fs.mkdtempSync(path.join(os.tmpdir(), 'skinnyai-cli-'));
   server.requests.length = 0;
 });
 
 function run(args, input = '', { env = {}, script = SCRIPT } = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [script, ...args], {
-      env: { ...process.env, THINAI_HOME: home, ...env }
+      env: { ...process.env, SKINNY_HOME: home, ...env }
     });
     let stdout = '';
     let stderr = '';
@@ -93,12 +93,12 @@ describe('saved sessions', () => {
 describe('defaults from .env', () => {
   beforeEach(() => {
     fs.writeFileSync(path.join(home, '.env'), [
-      '# thinai defaults',
-      'THINAI_MODEL=envmodel',
-      'THINAI_API=openai',
-      `export THINAI_HOST="${server.url}"`,
-      'THINAI_AUTOSAVE=yes   # comment',
-      'THINAI_TOOLS=true'
+      '# skinnyai defaults',
+      'SKINNY_MODEL=envmodel',
+      'SKINNY_API=openai',
+      `export SKINNY_HOST="${server.url}"`,
+      'SKINNY_AUTOSAVE=yes   # comment',
+      'SKINNY_TOOLS=true'
     ].join('\n'));
   });
 
@@ -112,17 +112,17 @@ describe('defaults from .env', () => {
   });
 
   it('lets environment variables override the file, and flags override both', async () => {
-    const { stdout } = await run(['climodel', '--no-autosave'], '/show settings\n', { env: { THINAI_TOOLS: 'false' } });
+    const { stdout } = await run(['climodel', '--no-autosave'], '/show settings\n', { env: { SKINNY_TOOLS: 'false' } });
     expect(stdout).toMatch(/model +climodel/);
     expect(stdout).toMatch(/tools +off/);
     expect(stdout).toMatch(/autosave +off/);
   });
 
   it('fails clearly on a bad on/off value', async () => {
-    fs.appendFileSync(path.join(home, '.env'), '\nTHINAI_IMAGES=maybe\n');
+    fs.appendFileSync(path.join(home, '.env'), '\nSKINNY_IMAGES=maybe\n');
     const { stderr, code } = await run([]);
     expect(code).toBe(1);
-    expect(stderr).toContain("THINAI_IMAGES must be true or false (got 'maybe')");
+    expect(stderr).toContain("SKINNY_IMAGES must be true or false (got 'maybe')");
   });
 });
 
@@ -130,7 +130,7 @@ describe('startup', () => {
   it('prints usage for --help', async () => {
     const { stdout, code } = await run(['--help']);
     expect(code).toBe(0);
-    expect(stdout).toContain('Usage: thinai.js [model] [options]');
+    expect(stdout).toContain('Usage: skinnyai.js [model] [options]');
   });
 
   it('exits with an error when no model is given', async () => {
@@ -140,9 +140,9 @@ describe('startup', () => {
   });
 
   it('runs when started through a symlink, as when installed on the PATH', async () => {
-    const link = path.join(home, 'thinai');
+    const link = path.join(home, 'skinnyai');
     fs.symlinkSync(SCRIPT, link);
     const { stdout } = await run(['--help'], '', { script: link });
-    expect(stdout).toContain('Usage: thinai.js');
+    expect(stdout).toContain('Usage: skinnyai.js');
   });
 });

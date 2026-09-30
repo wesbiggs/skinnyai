@@ -1,10 +1,10 @@
 {
-  "name": "thinai",
+  "name": "skinnyai",
   "version": "0.9.0",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "thinai": "bin/thinai.js"
+    "skinnyai": "bin/skinnyai.js"
   },
   "files": [
     "bin"
@@ -13,12 +13,16 @@
     "node": ">=22"
   },
   "scripts": {
-    "ollama": "node bin/thinai.js",
-    "openai": "node bin/thinai.js --api openai",
+    "ollama": "node bin/skinnyai.js",
+    "openai": "node bin/skinnyai.js --api openai",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "build:sea": "node scripts/build-sea.mjs --out build/skinnyai",
+    "build:app": "scripts/build-app.sh"
   },
   "devDependencies": {
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6",
     "vitest": "^5.0.3"
   }
 }

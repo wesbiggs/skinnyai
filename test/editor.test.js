@@ -1,13 +1,13 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { captureOutput, fakeTTY, FakeStdin, KEYS, setColumns, Terminal } from './helpers/tty.js';
 
-let thinai;
+let skinnyai;
 let stdin;
 let capture;
 
 beforeAll(async () => {
   fakeTTY({ columns: 70 });
-  thinai = await import('../bin/thinai.js');
+  skinnyai = await import('../bin/skinnyai.js');
 });
 
 beforeEach(() => {
@@ -28,11 +28,11 @@ async function edit(chat, ...keys) {
   const result = chat.editLine();
   await stdin.type(...keys);
   const text = await result;
-  const terminal = new Terminal(70, { widthOf: thinai.graphemeWidth }).write(capture.text.slice(start));
+  const terminal = new Terminal(70, { widthOf: skinnyai.graphemeWidth }).write(capture.text.slice(start));
   return { text, screen: terminal.screen, cursor: terminal.cursor };
 }
 
-const newChat = () => new thinai.OllamaChat('m', {});
+const newChat = () => new skinnyai.OllamaChat('m', {});
 
 describe('line editor', () => {
   it('submits on Enter and echoes the prompt and text', async () => {
@@ -114,7 +114,7 @@ describe('line editor', () => {
     const at = [...expected].length - 20;
     expect(text).toBe([...expected].slice(0, at).join('') + '!' + [...expected].slice(at).join(''));
     expect(screen.slice(0, 2).join('')).toBe(`> ${text}`);
-    expect(screen.every((line) => thinai.visibleWidth(line) <= 70)).toBe(true);
+    expect(screen.every((line) => skinnyai.visibleWidth(line) <= 70)).toBe(true);
   });
 
   it('treats an emoji cluster as one character', async () => {

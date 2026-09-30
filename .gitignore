@@ -1,2 +1,7 @@
 .claude
 node_modules
+dist
+build/sea
+build/skinnyai
+build/AppIcon.iconset
+build/AppIcon-preview.png
