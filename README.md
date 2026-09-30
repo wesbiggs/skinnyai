@@ -10,6 +10,7 @@ A terminal-based Node.js chat interface for Ollama and OpenAI-compatible endpoin
 - ✅ Full `ollama run` command parity (`/set`, `/show`, `/load`, `/save`, `/clear`, `/bye`, `/?`, `/list`, ...)
 - ✅ Conversation history that's actually sent back to the model each turn (via `/api/chat`)
 - ✅ `--api openai` mode for OpenAI-compatible servers (vLLM, llama.cpp server, LM Studio, ...) — see [OpenAI-compatible servers](#openai-compatible-servers)
+- ✅ Opt-in tool calling with a built-in DuckDuckGo `web_search` tool — see [Tool calling and web search](#tool-calling-and-web-search)
 - ✅ Minimal dependencies (uses Node.js built-ins)
 
 ## Prerequisites
@@ -123,6 +124,7 @@ This client mirrors the command set of the native `ollama run` interactive termi
 | `/set verbose` / `/set quiet` | Show/hide token-count and timing stats after each response |
 | `/set think [level]` / `/set nothink` | Enable/disable extended thinking, for models that support it |
 | `/set showthinking` / `/set hidethinking` | Show/hide a thinking model's reasoning as it streams |
+| `/set tools` / `/set notools` | Let the model call tools (`web_search`), or disable |
 
 `/set history`, `/set nohistory`, `/set wordwrap`, and `/set nowordwrap` are recognized but don't apply here — this client has no line-history recall and lets your terminal handle wrapping natively, so it prints a note instead of pretending to toggle something.
 
@@ -131,6 +133,23 @@ This client mirrors the command set of the native `ollama run` interactive termi
 For models with a `thinking` capability (check with `/show info`), reasoning is streamed as it's produced, wrapped in `Thinking...` / `...done thinking.` markers and dimmed, the same way `ollama run` displays it — then the final answer streams normally below it. It's on by default; pass `--hide-thinking` on the command line, or run `/set hidethinking` mid-session, to suppress it and only show the final answer. (Thinking is only requested from the model at all if `think` is enabled via `/set think`, per the model's default.)
 
 If generation runs out of its token/context budget while the model is still mid-thought, Ollama reports `done_reason: "length"` and stops — the reasoning text you see really is cut off mid-sentence, not a display bug. In that case a `⚠️  cut off - ran out of tokens while still thinking` warning prints instead of `...done thinking.`; raise the budget with `/set parameter num_predict <n>` (or `num_ctx` if the prompt itself is long) and try again.
+
+### Tool calling and web search
+
+Pass `--tools` (or run `/set tools` mid-session) to offer the model a `web_search` tool:
+
+```bash
+./thinai.js qwen3 --tools
+```
+
+When the model decides to search, thinai runs the query itself, shows a dimmed `🔧 searching: "..."` line, sends the results back to the model, and streams its final answer. A single reply can involve several searches; after 5 rounds of tool calls, the model is asked to answer without tools. Tool calls and results are kept in the conversation history, so follow-up questions can refer to them.
+
+This needs a model with the `tools` capability (check with `/show info`) — e.g. `llama3.1`, `llama3.2`, `qwen3`, `mistral-nemo`. Models without it make Ollama return an error; turn tools back off with `/set notools`. Small models like `llama3.2:3b` do call the tool, but they're unreliable at using the results well; 8B+ models do noticeably better. It works the same way under `--api openai`, for servers that support OpenAI-style `tools`.
+
+Search is done by DuckDuckGo, with no API key:
+
+1. The official [Instant Answer API](https://api.duckduckgo.com/api) is tried first. It returns encyclopedia-style summaries and direct answers, not web results, so many queries come back empty.
+2. Otherwise, thinai falls back to scraping `html.duckduckgo.com` for the top 8 results (title, URL, snippet). That endpoint is unofficial: it can break if DuckDuckGo changes its markup, and rapid or heavy use gets blocked as automated traffic. When that happens, the model is told the search failed.
 
 ### `/show`
 

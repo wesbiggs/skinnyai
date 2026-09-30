@@ -37,6 +37,144 @@ function streamingPost(url, body) {
   });
 }
 
+// Reads a (non-streamed) error response body so API errors can show the
+// server's actual message, e.g. Ollama's "... does not support tools".
+async function readErrorBody(res) {
+  let text = '';
+  try {
+    for await (const chunk of res) text += chunk;
+    const json = JSON.parse(text);
+    return json.error?.message || json.error || text;
+  } catch (e) {
+    return text;
+  }
+}
+
+// --- Tools (enabled with --tools or /set tools) ---
+
+const MAX_TOOL_ROUNDS = 5;
+const SEARCH_TIMEOUT_MS = 10000;
+const MAX_SEARCH_RESULTS = 8;
+// DuckDuckGo's HTML endpoint serves a bot-check page (HTTP 202, 'anomaly'
+// markup) to clients that don't look like a browser.
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36',
+  'Accept': 'text/html',
+  'Accept-Language': 'en-US,en;q=0.9'
+};
+
+function stripHtml(html) {
+  return html
+    .replace(/<[^>]+>/g, '')
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// DuckDuckGo's official Instant Answer API: Wikipedia-style abstracts and
+// direct answers only, not web results - many queries come back empty.
+async function ddgInstantAnswer(query) {
+  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`Instant Answer API: HTTP ${res.status}`);
+  const data = await res.json();
+  const lines = [];
+  if (data.Answer) lines.push(`Answer: ${stripHtml(String(data.Answer))}`);
+  if (data.AbstractText) {
+    lines.push(`${data.Heading ? data.Heading + ': ' : ''}${data.AbstractText}`);
+    if (data.AbstractURL) lines.push(`Source: ${data.AbstractURL}`);
+  }
+  if (data.Definition) {
+    lines.push(`Definition: ${data.Definition}`);
+    if (data.DefinitionURL) lines.push(`Source: ${data.DefinitionURL}`);
+  }
+  return lines.join('\n');
+}
+
+// Unofficial: scrapes html.duckduckgo.com. May break if the markup changes,
+// and heavy use gets rate-limited/CAPTCHA'd.
+async function ddgHtmlSearch(query) {
+  const res = await fetch('https://html.duckduckgo.com/html/', {
+    method: 'POST',
+    headers: {
+      ...BROWSER_HEADERS,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Referer': 'https://html.duckduckgo.com/'
+    },
+    body: new URLSearchParams({ q: query, b: '' }),
+    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS)
+  });
+  const html = await res.text();
+  if (res.status === 202 || /anomaly-modal/.test(html)) {
+    throw new Error('DuckDuckGo blocked the request as automated traffic (try again later)');
+  }
+  if (!res.ok) throw new Error(`DuckDuckGo search: HTTP ${res.status}`);
+
+  const results = [];
+  for (const block of html.split('class="result__a"').slice(1)) {
+    const link = block.match(/^[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!link) continue;
+    let href = link[1].replace(/&amp;/g, '&');
+    // Older markup routes results through a //duckduckgo.com/l/?uddg=<url> redirect.
+    const redirect = href.match(/[?&]uddg=([^&]+)/);
+    if (redirect) href = decodeURIComponent(redirect[1]);
+    if (href.includes('duckduckgo.com/y.js')) continue; // ad
+    const snippet = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/);
+    results.push({ title: stripHtml(link[2]), url: href, snippet: snippet ? stripHtml(snippet[1]) : '' });
+    if (results.length >= MAX_SEARCH_RESULTS) break;
+  }
+  return results
+    .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? `\n   ${r.snippet}` : ''}`)
+    .join('\n');
+}
+
+async function webSearch({ query }) {
+  if (!query || typeof query !== 'string') throw new Error("missing 'query' argument");
+  let instant = '';
+  try {
+    instant = await ddgInstantAnswer(query);
+  } catch (e) {
+    // Fall through to the HTML search.
+  }
+  if (instant) return instant;
+  return (await ddgHtmlSearch(query)) || `No results found for "${query}".`;
+}
+
+const TOOLS = {
+  web_search: {
+    description: 'Search the web with DuckDuckGo. Use this for current events, recent facts, or anything you are unsure about. Returns result titles, URLs, and snippets.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The search query' }
+      },
+      required: ['query']
+    },
+    describe: (args) => `searching: "${args.query}"`,
+    run: webSearch
+  }
+};
+
+const TOOL_DEFINITIONS = Object.entries(TOOLS).map(([name, tool]) => ({
+  type: 'function',
+  function: { name, description: tool.description, parameters: tool.parameters }
+}));
+
+// Tool output goes straight back to the model as a 'tool' message; errors are
+// reported the same way so the model can recover or tell the user.
+async function runTool(name, args) {
+  const tool = TOOLS[name];
+  if (!tool) return `Error: unknown tool '${name}'`;
+  try {
+    return await tool.run(args || {});
+  } catch (error) {
+    return `Error: ${error.message}`;
+  }
+}
+
 // *Starred text* is narration in RP-style chats. Each speaker gets its own
 // dialogue/narration pair so turns are visually distinct: user = yellow, assistant = green.
 const supportsColor = Boolean(process.stdout.isTTY);
@@ -282,6 +420,7 @@ class OllamaChat {
     this.showThinking = !options.hideThinking;
     this.stopOnExit = Boolean(options.stopOnExit);
     this.api = options.api === 'openai' ? 'openai' : 'ollama';
+    this.toolsEnabled = Boolean(options.tools);
   }
 
   // Unloads the current model from Ollama (same effect as `ollama stop`),
@@ -377,7 +516,7 @@ class OllamaChat {
         process.stdout.write('You: ');
         this.writeWrapped('user', message.content, 'You: '.length);
         process.stdout.write('\n');
-      } else if (message.role === 'assistant') {
+      } else if (message.role === 'assistant' && message.content) {
         process.stdout.write('\n');
         this.writeWrapped('assistant', message.content, 0);
         process.stdout.write('\n\n');
@@ -424,6 +563,7 @@ class OllamaChat {
     if (Object.keys(this.options).length > 0) body.options = this.options;
     if (this.format) body.format = this.format;
     if (this.think !== undefined) body.think = this.think;
+    if (this.toolsEnabled) body.tools = TOOL_DEFINITIONS;
     return body;
   }
 
@@ -443,6 +583,7 @@ class OllamaChat {
       ...this.options
     };
     if (this.format === 'json') body.response_format = { type: 'json_object' };
+    if (this.toolsEnabled) body.tools = TOOL_DEFINITIONS;
     return body;
   }
 
@@ -451,18 +592,87 @@ class OllamaChat {
     this.history.push({ role: 'user', content: prompt });
 
     process.stdout.write('\n');
+
+    try {
+      // Each round streams one model response; if it asked for tools, run
+      // them, append their results to history, and let the model continue.
+      // After MAX_TOOL_ROUNDS, the last request omits tools so the model has
+      // to answer with what it has.
+      for (let round = 0; ; round++) {
+        const toolCalls = await this.streamTurn(round < MAX_TOOL_ROUNDS);
+        if (toolCalls.length === 0 || round >= MAX_TOOL_ROUNDS) break;
+        await this.runToolCalls(toolCalls);
+      }
+    } catch (error) {
+      console.error(`\n❌ Error: ${error.message}\n`);
+    }
+  }
+
+  async runToolCalls(toolCalls) {
+    for (const call of toolCalls) {
+      const { name } = call.function;
+      let args = call.function.arguments;
+      // OpenAI-style APIs send arguments as a JSON string; Ollama sends an object.
+      if (typeof args === 'string') {
+        try {
+          args = args ? JSON.parse(args) : {};
+        } catch (e) {
+          args = null;
+        }
+      }
+      const label = args && TOOLS[name]?.describe ? TOOLS[name].describe(args) : name;
+      process.stdout.write(`${ANSI.assistant.narration}🔧 ${label}${ANSI.reset}\n`);
+
+      const result = args === null
+        ? `Error: couldn't parse arguments for '${name}' as JSON`
+        : await runTool(name, args);
+      if (result.startsWith('Error:')) {
+        process.stdout.write(`${ANSI.assistant.narration}   ${result}${ANSI.reset}\n`);
+      }
+
+      if (this.api === 'openai') {
+        this.history.push({ role: 'tool', tool_call_id: call.id, content: result });
+      } else {
+        this.history.push({ role: 'tool', tool_name: name, content: result });
+      }
+    }
+    process.stdout.write('\n');
+  }
+
+  // Streams one model response to the terminal and records it in history.
+  // Returns any tool calls the model made (empty if it just answered).
+  async streamTurn(allowTools = true) {
     let spinner = this.startSpinner();
 
     try {
       const isOpenAI = this.api === 'openai';
       const body = isOpenAI ? this.buildOpenAIChatBody() : this.buildOllamaChatBody();
+      if (!allowTools) delete body.tools;
       const path = isOpenAI ? '/v1/chat/completions' : '/api/chat';
 
       const response = await streamingPost(`${this.host}${path}`, body);
 
       if (!response.ok) {
-        throw new Error(`API error: ${response.status} ${response.statusText}`);
+        const detail = await readErrorBody(response.body);
+        let message = `API error: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ''}`;
+        if (this.toolsEnabled && /tool/i.test(detail)) {
+          message += "\n   (this model may not support tools - try '/set notools')";
+        }
+        throw new Error(message);
       }
+
+      // Ollama sends each tool call whole; OpenAI-style servers stream them
+      // as fragments keyed by index, with the arguments string split up.
+      const toolCalls = [];
+      const collectOpenAIToolCalls = (deltas) => {
+        for (const delta of deltas) {
+          const i = delta.index ?? toolCalls.length;
+          toolCalls[i] ??= { id: '', type: 'function', function: { name: '', arguments: '' } };
+          if (delta.id) toolCalls[i].id = delta.id;
+          if (delta.function?.name) toolCalls[i].function.name += delta.function.name;
+          if (delta.function?.arguments) toolCalls[i].function.arguments += delta.function.arguments;
+        }
+      };
 
       let fullResponse = '';
       let lineBuffer = '';
@@ -550,6 +760,11 @@ class OllamaChat {
           fullResponse += content;
         }
         if (isOpenAI) {
+          if (choice?.delta?.tool_calls) collectOpenAIToolCalls(choice.delta.tool_calls);
+        } else if (json.message?.tool_calls) {
+          toolCalls.push(...json.message.tool_calls);
+        }
+        if (isOpenAI) {
           if (choice?.finish_reason) openaiFinishReason = choice.finish_reason;
           if (json.usage) openaiUsage = json.usage;
         } else if (json.done) {
@@ -573,7 +788,8 @@ class OllamaChat {
       if (isOpenAI) {
         stats = { done_reason: openaiFinishReason || 'stop', usage: openaiUsage };
       }
-      endThinking(Boolean(stats?.done_reason && stats.done_reason !== 'stop'));
+      const doneReason = stats?.done_reason;
+      endThinking(Boolean(doneReason && doneReason !== 'stop' && doneReason !== 'tool_calls'));
       bullets.end();
       wrapper.end();
 
@@ -582,15 +798,24 @@ class OllamaChat {
       }
 
       // Add assistant response to history (raw, asterisks intact)
-      this.history.push({ role: 'assistant', content: fullResponse });
+      const calls = toolCalls.filter(Boolean);
+      const message = { role: 'assistant', content: fullResponse };
+      if (calls.length > 0) message.tool_calls = calls;
+      this.history.push(message);
+
+      // A tool-calling turn continues right away, so skip the blank-line
+      // spacing (and stats) that close off a finished response.
+      if (calls.length > 0) {
+        if (started) process.stdout.write('\n');
+        return calls;
+      }
 
       process.stdout.write('\n');
       if (this.verbose && stats) {
         this.printStats(stats);
       }
       process.stdout.write('\n');
-    } catch (error) {
-      console.error(`\n❌ Error: ${error.message}\n`);
+      return [];
     } finally {
       this.stopSpinner(spinner);
     }
@@ -626,6 +851,7 @@ class OllamaChat {
     if (this.api === 'ollama') console.log(`⏱️  Keep-alive: ${this.keepAlive}`);
     else console.log(`🔌 API: openai-compatible`);
     console.log(`🌐 Host: ${this.host}`);
+    if (this.toolsEnabled) console.log(`🔧 Tools: ${Object.keys(TOOLS).join(', ')}`);
     console.log('\n📝 Commands:');
     this.printCommandList();
     console.log('\nPress Enter to send. Ctrl+J adds a new line without sending.');
@@ -667,6 +893,8 @@ class OllamaChat {
     console.log('  /set nothink           Disable thinking');
     console.log('  /set showthinking      Show thinking output as it streams');
     console.log('  /set hidethinking      Hide thinking output');
+    console.log('  /set tools             Let the model call tools (web_search)');
+    console.log('  /set notools           Disable tool calling');
     console.log('');
   }
 
@@ -937,6 +1165,14 @@ class OllamaChat {
         this.showThinking = false;
         console.log("Set 'hidethinking' mode.\n");
         break;
+      case 'tools':
+        this.toolsEnabled = true;
+        console.log(`Set 'tools' mode (${Object.keys(TOOLS).join(', ')}).\n`);
+        break;
+      case 'notools':
+        this.toolsEnabled = false;
+        console.log("Set 'notools' mode.\n");
+        break;
       case 'history':
       case 'nohistory':
       case 'wordwrap':
@@ -1180,6 +1416,8 @@ function parseArgs() {
       options.stopOnExit = true;
     } else if (args[i] === '--hide-thinking') {
       options.hideThinking = true;
+    } else if (args[i] === '--tools') {
+      options.tools = true;
     } else if (args[i] === '--api') {
       options.api = args[++i];
     } else if (args[i] === '--help') {
@@ -1217,6 +1455,9 @@ Options:
                        (same effect as \`ollama stop\`)
   --hide-thinking      Don't stream thinking-model reasoning output
                        (shown by default; same as running \`/set hidethinking\`)
+  --tools              Let the model call tools - currently web_search via
+                       DuckDuckGo (same as running \`/set tools\`). Needs a
+                       tool-capable model (e.g. llama3.1, qwen3).
   --api <ollama|openai>  Backend API to speak (default: ollama)
                        Use 'openai' for OpenAI-compatible servers (vLLM,
                        llama.cpp server, LM Studio, ...). Ollama-only
@@ -1231,6 +1472,7 @@ Examples:
   thinai.js --model mistral --keep-alive 2h --host http://192.168.1.100:11434
   thinai.js llama2 --user-normal-color cyan --model-normal-color "#ff8800"
   thinai.js llama2 --stop-on-exit
+  thinai.js qwen3 --tools
 `);
 }
 
