@@ -1196,7 +1196,7 @@ function parseArgs() {
 
 function printUsage() {
   console.log(`
-Usage: ollama-chat.js [model] [options]
+Usage: thinai.js [model] [options]
 
 Arguments:
   model                Model name (e.g., llama2, neural-chat)
@@ -1226,11 +1226,11 @@ Options:
   --help              Show this message
 
 Examples:
-  ollama-chat.js llama2
-  ollama-chat.js neural-chat --keep-alive 30m
-  ollama-chat.js --model mistral --keep-alive 2h --host http://192.168.1.100:11434
-  ollama-chat.js llama2 --user-normal-color cyan --model-normal-color "#ff8800"
-  ollama-chat.js llama2 --stop-on-exit
+  thinai.js llama2
+  thinai.js neural-chat --keep-alive 30m
+  thinai.js --model mistral --keep-alive 2h --host http://192.168.1.100:11434
+  thinai.js llama2 --user-normal-color cyan --model-normal-color "#ff8800"
+  thinai.js llama2 --stop-on-exit
 `);
 }
 
