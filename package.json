@@ -1,0 +1,10 @@
+{
+  "name": "thinai",
+  "version": "0.9.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "ollama": "node ollama-chat.js",
+    "openai": "node ollama-chat.js --api openai"
+  }
+}
