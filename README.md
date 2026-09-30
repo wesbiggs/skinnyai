@@ -10,7 +10,8 @@ A terminal-based Node.js chat interface for Ollama and OpenAI-compatible endpoin
 - ✅ Full `ollama run` command parity (`/set`, `/show`, `/load`, `/save`, `/clear`, `/bye`, `/?`, `/list`, ...)
 - ✅ Conversation history that's actually sent back to the model each turn (via `/api/chat`)
 - ✅ `--api openai` mode for OpenAI-compatible servers (vLLM, llama.cpp server, LM Studio, ...) — see [OpenAI-compatible servers](#openai-compatible-servers)
-- ✅ Opt-in tool calling with built-in `web_search` (DuckDuckGo) and `fetch_page` tools — see [Tool calling and web search](#tool-calling-and-web-search)
+- ✅ Opt-in tool calling with built-in `web_search` and `fetch_page` tools (DuckDuckGo, or Ollama's hosted search with an API key)
+- ✅ Ollama cloud models via `--host https://ollama.com` and `OLLAMA_API_KEY` — see [Ollama account](#ollama-account-cloud-models-and-hosted-search) — see [Tool calling and web search](#tool-calling-and-web-search)
 - ✅ Minimal dependencies (uses Node.js built-ins)
 
 ## Prerequisites
@@ -148,11 +149,11 @@ Pass `--tools` (or run `/set tools` mid-session) to offer the model two tools:
 
 When the model calls a tool, thinai runs it, shows a dimmed line like `🔧 searching: "..."` or `🔧 fetching: <url>`, sends the result back to the model, and streams its final answer. A single reply can involve several tool calls; after 5 rounds of tool calls, the model is asked to answer without tools. Tool calls and results are kept in the conversation history, so follow-up questions can refer to them.
 
-This needs a model with the `tools` capability (check with `/show info`) — e.g. `llama3.1`, `llama3.2`, `qwen3`, `mistral-nemo`. Models without it make Ollama return an error; turn tools back off with `/set notools`. Small models like `llama3.2:3b` do search, but in testing never chose to call `fetch_page` — even when asked to read a specific URL — so they answer from snippets; 8B+ models are much better at using the tools together. It works the same way under `--api openai`, for servers that support OpenAI-style `tools`.
+This needs a model with the `tools` capability (check with `/show info`) — e.g. `llama3.1`, `llama3.2`, `qwen3`, `mistral-nemo`. Models without it make Ollama return an error; turn tools back off with `/set notools`. Small local models rarely chain the tools: in testing, `llama3.2:3b` never called `fetch_page`, even when asked to read a specific URL, and `llama3.1:8b` fetched a URL it was given but never read a page after its own search, so both answered from snippets. Ollama's hosted search (below) sidesteps this by returning page text with each result; larger models like `gemma4:31b` use the tools well either way. It works the same way under `--api openai`, for servers that support OpenAI-style `tools`.
 
 `web_search` takes an optional `recency` argument (`day`, `week`, `month`, or `year`), which limits results to that period via DuckDuckGo's date filter. The model decides when to use it, e.g. for news.
 
-Search is done by DuckDuckGo, with no API key:
+With `OLLAMA_API_KEY` set, both tools use Ollama's hosted APIs — see [Ollama account](#ollama-account-cloud-models-and-hosted-search). Without it, search is done by DuckDuckGo, with no API key:
 
 1. The official [Instant Answer API](https://api.duckduckgo.com/api) is tried first. It returns encyclopedia-style summaries and direct answers, not web results, so many queries come back empty.
 2. Otherwise, thinai falls back to scraping `html.duckduckgo.com` for the top 8 results (title, URL, snippet). That endpoint is unofficial: it can break if DuckDuckGo changes its markup, and rapid or heavy use gets blocked as automated traffic. When that happens, the model is told the search failed.
@@ -253,6 +254,31 @@ node thinai.js mistral --keep-alive 3h
 # Chat with Ollama running on another machine
 ./thinai.js neural-chat --host http://192.168.1.50:11434
 ```
+
+## Ollama account: cloud models and hosted search
+
+A free [ollama.com](https://ollama.com) account gives you an API key with usage-limited access to cloud models (e.g. `gemma4:31b`) and to Ollama's web search and fetch APIs. thinai reads the key from the `OLLAMA_API_KEY` environment variable. Rather than putting the key in a plain-text file, you can keep it in the macOS Keychain and load it from `~/.zshrc`:
+
+```bash
+security add-generic-password -a "$USER" -s OLLAMA_API_KEY -w   # prompts for the key
+echo 'export OLLAMA_API_KEY="$(security find-generic-password -a "$USER" -s OLLAMA_API_KEY -w 2>/dev/null)"' >> ~/.zshrc
+```
+
+**Cloud models:** point `--host` at ollama.com. `/list`, `/show`, and tool calling work the same as with a local server:
+
+```bash
+./thinai.js gemma4:31b --host https://ollama.com --tools
+```
+
+The key is only ever sent to `https://ollama.com`, never to other `--host` servers (a local or LAN Ollama, or an `--api openai` server).
+
+**Hosted search:** when the key is set, `web_search` and `fetch_page` use Ollama's `/api/web_search` and `/api/web_fetch` — whichever model you're chatting with, local or cloud. The hosted search returns the text of each result page rather than a snippet, which makes a big difference for small models: they rarely think to call `fetch_page` after searching, but with the text included they don't need to. In testing, local `llama3.1:8b` went from listing news sites' names (or inventing headlines) to summarizing that day's actual stories. Each result's text is tidied (share buttons and menus removed) and cut to 1,500 characters, 5 results per search. Differences from the DuckDuckGo path:
+
+- There's no date filter, so `web_search`'s `recency` argument isn't offered. Hosted search returned current news without one.
+- Searches and fetches count against your account's usage limits, and your queries and the URLs the model reads go to Ollama.
+- The hosted fetch runs on Ollama's servers, so it can't reach your machine or local network.
+
+If a hosted call fails — a usage limit, an outage, or an occasional page Ollama can't fetch — thinai prints a `⚠️` note and falls back to DuckDuckGo or the local fetcher for that call. To use DuckDuckGo only, unset the key for that run: `OLLAMA_API_KEY= ./thinai.js ...`.
 
 ## OpenAI-compatible servers
 

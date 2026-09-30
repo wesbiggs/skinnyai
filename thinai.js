@@ -9,6 +9,22 @@ import net from 'node:net';
 const DEFAULT_KEEP_ALIVE = '1h';
 const DEFAULT_OLLAMA_HOST = 'http://localhost:11434';
 
+// ollama.com (cloud models, web search/fetch) needs an API key. It's only
+// ever sent to ollama.com over https, never to other --host servers.
+const OLLAMA_API_KEY = process.env.OLLAMA_API_KEY || '';
+
+function ollamaAuthHeaders(url) {
+  if (!OLLAMA_API_KEY) return {};
+  const { protocol, hostname } = new URL(url);
+  const isOllamaCom = hostname === 'ollama.com' || hostname.endsWith('.ollama.com');
+  return protocol === 'https:' && isOllamaCom ? { Authorization: `Bearer ${OLLAMA_API_KEY}` } : {};
+}
+
+// fetch() for requests to the chat server, adding the API key when it's ollama.com.
+function hostFetch(url, init = {}) {
+  return fetch(url, { ...init, headers: { ...init.headers, ...ollamaAuthHeaders(url) } });
+}
+
 // Node's global fetch (via its bundled undici) aborts a request after 5
 // minutes of inactivity between chunks (UND_ERR_HEADERS_TIMEOUT /
 // UND_ERR_BODY_TIMEOUT), surfacing as a bare "fetch failed". Thinking models
@@ -24,7 +40,8 @@ function streamingPost(url, body) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(payload)
+        'Content-Length': Buffer.byteLength(payload),
+        ...ollamaAuthHeaders(url)
       }
     }, (res) => {
       resolve({
@@ -146,8 +163,73 @@ async function ddgHtmlSearch(query, df = '') {
 // recency values just mean "any time" rather than an error.
 const RECENCY_FILTERS = { day: 'd', today: 'd', week: 'w', month: 'm', year: 'y' };
 
+// Ollama's hosted search (used when OLLAMA_API_KEY is set) returns each
+// result's page text, not just a snippet, so small models get real content
+// without having to chain a fetch_page call. That text runs 3-11K characters
+// per result, so each is cut down to keep five of them within context.
+const OLLAMA_SEARCH_RESULTS = 5;
+const MAX_RESULT_CHARS = 1500;
+
+async function ollamaApi(path, body) {
+  const url = `https://ollama.com/api/${path}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...ollamaAuthHeaders(url) },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+  });
+  if (!res.ok) {
+    const detail = await res.json().then((j) => j.error, () => '');
+    throw new Error(`HTTP ${res.status}${detail ? ` - ${detail}` : ''}`);
+  }
+  return res.json();
+}
+
+// Ollama's extracted text keeps page chrome like share buttons ("Text",
+// "*", "Small Text", "*", "Facebook", ...) as one or two words per line;
+// drop bullet-only lines and long runs of those before truncating.
+const CHROME_RUN_LENGTH = 6;
+function tidyText(text) {
+  const lines = text.split('\n').map((line) => line.trim()).filter((line) => !/^[*•·|-]*$/.test(line));
+  const isChrome = (line) => !line.startsWith('#') && line.split(/\s+/).length <= 2;
+  const kept = [];
+  let run = [];
+  for (const line of [...lines, null]) {
+    if (line !== null && isChrome(line)) {
+      run.push(line);
+      continue;
+    }
+    if (run.length < CHROME_RUN_LENGTH) kept.push(...run);
+    run = [];
+    if (line !== null) kept.push(line);
+  }
+  return kept.join('\n');
+}
+
+async function ollamaWebSearch(query) {
+  const { results = [] } = await ollamaApi('web_search', { query, max_results: OLLAMA_SEARCH_RESULTS });
+  return results.map((r, i) => {
+    const content = tidyText(r.content || '');
+    const text = content.length > MAX_RESULT_CHARS ? `${content.slice(0, MAX_RESULT_CHARS)}…` : content;
+    return `[${i + 1}] ${r.title}\nURL: ${r.url}\n${text}`;
+  }).join('\n\n');
+}
+
+// The hosted APIs share the free tier's usage limits; when a call fails,
+// say so and fall back to the keyless implementation rather than failing.
+function noteFallback(what, error) {
+  process.stdout.write(`${ANSI.assistant.narration}   ⚠️  Ollama ${what} failed (${error.message}); falling back to the local implementation${ANSI.reset}\n`);
+}
+
 async function webSearch({ query, recency }) {
   if (!query || typeof query !== 'string') throw new Error("missing 'query' argument");
+  if (OLLAMA_API_KEY) {
+    try {
+      return (await ollamaWebSearch(query)) || `No results found for "${query}".`;
+    } catch (error) {
+      noteFallback('web search', error);
+    }
+  }
   const df = RECENCY_FILTERS[String(recency ?? '').toLowerCase()] || '';
   // Instant Answers are timeless encyclopedia summaries, so skip them when
   // the model asked for recent results.
@@ -262,6 +344,13 @@ function dropMenuRuns(lines) {
   return kept;
 }
 
+function formatPage(title, url, text) {
+  if (!text) return `No readable text found at ${url} (the page may need JavaScript).`;
+  const header = `${title ? `Title: ${title}\n` : ''}URL: ${url}\n\n`;
+  if (text.length <= MAX_PAGE_CHARS) return header + text;
+  return `${header}${text.slice(0, MAX_PAGE_CHARS)}\n\n[truncated: showing the first ${MAX_PAGE_CHARS} of ${text.length} characters]`;
+}
+
 async function fetchPage({ url }) {
   if (!url || typeof url !== 'string') throw new Error("missing 'url' argument");
   let target;
@@ -270,7 +359,24 @@ async function fetchPage({ url }) {
   } catch (e) {
     throw new Error(`not a valid URL: ${url}`);
   }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    throw new Error(`only http and https URLs can be fetched (got ${target.protocol})`);
+  }
 
+  // Ollama's fetch runs on its servers, so it can't reach this machine or
+  // its network; the private-address check below only matters locally.
+  if (OLLAMA_API_KEY) {
+    try {
+      const page = await ollamaApi('web_fetch', { url: target.href });
+      return formatPage(page.title, target.href, tidyText(page.content || ''));
+    } catch (error) {
+      noteFallback('web fetch', error);
+    }
+  }
+  return localFetchPage(target);
+}
+
+async function localFetchPage(target) {
   // Redirects are followed by hand so each hop gets the private-address check.
   let res;
   for (let hop = 0; ; hop++) {
@@ -294,11 +400,7 @@ async function fetchPage({ url }) {
   }
   const raw = await readCapped(res);
   const { title, text } = isHtml ? htmlToText(raw) : { title: '', text: raw.trim() };
-  if (!text) return `No readable text found at ${target.href} (the page may need JavaScript).`;
-
-  const header = `${title ? `Title: ${title}\n` : ''}URL: ${target.href}\n\n`;
-  if (text.length <= MAX_PAGE_CHARS) return header + text;
-  return `${header}${text.slice(0, MAX_PAGE_CHARS)}\n\n[truncated: showing the first ${MAX_PAGE_CHARS} of ${text.length} characters]`;
+  return formatPage(title, target.href, text);
 }
 
 // e.g. "Tuesday, September 29, 2026", in the local timezone.
@@ -310,21 +412,27 @@ function formatToday() {
 
 const TOOLS = {
   web_search: {
-    description: 'Search the web with DuckDuckGo. Use this for current events, recent facts, or anything you are unsure about. Returns result titles, URLs, and snippets.',
-    parameters: {
+    description: `Search the web. Use this for current events, recent facts, or anything you are unsure about. Returns result titles, URLs, and ${OLLAMA_API_KEY ? 'the start of each result page' : 'snippets'}.`,
+    // Ollama's hosted search has no date filter, so recency is only offered
+    // with DuckDuckGo.
+    parameters: () => ({
       type: 'object',
       properties: {
-        query: { type: 'string', description: "The search query, naming the topic (e.g. 'world news headlines'). Use recency for time limits instead of words like 'today'." },
-        recency: {
+        query: {
+          type: 'string',
+          description: "The search query, naming the topic (e.g. 'world news headlines')" +
+            (OLLAMA_API_KEY ? '' : ". Use recency for time limits instead of words like 'today'.")
+        },
+        ...(!OLLAMA_API_KEY && { recency: {
           type: 'string',
           enum: ['day', 'week', 'month', 'year'],
           description: 'Only return results from the past day, week, month, or year. Use for news and other time-sensitive queries.'
-        }
+        } })
       },
       required: ['query']
-    },
+    }),
     mentionsDate: true,
-    describe: (args) => `searching: "${args.query}"${RECENCY_FILTERS[args.recency] ? ` (past ${args.recency})` : ''}`,
+    describe: (args) => `searching: "${args.query}"${RECENCY_FILTERS[args.recency] && !OLLAMA_API_KEY ? ` (past ${args.recency})` : ''}`,
     run: webSearch
   },
   fetch_page: {
@@ -349,7 +457,7 @@ function toolDefinitions(today) {
     function: {
       name,
       description: today && tool.mentionsDate ? `${tool.description} Today's date is ${today}.` : tool.description,
-      parameters: tool.parameters
+      parameters: typeof tool.parameters === 'function' ? tool.parameters() : tool.parameters
     }
   }));
 }
@@ -641,7 +749,7 @@ class OllamaChat {
       return;
     }
     try {
-      await fetch(`${this.host}/api/chat`, {
+      await hostFetch(`${this.host}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: this.model, messages: [], keep_alive: 0 })
@@ -681,7 +789,7 @@ class OllamaChat {
   // saved messages/system message and resets per-session overrides. Returns
   // false (without touching state) if the model doesn't exist.
   async fetchAndApplyModelContext(modelName) {
-    const response = await fetch(`${this.host}/api/show`, {
+    const response = await hostFetch(`${this.host}/api/show`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: modelName })
@@ -1062,7 +1170,9 @@ class OllamaChat {
     if (this.api === 'ollama') console.log(`⏱️  Keep-alive: ${this.keepAlive}`);
     else console.log(`🔌 API: openai-compatible`);
     console.log(`🌐 Host: ${this.host}`);
-    if (this.toolsEnabled) console.log(`🔧 Tools: ${Object.keys(TOOLS).join(', ')}`);
+    if (this.toolsEnabled) {
+      console.log(`🔧 Tools: ${Object.keys(TOOLS).join(', ')} (${OLLAMA_API_KEY ? 'Ollama web search' : 'DuckDuckGo'})`);
+    }
     console.log('\n📝 Commands:');
     this.printCommandList();
     console.log('\nPress Enter to send. Ctrl+J adds a new line without sending.');
@@ -1150,7 +1260,7 @@ class OllamaChat {
       if (messages.length > 0) body.messages = messages;
       if (Object.keys(this.options).length > 0) body.parameters = this.options;
 
-      const response = await fetch(`${this.host}/api/create`, {
+      const response = await hostFetch(`${this.host}/api/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -1206,7 +1316,7 @@ class OllamaChat {
   async list() {
     try {
       if (this.api !== 'ollama') {
-        const response = await fetch(`${this.host}/v1/models`);
+        const response = await hostFetch(`${this.host}/v1/models`);
         if (!response.ok) {
           throw new Error(`API error: ${response.status} ${response.statusText}`);
         }
@@ -1218,7 +1328,7 @@ class OllamaChat {
         console.log('');
         return;
       }
-      const response = await fetch(`${this.host}/api/tags`);
+      const response = await hostFetch(`${this.host}/api/tags`);
       if (!response.ok) {
         throw new Error(`API error: ${response.status} ${response.statusText}`);
       }
@@ -1253,7 +1363,7 @@ class OllamaChat {
 
     let info;
     try {
-      const response = await fetch(`${this.host}/api/show`, {
+      const response = await hostFetch(`${this.host}/api/show`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: this.model })
@@ -1669,6 +1779,8 @@ Options:
   -k, --keep-alive TIME   Keep model loaded for TIME (default: 1h)
                        Examples: 5m, 1h, 24h, 30s
   -h, --host URL      Ollama API host (default: http://localhost:11434)
+                       Use https://ollama.com for cloud models; needs the
+                       OLLAMA_API_KEY environment variable
   --user-emphasis-color COLOR   Color for *narration* in your messages (default: 136 / dim yellow)
   --user-normal-color COLOR     Color for dialogue in your messages (default: 226 / bright yellow)
   --model-emphasis-color COLOR  Color for *narration* in model responses (default: 28 / dim green)
@@ -1682,7 +1794,8 @@ Options:
                        (shown by default; same as running \`/set hidethinking\`)
   --tools              Let the model call tools - web_search (DuckDuckGo) and
                        fetch_page (same as running \`/set tools\`). Needs a
-                       tool-capable model (e.g. llama3.1, qwen3).
+                       tool-capable model (e.g. llama3.1, qwen3). With
+                       OLLAMA_API_KEY set, uses Ollama's hosted search/fetch.
   --date, --no-date    Always / never tell the model today's date via the
                        system message (default: only when tools are on)
   --api <ollama|openai>  Backend API to speak (default: ollama)
