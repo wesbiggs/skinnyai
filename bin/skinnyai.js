@@ -1481,6 +1481,26 @@ function inlineFile(name, content) {
 }
 const INLINE_FILE = /\n*\[attached file: ([^\]\n]+)\]\n(`{3,})\n[\s\S]*?\n\2/g;
 
+// Terminals that speak the kitty keyboard protocol (kitty, Ghostty, WezTerm,
+// iTerm2 3.5+) report keys plain terminals can't tell apart, such as
+// Shift+Enter, as CSI-u sequences: ESC [ code ; modifiers u. The editor asks
+// for that mode while it's reading a line, and maps these back onto the
+// key objects Node's readline makes (name, ctrl, meta, shift). Returns null
+// for anything that isn't one.
+function decodeCsiU(sequence) {
+  const match = /^\x1b\[(\d+)(?:;(\d+))?(?::\d+)*u$/.exec(sequence || '');
+  if (!match) return null;
+  const code = Number(match[1]);
+  const mods = Math.max(0, Number(match[2] || 1) - 1);
+  const key = { shift: Boolean(mods & 1), meta: Boolean(mods & 2), ctrl: Boolean(mods & 4), sequence };
+  const special = { 13: 'return', 9: 'tab', 27: 'escape', 127: 'backspace' };
+  if (special[code]) key.name = special[code];
+  else if (code === 106 && key.ctrl && !key.meta) return { key: { name: 'enter', sequence }, text: undefined }; // Ctrl+J is a line feed
+  else if (code >= 97 && code <= 122) key.name = String.fromCharCode(code);
+  else return { key, text: undefined }; // some other key: let the editor ignore it
+  return { key, text: key.name === 'return' ? '\r' : undefined };
+}
+
 // Escape sequence that draws an image at the cursor, scaled down to fit
 // the terminal width and at most ~60% of its height, followed by a newline.
 // Pixel-to-cell conversion assumes a typical 8x16 cell, since terminals
@@ -2873,6 +2893,7 @@ class OllamaChat {
     console.log('\nAvailable keyboard shortcuts:');
     console.log('  Enter               Send your message');
     console.log('  Ctrl + j            Insert a new line without sending');
+    console.log('  Shift + Enter       Same, in terminals that report it (kitty, Ghostty, WezTerm, iTerm2 3.5+)');
     console.log('  Left / Right        Move the cursor');
     console.log('  Ctrl/Alt + arrows   Move a word at a time (also Alt + b / f)');
     console.log('  Home / End          Start / end of line (also Ctrl + a / e)');
@@ -3505,7 +3526,7 @@ class OllamaChat {
       };
 
       const cleanup = () => {
-        process.stdout.write('\x1b[?2004l'); // bracketed paste off
+        process.stdout.write('\x1b[?2004l\x1b[<u'); // bracketed paste off; back to the usual key reporting
         stdin.removeListener('keypress', onKeypress);
         stdin.setRawMode(false);
         stdin.pause();
@@ -3513,6 +3534,11 @@ class OllamaChat {
 
       const onKeypress = async (str, key) => {
         key = key || {};
+        const decoded = decodeCsiU(key.sequence ?? str);
+        if (decoded) {
+          key = decoded.key;
+          str = decoded.text;
+        }
 
         if (key.name === 'paste-start') {
           pasting = true;
@@ -3552,8 +3578,7 @@ class OllamaChat {
         // Enter sends \r ('return'); Ctrl+J sends a bare \n, which Node names 'enter'.
         const isNewlineInsert =
           key.name === 'enter' ||
-          (key.name === 'return' && (key.shift || key.meta)) || // best-effort shift+enter
-          str === '\x1b[13;2u';
+          (key.name === 'return' && (key.shift || key.meta)); // Shift+Enter, where the terminal reports it
         if (isNewlineInsert) {
           insert('\n');
         } else if (key.name === 'return') {
@@ -3615,7 +3640,9 @@ class OllamaChat {
         render();
       };
 
-      process.stdout.write(styledPrompt() + '\x1b[?2004h'); // bracketed paste on
+      // Bracketed paste on, and (where supported) Shift+Enter reported as such;
+      // other terminals ignore the second sequence.
+      process.stdout.write(styledPrompt() + '\x1b[?2004h\x1b[>1u');
       readline.emitKeypressEvents(stdin);
       stdin.setRawMode(true);
       stdin.resume();

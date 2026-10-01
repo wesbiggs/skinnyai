@@ -152,6 +152,32 @@ describe('confirm', () => {
     expect(capture.text).toContain('Overwrite? [y/N] no\n');
   });
 });
+
+describe('Shift+Enter', () => {
+  it('inserts a newline when the terminal reports it as a CSI-u key (kitty protocol)', async () => {
+    const { text, screen } = await edit(newChat(), 'one', '\x1b[13;2u', 'two', KEYS.enter);
+    expect(text).toBe('one\ntwo');
+    expect(screen.slice(0, 2)).toEqual(['> one', 'two']);
+  });
+
+  it('asks the terminal for key reports while editing, and turns them off at the end', async () => {
+    const start = capture.text.length;
+    await edit(newChat(), 'x', KEYS.enter);
+    const written = capture.text.slice(start);
+    expect(written).toContain('\x1b[>1u');
+    expect(written.lastIndexOf('\x1b[<u')).toBeGreaterThan(written.indexOf('\x1b[>1u'));
+  });
+
+  it('treats Ctrl+J as a newline when reported as a CSI-u key too', async () => {
+    expect((await edit(newChat(), 'a', '\x1b[106;5u', 'b', KEYS.enter)).text).toBe('a\nb');
+  });
+
+  it('still understands other keys reported that way: plain Enter submits, Ctrl+W deletes a word', async () => {
+    expect((await edit(newChat(), 'hi', '\x1b[13u')).text).toBe('hi');
+    expect((await edit(newChat(), 'foo bar', '\x1b[119;5u', KEYS.enter)).text).toBe('foo ');
+  });
+});
+
 describe('dragged-in images', () => {
   
   const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(40)]);

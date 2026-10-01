@@ -38,7 +38,7 @@ export function captureOutput() {
   };
 }
 
-const ESCAPES = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\|\x1b\]1337;[^\x07]*\x07|\x1b_G[^\x1b]*\x1b\\/g;
+const ESCAPES = /\x1b\[[0-9;?<>]*[A-Za-z]|\x1b\]8;;[^\x1b]*\x1b\\|\x1b\]1337;[^\x07]*\x07|\x1b_G[^\x1b]*\x1b\\/g;
 
 export function stripAnsi(text) {
   return text.replace(ESCAPES, '');
@@ -80,7 +80,7 @@ export class Terminal {
   }
 
   write(data) {
-    const tokens = data.match(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b_G[^\x1b]*\x1b\\|\x1b[^[\]_]|[^\x1b]+/gu) || [];
+    const tokens = data.match(/\x1b\[[0-9;?<>]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b_G[^\x1b]*\x1b\\|\x1b[^[\]_]|[^\x1b]+/gu) || [];
     const graphemes = new Intl.Segmenter();
     for (const token of tokens) {
       if (token.startsWith('\x1b[')) {
