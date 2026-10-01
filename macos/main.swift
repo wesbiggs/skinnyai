@@ -99,7 +99,7 @@ struct BoolSetting {
 }
 
 let boolSettings: [BoolSetting] = [
-    BoolSetting(key: "SKINNY_TOOLS", title: "Web search and page reading", detail: "Let the model look things up online.", defaultValue: false),
+    BoolSetting(key: "SKINNY_TOOLS", title: "Web search and page reading", detail: "Let the model look things up online.", defaultValue: true),
     BoolSetting(key: "SKINNY_AUTOSAVE", title: "Autosave conversations", detail: "Save each chat to ~/.skinny/sessions as you go.", defaultValue: false),
     BoolSetting(key: "SKINNY_MARKDOWN", title: "Format replies (markdown)", detail: "Bold, lists, tables, and code blocks.", defaultValue: true),
     BoolSetting(key: "SKINNY_IMAGES", title: "Show inline images", detail: "Needs iTerm2; fetches image URLs in replies.", defaultValue: false),

@@ -6,13 +6,18 @@ import https from 'node:https';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import fs from 'node:fs/promises';
-import { readFileSync, realpathSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 
 const DEFAULT_KEEP_ALIVE = '1h';
 const DEFAULT_OLLAMA_HOST = 'http://localhost:11434';
+const DEFAULT_ANTHROPIC_HOST = 'https://api.anthropic.com';
+const ANTHROPIC_VERSION = '2023-06-01';
+const API_NAMES = ['ollama', 'openai', 'anthropic'];
+const API_LABELS = { ollama: 'ollama', openai: 'openai-compatible', anthropic: 'anthropic' };
 
 // Saved sessions and the .env defaults file live here.
 const SKINNY_HOME = process.env.SKINNY_HOME || path.join(os.homedir(), '.skinny');
@@ -71,7 +76,7 @@ function hostFetch(url, init = {}) {
 // can go quiet for longer than that before emitting a token, so the
 // long-lived streaming chat request uses plain http/https instead, which has
 // no such default idle timeout.
-function streamingPost(url, body) {
+function streamingPost(url, body, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const transport = target.protocol === 'https:' ? https : http;
@@ -81,7 +86,8 @@ function streamingPost(url, body) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),
-        ...ollamaAuthHeaders(url)
+        ...ollamaAuthHeaders(url),
+        ...extraHeaders
       }
     }, (res) => {
       resolve({
@@ -108,6 +114,18 @@ async function readErrorBody(res) {
     return text;
   }
 }
+
+// The Anthropic API wants its key in x-api-key (sent to whatever --host is
+// set, since the key is only ever configured for this API) and a version.
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+function anthropicHeaders() {
+  return { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': ANTHROPIC_VERSION };
+}
+
+// OpenAI-style servers, hosted or local, take a bearer key if one is set.
+// It goes to whatever --host is, so a stray OPENAI_API_KEY in the
+// environment reaches a local server too; the host is always your choice.
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 
 // --- Tools (enabled with --tools or /set tools) ---
 
@@ -499,10 +517,270 @@ const TOOLS = {
   }
 };
 
+// --- MCP servers (tools from $SKINNY_HOME/mcp.json) ---
+//
+// The config uses the format shared by Claude Desktop, Claude Code, Cursor,
+// and others:
+//   { "mcpServers": {
+//       "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"], "env": {} },
+//       "docs":  { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" } } } }
+// A server with "command" runs as a child process speaking JSON-RPC over
+// stdio; one with "url" is reached over streamable HTTP. ${VAR} in strings
+// expands from the environment. "disabled": true skips a server; "trust":
+// true (or a list of tool names) lets those tools run without asking first;
+// answering "a" (always) at the prompt adds a tool to that list.
+
+const MCP_CONFIG_FILE = process.env.SKINNY_MCP_CONFIG || path.join(SKINNY_HOME, 'mcp.json');
+const MCP_PROTOCOL_VERSION = '2025-06-18';
+const MCP_TIMEOUT_MS = 30000;
+const MCP_CALL_TIMEOUT_MS = 120000;
+const MCP_MAX_RESULT_CHARS = 20000;
+
+const expandVars = (value) => (typeof value === 'string' ? value.replace(/\$\{(\w+)\}/g, (_, name) => process.env[name] ?? '') : value);
+
+// Returns [{ name, ...config }] for each enabled server; throws on an
+// unreadable or malformed file. A missing file just means no servers.
+function loadMcpConfig(file = MCP_CONFIG_FILE) {
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${file} isn't valid JSON: ${error.message}`);
+  }
+  const servers = json.mcpServers ?? json.servers;
+  if (!servers || typeof servers !== 'object') throw new Error(`${file} has no "mcpServers" object`);
+  return Object.entries(servers)
+    .filter(([, config]) => config && !config.disabled)
+    .map(([name, config]) => ({ ...config, name }));
+}
+
+class McpServer {
+  constructor(config) {
+    this.name = config.name;
+    this.config = config;
+    // true: every tool runs without asking; or a list of tool names.
+    this.trust = config.trust;
+    this.tools = [];
+    this.nextId = 1;
+    this.pending = new Map();
+    this.stderr = '';
+  }
+
+  async start() {
+    if (this.config.url) {
+      this.sessionId = null;
+    } else if (this.config.command) {
+      this.startProcess();
+    } else {
+      throw new Error('needs "command" or "url"');
+    }
+    await this.request('initialize', {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: 'skinnyai', version: '0.9.0' }
+    }, MCP_TIMEOUT_MS);
+    await this.notify('notifications/initialized');
+    let cursor;
+    do {
+      const page = await this.request('tools/list', cursor ? { cursor } : {}, MCP_TIMEOUT_MS);
+      this.tools.push(...(page.tools || []));
+      cursor = page.nextCursor;
+    } while (cursor);
+  }
+
+  startProcess() {
+    const { command, args = [], env = {}, cwd } = this.config;
+    const child = spawn(expandVars(command), args.map(expandVars), {
+      cwd: cwd ? expandVars(cwd) : undefined,
+      env: { ...process.env, ...Object.fromEntries(Object.entries(env).map(([k, v]) => [k, expandVars(String(v))])) },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    this.child = child;
+    child.on('error', (error) => this.fail(new Error(`couldn't run '${command}': ${error.message}`)));
+    child.on('exit', (code) => this.fail(new Error(`exited (code ${code})${this.stderr ? `: ${this.stderr.trim().split('\n').pop()}` : ''}`)));
+    child.stdin.on('error', () => {});
+    child.stderr.on('data', (chunk) => { this.stderr = (this.stderr + chunk).slice(-2000); });
+    readline.createInterface({ input: child.stdout }).on('line', (line) => this.onMessage(line));
+  }
+
+  fail(error) {
+    this.dead = error;
+    for (const { reject } of this.pending.values()) reject(error);
+    this.pending.clear();
+  }
+
+  // One JSON-RPC message from the server: a response to a request of ours,
+  // or a request/notification of its own (answered "method not found",
+  // except ping, since this client offers no roots, sampling, or the like).
+  onMessage(line) {
+    let message;
+    try { message = JSON.parse(line); } catch (e) { return; }
+    if (message.method && message.id !== undefined) {
+      const reply = message.method === 'ping'
+        ? { result: {} }
+        : { error: { code: -32601, message: 'Method not found' } };
+      this.send({ jsonrpc: '2.0', id: message.id, ...reply }).catch(() => {});
+    } else if (message.id !== undefined && this.pending.has(message.id)) {
+      const { resolve, reject } = this.pending.get(message.id);
+      this.pending.delete(message.id);
+      if (message.error) reject(new Error(message.error.message || 'request failed'));
+      else resolve(message.result ?? {});
+    }
+  }
+
+  async send(message) {
+    if (this.child) {
+      this.child.stdin.write(JSON.stringify(message) + '\n');
+      return null;
+    }
+    const response = await fetch(expandVars(this.config.url), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        'MCP-Protocol-Version': MCP_PROTOCOL_VERSION,
+        ...(this.sessionId && { 'Mcp-Session-Id': this.sessionId }),
+        ...Object.fromEntries(Object.entries(this.config.headers || {}).map(([k, v]) => [k, expandVars(String(v))]))
+      },
+      body: JSON.stringify(message),
+      signal: AbortSignal.timeout(MCP_CALL_TIMEOUT_MS)
+    });
+    this.sessionId = response.headers.get('mcp-session-id') || this.sessionId;
+    if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    if (message.id === undefined) return null;
+    const body = await response.text();
+    if ((response.headers.get('content-type') || '').includes('text/event-stream')) {
+      // Take the event that answers this request; others are server chatter.
+      for (const line of body.split(/\r?\n/)) {
+        if (!line.startsWith('data:')) continue;
+        try {
+          const event = JSON.parse(line.slice(5));
+          if (event.id === message.id) return event;
+        } catch (e) { /* not JSON */ }
+      }
+      throw new Error('no response in the event stream');
+    }
+    return JSON.parse(body);
+  }
+
+  notify(method, params) {
+    return this.send({ jsonrpc: '2.0', method, ...(params && { params }) }).catch(() => {});
+  }
+
+  async request(method, params, timeoutMs = MCP_CALL_TIMEOUT_MS) {
+    if (this.dead) throw this.dead;
+    const id = this.nextId++;
+    const message = { jsonrpc: '2.0', id, method, params };
+    if (this.child) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new Error(`${method} timed out after ${timeoutMs / 1000}s`));
+        }, timeoutMs);
+        this.pending.set(id, {
+          resolve: (value) => { clearTimeout(timer); resolve(value); },
+          reject: (error) => { clearTimeout(timer); reject(error); }
+        });
+        this.send(message).catch(reject);
+      });
+    }
+    const reply = await this.send(message);
+    if (reply.error) throw new Error(reply.error.message || 'request failed');
+    return reply.result ?? {};
+  }
+
+  async callTool(name, args) {
+    const result = await this.request('tools/call', { name, arguments: args });
+    const text = (result.content || []).map((part) => {
+      if (part.type === 'text') return part.text;
+      if (part.type === 'resource') return part.resource?.text ?? `[resource ${part.resource?.uri ?? ''}]`;
+      return `[${part.type} content not shown]`;
+    }).join('\n') || (result.structuredContent ? JSON.stringify(result.structuredContent) : '');
+    const clipped = text.length > MCP_MAX_RESULT_CHARS ? `${text.slice(0, MCP_MAX_RESULT_CHARS)}\n[truncated]` : text;
+    return result.isError ? `Error: ${clipped || 'the tool reported an error'}` : clipped || '(no output)';
+  }
+
+  isTrusted(toolName) {
+    return this.trust === true || (Array.isArray(this.trust) && this.trust.includes(toolName));
+  }
+
+  // "Always allow" for one tool: remembered here and written back into the
+  // config file as "trust": ["tool", ...] on its server. Returns false if the
+  // file couldn't be updated (the tool stays trusted for this session anyway).
+  trustTool(toolName) {
+    if (this.trust === true) return true;
+    this.trust = [...(Array.isArray(this.trust) ? this.trust : []), toolName];
+    try {
+      const json = JSON.parse(readFileSync(MCP_CONFIG_FILE, 'utf8'));
+      const entry = (json.mcpServers ?? json.servers)?.[this.name];
+      if (!entry) return false;
+      entry.trust = this.trust;
+      writeFileSync(MCP_CONFIG_FILE, `${JSON.stringify(json, null, 2)}\n`);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  close() {
+    this.child?.kill();
+    if (this.config.url && this.sessionId) {
+      fetch(expandVars(this.config.url), {
+        method: 'DELETE',
+        headers: { 'Mcp-Session-Id': this.sessionId, ...Object.fromEntries(Object.entries(this.config.headers || {}).map(([k, v]) => [k, expandVars(String(v))])) },
+        signal: AbortSignal.timeout(2000)
+      }).catch(() => {});
+    }
+  }
+}
+
+// Starts the configured servers side by side; one that fails is reported
+// and left out. Tool names are "<server>__<tool>" (letters, digits, _ and -
+// only, at most 64 characters, which is what model APIs accept).
+async function startMcpServers(configs) {
+  const servers = [];
+  const failures = [];
+  await Promise.all(configs.map(async (config) => {
+    const server = new McpServer(config);
+    try {
+      await server.start();
+      servers.push(server);
+    } catch (error) {
+      server.close();
+      failures.push({ name: config.name, error: error.message });
+    }
+  }));
+  servers.sort((a, b) => a.name.localeCompare(b.name));
+  const tools = new Map();
+  for (const server of servers) {
+    for (const tool of server.tools) {
+      const base = `${server.name}__${tool.name}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+      let name = base;
+      for (let n = 2; tools.has(name); n++) name = `${base.slice(0, 62 - String(n).length)}_${n}`;
+      tools.set(name, {
+        description: `[${server.name}] ${tool.description || tool.name}`,
+        parameters: tool.inputSchema?.type === 'object' ? tool.inputSchema : { type: 'object', properties: {} },
+        describe: (args) => `${server.name}: ${tool.name} ${JSON.stringify(args).slice(0, 120)}`,
+        needsApproval: () => !server.isTrusted(tool.name),
+        trustAlways: () => server.trustTool(tool.name),
+        run: (args) => server.callTool(tool.name, args)
+      });
+    }
+  }
+  return { servers, tools, failures, close: () => servers.forEach((server) => server.close()) };
+}
+
 // Built per request so the date is current. Small models often weigh the
 // tool definition more than the system prompt, so it carries the date too.
-function toolDefinitions(today) {
-  return Object.entries(TOOLS).map(([name, tool]) => ({
+function toolDefinitions(tools, today) {
+  return [...tools].map(([name, tool]) => ({
     type: 'function',
     function: {
       name,
@@ -514,8 +792,8 @@ function toolDefinitions(today) {
 
 // Tool output goes straight back to the model as a 'tool' message; errors are
 // reported the same way so the model can recover or tell the user.
-async function runTool(name, args) {
-  const tool = TOOLS[name];
+async function runTool(tools, name, args) {
+  const tool = tools.get(name);
   if (!tool) return `Error: unknown tool '${name}'`;
   try {
     return await tool.run(args || {});
@@ -1084,6 +1362,23 @@ async function loadImage(url) {
   return { bytes, ...info };
 }
 
+// The newest flagship among a /v1/models listing ({ id, created } for OpenAI,
+// { id, created_at } for Anthropic), for "--model default". Neither API has
+// a "default" alias or a flagship flag, so this goes by release date:
+// OpenAI's newest plain gpt-N (no mini, codex, audio, ... or dated copies of
+// an alias); Anthropic's newest Opus, or else its newest model of any kind.
+const OPENAI_NON_FLAGSHIP = /mini|nano|audio|realtime|image|tts|transcribe|search|codex|instruct|preview|chat-latest|embedding|moderation|whisper|deep-research/;
+function pickDefaultModel(api, models) {
+  const released = (m) => Number(m.created) || Date.parse(m.created_at) / 1000 || 0;
+  const newest = (list) => list.reduce((best, m) => (!best || released(m) > released(best) ||
+    (released(m) === released(best) && m.id.length < best.id.length) ? m : best), null)?.id ?? null;
+  if (api === 'anthropic') {
+    const opus = models.filter((m) => /opus/.test(m.id));
+    return newest(opus.length ? opus : models);
+  }
+  return newest(models.filter((m) => /^gpt-\d/.test(m.id) && !OPENAI_NON_FLAGSHIP.test(m.id) && !/-\d{4}-\d{2}-\d{2}$/.test(m.id)));
+}
+
 // Escape sequence that draws an image at the cursor, scaled down to fit
 // the terminal width and at most ~60% of its height, followed by a newline.
 // Pixel-to-cell conversion assumes a typical 8x16 cell, since terminals
@@ -1566,7 +1861,8 @@ async function listLocalSessions() {
 class OllamaChat {
   constructor(model, options = {}) {
     this.model = model;
-    this.host = options.host || DEFAULT_OLLAMA_HOST;
+    this.api = API_NAMES.includes(options.api) ? options.api : 'ollama';
+    this.host = options.host || (this.api === 'anthropic' ? DEFAULT_ANTHROPIC_HOST : DEFAULT_OLLAMA_HOST);
     this.keepAlive = options.keepAlive || DEFAULT_KEEP_ALIVE;
     this.history = []; // history[0] may be a {role: 'system', ...} message
     this.options = {}; // /set parameter overrides (temperature, num_ctx, ...)
@@ -1575,8 +1871,11 @@ class OllamaChat {
     this.verbose = false;
     this.showThinking = !options.hideThinking;
     this.stopOnExit = Boolean(options.stopOnExit);
-    this.api = options.api === 'openai' ? 'openai' : 'ollama';
-    this.toolsEnabled = Boolean(options.tools);
+    this.toolsEnabled = options.tools !== false; // on unless --no-tools / SKINNY_TOOLS=false
+    this.mcpEnabled = options.mcp !== false;
+    this.queuedAttachments = []; // /attach: sent with the next message
+    this.pendingFiles = []; // what the line editor attached to the line it just returned
+    this.mcp = null; // set by startMcp(): { servers, tools, failures, close }
     // undefined = automatic: tell the model today's date whenever tools are on.
     this.injectDate = options.date;
     this.markdown = options.markdown !== false;
@@ -1592,8 +1891,83 @@ class OllamaChat {
     this.sessionName = null;
   }
 
+  // keep_alive and unloading only mean something on a self-hosted Ollama:
+  // OpenAI-style servers have no such concept, and ollama.com manages model
+  // lifetimes itself.
+  get managesModelLifetime() {
+    return this.api === 'ollama' && !isOllamaCom(this.host);
+  }
+
+  // The tools the model may call: the built-in web tools when they're
+  // switched on, plus those of any MCP servers that started.
+  activeTools() {
+    const tools = new Map(this.toolsEnabled ? Object.entries(TOOLS) : []);
+    if (this.mcpEnabled && this.mcp) for (const [name, tool] of this.mcp.tools) tools.set(name, tool);
+    return tools;
+  }
+
+  toolDefinitions(today) {
+    return toolDefinitions(this.activeTools(), today);
+  }
+
+  async startMcp() {
+    if (!this.mcpEnabled) return;
+    let configs;
+    try {
+      configs = loadMcpConfig();
+    } catch (error) {
+      console.log(`⚠️  MCP: ${error.message}\n`);
+      return;
+    }
+    if (configs.length === 0) return;
+    this.mcp = await startMcpServers(configs);
+    const ok = this.mcp.servers.map((server) => `${server.name} (${server.tools.length} tool${server.tools.length === 1 ? '' : 's'})`);
+    if (ok.length) console.log(`🔌 MCP: ${ok.join(', ')}`);
+    for (const { name, error } of this.mcp.failures) console.log(`⚠️  MCP server '${name}' failed to start: ${error}`);
+    if (ok.length || this.mcp.failures.length) console.log('');
+  }
+
+  printMcp() {
+    const mcp = this.mcp;
+    if (!mcp) {
+      console.log(`\nNo MCP servers are running. Add them to ${MCP_CONFIG_FILE}:`);
+      console.log('  { "mcpServers": { "name": { "command": "npx", "args": ["-y", "some-mcp-server"] } } }\n');
+      return;
+    }
+    console.log('');
+    for (const server of mcp.servers) {
+      const trusted = server.trust === true ? ' (trusted: tools run without asking)'
+        : Array.isArray(server.trust) && server.trust.length ? ` (trusted tools: ${server.trust.join(', ')})` : '';
+      console.log(`  ${server.name}${trusted}`);
+      for (const tool of server.tools) console.log(`    ${tool.name}${tool.description ? ` - ${tool.description.split('\n')[0].slice(0, 70)}` : ''}`);
+    }
+    for (const { name, error } of mcp.failures) console.log(`  ${name}: failed to start: ${error}`);
+    console.log('');
+  }
+
   shouldInjectDate() {
     return this.injectDate ?? this.toolsEnabled;
+  }
+
+  // "--model default" (what Settings writes for OpenAI and Anthropic) means
+  // the newest flagship model the server lists, so it keeps up on its own.
+  async resolveDefaultModel() {
+    if (this.model.toLowerCase() !== 'default') return;
+    if (this.api === 'ollama') throw new Error("'default' isn't a model name for Ollama; pick one with /list");
+    const response = await hostFetch(`${this.host}/v1/models${this.api === 'anthropic' ? '?limit=100' : ''}`, { headers: this.authHeaders() });
+    if (!response.ok) throw new Error(`couldn't look up the default model: ${response.status} ${response.statusText}`);
+    const picked = pickDefaultModel(this.api, (await response.json()).data || []);
+    if (!picked) throw new Error(`couldn't tell which of ${this.host}'s models is the default; name one`);
+    this.model = picked;
+    this.modelIsDefault = true;
+  }
+
+  // Credentials for APIs that take one from us; Ollama's key is handled
+  // per host by hostFetch/streamingPost (it only goes to ollama.com).
+  authHeaders() {
+    if (this.api === 'anthropic') return anthropicHeaders();
+    if (this.api === 'openai' && OPENAI_API_KEY) return { Authorization: `Bearer ${OPENAI_API_KEY}` };
+    return {};
   }
 
   // Models only know their training cutoff (llama3.2's template even states
@@ -1610,12 +1984,9 @@ class OllamaChat {
 
   // Unloads the current model from Ollama (same effect as `ollama stop`),
   // via keep_alive: 0. Best-effort: failures here shouldn't block exiting.
-  // No equivalent concept exists in the OpenAI API, so this is a no-op there.
+  // A no-op where models aren't loaded by us (see managesModelLifetime).
   async stopModel() {
-    if (this.api !== 'ollama') {
-      console.log("ℹ️  --stop-on-exit has no equivalent for --api openai; skipping.");
-      return;
-    }
+    if (!this.managesModelLifetime) return;
     try {
       await hostFetch(`${this.host}/api/chat`, {
         method: 'POST',
@@ -1768,13 +2139,14 @@ class OllamaChat {
     const body = {
       model: this.model,
       messages: this.requestMessages(today),
-      keep_alive: this.keepAlive,
       stream: true
     };
+    if (this.managesModelLifetime) body.keep_alive = this.keepAlive;
     if (Object.keys(this.options).length > 0) body.options = this.options;
     if (this.format) body.format = this.format;
     if (this.think !== undefined) body.think = this.think;
-    if (this.toolsEnabled) body.tools = toolDefinitions(today);
+    const tools = this.toolDefinitions(today);
+    if (tools.length) body.tools = tools;
     return body;
   }
 
@@ -1795,10 +2167,55 @@ class OllamaChat {
       ...this.options
     };
     if (this.format === 'json') body.response_format = { type: 'json_object' };
-    if (this.toolsEnabled) body.tools = toolDefinitions(today);
+    const tools = this.toolDefinitions(today);
+    if (tools.length) body.tools = tools;
     return body;
   }
 
+  // The Messages API takes the system prompt separately, wants tool calls
+  // and results as content blocks, and needs a turn's thinking blocks (with
+  // their signatures) handed back while it's still using tools.
+  buildAnthropicChatBody() {
+    const today = this.shouldInjectDate() ? formatToday() : '';
+    const all = this.requestMessages(today);
+    const system = all.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+    const messages = [];
+    const push = (role, content) => {
+      const last = messages.at(-1);
+      if (last && last.role === role) last.content.push(...content);
+      else messages.push({ role, content });
+    };
+    for (const m of all) {
+      if (m.role === 'system') continue;
+      const blocks = typeof m.content === 'string' ? (m.content ? [{ type: 'text', text: m.content }] : []) : m.content;
+      if (m.role === 'tool') {
+        push('user', [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: m.content, ...(m.content.startsWith('Error:') && { is_error: true }) }]);
+      } else if (m.role === 'assistant') {
+        const calls = (m.tool_calls || []).map((c) => {
+          let input = c.function.arguments;
+          if (typeof input === 'string') {
+            try { input = input ? JSON.parse(input) : {}; } catch (e) { input = {}; }
+          }
+          return { type: 'tool_use', id: c.id, name: c.function.name, input };
+        });
+        push('assistant', [...(m.thinkingBlocks || []), ...blocks, ...calls]);
+      } else {
+        push('user', blocks);
+      }
+    }
+    const { max_tokens, num_predict, stop, ...sampling } = this.options;
+    const body = { model: this.model, max_tokens: max_tokens ?? num_predict ?? 16000, stream: true, messages };
+    if (system) body.system = system;
+    for (const key of ['temperature', 'top_p', 'top_k']) if (sampling[key] !== undefined) body[key] = sampling[key];
+    if (stop) body.stop_sequences = stop;
+    if (this.think !== undefined && this.think !== false) {
+      body.thinking = { type: 'adaptive', display: this.showThinking ? 'summarized' : 'omitted' };
+      if (typeof this.think === 'string') body.output_config = { effort: this.think };
+    }
+    const tools = this.toolDefinitions(today);
+    if (tools.length) body.tools = tools.map((t) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters }));
+    return body;
+  }
   async chat(prompt) {
     // Add to history
     this.history.push({ role: 'user', content: prompt });
@@ -1860,17 +2277,32 @@ class OllamaChat {
           args = null;
         }
       }
-      const label = args && TOOLS[name]?.describe ? TOOLS[name].describe(args) : name;
+      const tools = this.activeTools();
+      const tool = tools.get(name);
+      const label = args && tool?.describe ? tool.describe(args) : name;
       process.stdout.write(`${ANSI.assistant.narration}🔧 ${label}${ANSI.reset}\n`);
 
+      // MCP tools can do anything their server can, and a web page the model
+      // read could try to steer it, so they ask first unless the server is trusted.
+      let declined = false;
+      if (args !== null && tool?.needsApproval?.()) {
+        const answer = await this.choose('   Allow this tool call?', '[y/N/a(lways)]', 'ya');
+        declined = answer === 'n';
+        if (answer === 'a') {
+          const saved = tool.trustAlways();
+          console.log(`${CHROME_COLOR}   ${saved ? `Saved: this tool is now trusted in ${MCP_CONFIG_FILE}` : `Couldn't update ${MCP_CONFIG_FILE}; trusted for this session only`}${ANSI.reset}`);
+        }
+      }
       const result = args === null
         ? `Error: couldn't parse arguments for '${name}' as JSON`
-        : await runTool(name, args);
+        : declined
+          ? 'Error: the user declined this tool call'
+          : await runTool(tools, name, args);
       if (result.startsWith('Error:')) {
         process.stdout.write(`${ANSI.assistant.narration}   ${result}${ANSI.reset}\n`);
       }
 
-      if (this.api === 'openai') {
+      if (this.api !== 'ollama') {
         this.history.push({ role: 'tool', tool_call_id: call.id, content: result });
       } else {
         this.history.push({ role: 'tool', tool_name: name, content: result });
@@ -1885,12 +2317,16 @@ class OllamaChat {
     let spinner = this.startSpinner();
 
     try {
-      const isOpenAI = this.api === 'openai';
-      const body = isOpenAI ? this.buildOpenAIChatBody() : this.buildOllamaChatBody();
+      // "isOpenAI" covers every server-sent-events API; Anthropic's events
+      // are translated into OpenAI-style chunks below.
+      const isOpenAI = this.api !== 'ollama';
+      const isAnthropic = this.api === 'anthropic';
+      const body = isAnthropic ? this.buildAnthropicChatBody()
+        : isOpenAI ? this.buildOpenAIChatBody() : this.buildOllamaChatBody();
       if (!allowTools) delete body.tools;
-      const path = isOpenAI ? '/v1/chat/completions' : '/api/chat';
+      const path = isAnthropic ? '/v1/messages' : isOpenAI ? '/v1/chat/completions' : '/api/chat';
 
-      const response = await streamingPost(`${this.host}${path}`, body);
+      const response = await streamingPost(`${this.host}${path}`, body, this.authHeaders());
 
       if (!response.ok) {
         const detail = await readErrorBody(response.body);
@@ -1959,11 +2395,55 @@ class OllamaChat {
         }
       };
 
+      // Anthropic streams typed events (content_block_delta, message_delta,
+      // ...); this maps each onto the OpenAI chunk shape handled below.
+      const thinkingBlocks = [];
+      const anthropicUsage = { prompt_tokens: 0, completion_tokens: 0 };
+      const adaptAnthropicEvent = (event) => {
+        const delta = (fields) => ({ choices: [{ delta: fields }] });
+        switch (event.type) {
+          case 'message_start':
+            anthropicUsage.prompt_tokens = (event.message?.usage?.input_tokens ?? 0) +
+              (event.message?.usage?.cache_read_input_tokens ?? 0) + (event.message?.usage?.cache_creation_input_tokens ?? 0);
+            return null;
+          case 'content_block_start': {
+            const block = event.content_block;
+            if (block.type === 'tool_use') return delta({ tool_calls: [{ index: event.index, id: block.id, function: { name: block.name } }] });
+            if (block.type === 'thinking' || block.type === 'redacted_thinking') thinkingBlocks[event.index] = { ...block };
+            return null;
+          }
+          case 'content_block_delta': {
+            const d = event.delta;
+            if (d.type === 'text_delta') return delta({ content: d.text });
+            if (d.type === 'input_json_delta') return delta({ tool_calls: [{ index: event.index, function: { arguments: d.partial_json } }] });
+            if (d.type === 'thinking_delta') {
+              thinkingBlocks[event.index].thinking += d.thinking;
+              return delta({ reasoning_content: d.thinking });
+            }
+            if (d.type === 'signature_delta') thinkingBlocks[event.index].signature = d.signature;
+            return null;
+          }
+          case 'message_delta': {
+            anthropicUsage.completion_tokens = event.usage?.output_tokens ?? anthropicUsage.completion_tokens;
+            const reason = { end_turn: 'stop', stop_sequence: 'stop', tool_use: 'tool_calls' }[event.delta?.stop_reason] ?? event.delta?.stop_reason;
+            return {
+              choices: [{ delta: {}, finish_reason: reason }],
+              usage: { ...anthropicUsage, total_tokens: anthropicUsage.prompt_tokens + anthropicUsage.completion_tokens }
+            };
+          }
+          case 'error':
+            throw new Error(`API error: ${event.error?.message || 'stream failed'}`);
+          default:
+            return null;
+        }
+      };
+
       const handleLine = async (line) => {
         if (!line.trim()) return;
         let json;
         if (isOpenAI) {
           json = parseSSEChunk(line);
+          if (json && isAnthropic) json = adaptAnthropicEvent(json);
           if (!json) return;
         } else {
           try {
@@ -2028,6 +2508,7 @@ class OllamaChat {
         stats = { done_reason: openaiFinishReason || 'stop', usage: openaiUsage };
       }
       const doneReason = stats?.done_reason;
+      if (doneReason === 'refusal') process.stdout.write(`${ANSI.reset}\n⚠️  The model declined to answer this request.\n`);
       endThinking(Boolean(doneReason && doneReason !== 'stop' && doneReason !== 'tool_calls'));
       await renderer.end();
 
@@ -2039,6 +2520,8 @@ class OllamaChat {
       const calls = toolCalls.filter(Boolean);
       const message = { role: 'assistant', content: fullResponse };
       if (calls.length > 0) message.tool_calls = calls;
+      const kept = thinkingBlocks.filter(Boolean);
+      if (kept.length > 0) message.thinkingBlocks = kept;
       this.history.push(message);
 
       // A tool-calling turn continues right away, so skip the blank-line
@@ -2060,7 +2543,7 @@ class OllamaChat {
   }
 
   printStats(stats) {
-    if (this.api === 'openai') {
+    if (this.api !== 'ollama') {
       if (!stats.usage) {
         console.log('  (token stats unavailable - server did not return usage data)');
         return;
@@ -2085,16 +2568,14 @@ class OllamaChat {
   printWelcome() {
     console.clear?.();
     console.log('\n🚀 Ollama Interactive Chat');
-    console.log(`📦 Model: ${this.model}`);
-    if (this.api === 'ollama') console.log(`⏱️  Keep-alive: ${this.keepAlive}`);
-    else console.log(`🔌 API: openai-compatible`);
+    console.log(`📦 Model: ${this.model}${this.modelIsDefault ? ' (the default)' : ''}`);
+    if (this.managesModelLifetime) console.log(`⏱️  Keep-alive: ${this.keepAlive}`);
+    if (this.api !== 'ollama') console.log(`🔌 API: ${API_LABELS[this.api]}`);
     console.log(`🌐 Host: ${this.host}`);
     if (this.toolsEnabled) {
       console.log(`🔧 Tools: ${Object.keys(TOOLS).join(', ')} (${OLLAMA_API_KEY ? 'Ollama web search' : 'DuckDuckGo'})`);
     }
-    console.log('\n📝 Commands:');
-    this.printCommandList();
-    console.log('\nPress Enter to send. Ctrl+J adds a new line without sending.');
+    console.log('\nType /help for commands. Enter sends; Ctrl+J or Shift+Enter adds a new line.');
     console.log('\n' + '='.repeat(50) + '\n');
   }
 
@@ -2107,6 +2588,8 @@ class OllamaChat {
     console.log('  /clear          Clear session context');
     console.log('  /model          Show current model, keep-alive, and host');
     console.log('  /list           List locally available models');
+    console.log('  /attach <file>  Send a file (image, PDF, or text) with your next message');
+    console.log('  /mcp            Show connected MCP servers and their tools');
     console.log('  /bye            Exit');
     console.log('  /?, /help       Help for a command');
     console.log('  /? shortcuts    Help for keyboard shortcuts');
@@ -2163,9 +2646,9 @@ class OllamaChat {
       : "off (this terminal can't draw images)";
     const rows = [
       ['model', this.model],
-      ['api', this.api === 'openai' ? 'openai-compatible' : 'ollama'],
+      ['api', API_LABELS[this.api]],
       ['host', this.host],
-      ...(this.api === 'ollama' ? [['keep-alive', this.keepAlive]] : []),
+      ...(this.managesModelLifetime ? [['keep-alive', this.keepAlive]] : []),
       ['system message', sys ? `set, ${sys.length} characters (/show system)` : 'none'],
       ['parameters', Object.keys(this.options).length
         ? Object.entries(this.options).map(([k, v]) => `${k}=${Array.isArray(v) ? JSON.stringify(v) : v}`).join(', ')
@@ -2179,7 +2662,7 @@ class OllamaChat {
       ['markdown', onOff(this.markdown)],
       ['images', images],
       ['autosave', this.autosave ? `on (${this.sessionName ? `'${this.sessionName}'` : 'named after the next reply'})` : 'off'],
-      ['stop on exit', onOff(this.stopOnExit)],
+      ...(this.managesModelLifetime ? [['stop on exit', onOff(this.stopOnExit)]] : []),
       ['defaults file', ENV_FILE_LOADED ? ENV_FILE : `none (${ENV_FILE})`]
     ];
     console.log('\nSession settings:');
@@ -2296,7 +2779,8 @@ class OllamaChat {
 
   async load(name) {
     if (!name) {
-      console.log('\nUsage:\n  /load <modelname>\n');
+      await this.list();
+      console.log('Usage: /load <model or saved session>\n');
       return;
     }
 
@@ -2344,7 +2828,9 @@ class OllamaChat {
   async list() {
     try {
       if (this.api !== 'ollama') {
-        const response = await hostFetch(`${this.host}/v1/models`);
+        const response = await hostFetch(`${this.host}/v1/models${this.api === 'anthropic' ? '?limit=100' : ''}`, {
+          headers: this.authHeaders()
+        });
         if (!response.ok) {
           throw new Error(`API error: ${response.status} ${response.statusText}`);
         }
@@ -2393,7 +2879,7 @@ class OllamaChat {
         const sys = this.getSystemMessage();
         console.log(sys ? `\n${sys}\n` : '\nNo system message was specified for this session.\n');
       } else {
-        console.log(`\n❌ /show ${sub} isn't supported for --api openai (no /api/show equivalent)\n`);
+        console.log(`\n❌ /show ${sub} isn't supported for --api ${this.api} (no /api/show equivalent)\n`);
       }
       return;
     }
@@ -2601,8 +3087,8 @@ class OllamaChat {
       }
       case '/model':
         console.log(`\n📦 Current model: ${this.model}`);
-        if (this.api === 'ollama') console.log(`⏱️  Keep-alive: ${this.keepAlive}`);
-        else console.log(`🔌 API: openai-compatible`);
+        if (this.managesModelLifetime) console.log(`⏱️  Keep-alive: ${this.keepAlive}`);
+        if (this.api !== 'ollama') console.log(`🔌 API: ${API_LABELS[this.api]}`);
         console.log(`🌐 Host: ${this.host}\n`);
         return true;
       case '/save':
@@ -2616,6 +3102,12 @@ class OllamaChat {
         return true;
       case '/list':
         await this.list();
+        return true;
+      case '/mcp':
+        this.printMcp();
+        return true;
+      case '/attach':
+        this.attach(trimmed.slice(rawCmd.length));
         return true;
       case '/show':
         await this.show(rest);
@@ -2674,11 +3166,19 @@ class OllamaChat {
   // single keypress; with piped input it reads (and echoes) the next line,
   // so scripts can answer it.
   async confirm(question) {
-    process.stdout.write(`${question} [y/N] `);
+    return (await this.choose(question, '[y/N]', 'y')) === 'y';
+  }
+
+  // Like confirm, but with more answers than yes and no: `letters` are the
+  // accepted single-letter answers ('y', 'a' for "always"); anything else is 'n'.
+  async choose(question, hint, letters) {
+    const words = { y: /^y(es)?$/i, a: /^a(lways)?$/i };
+    const labels = { y: 'yes', a: 'always', n: 'no' };
+    process.stdout.write(`${question} ${hint} `);
     if (!process.stdin.isTTY) {
       const line = await this.nextPipedLine();
       process.stdout.write(`${line ?? ''}\n`);
-      return /^\s*y(es)?\s*$/i.test(line ?? '');
+      return [...letters].find((l) => words[l].test((line ?? '').trim())) ?? 'n';
     }
     return new Promise((resolve) => {
       const stdin = process.stdin;
@@ -2688,9 +3188,9 @@ class OllamaChat {
       stdin.once('keypress', (str) => {
         stdin.setRawMode(false);
         stdin.pause();
-        const yes = /^y$/i.test(str || '');
-        process.stdout.write(yes ? 'yes\n' : 'no\n');
-        resolve(yes);
+        const answer = letters.includes((str || '').toLowerCase()) && str ? str.toLowerCase() : 'n';
+        process.stdout.write(`${labels[answer]}\n`);
+        resolve(answer);
       });
     });
   }
@@ -2793,6 +3293,7 @@ class OllamaChat {
           if (this.stopOnExit) {
             await this.stopModel();
           }
+          this.mcp?.close();
           process.exit(0);
           return;
         }
@@ -2891,7 +3392,9 @@ class OllamaChat {
   }
 
   async start() {
+    await this.resolveDefaultModel();
     this.printWelcome();
+    await this.startMcp();
     await this.loadModelContext();
 
     while (true) {
@@ -2924,6 +3427,7 @@ class OllamaChat {
     if (this.stopOnExit) {
       await this.stopModel();
     }
+    this.mcp?.close();
   }
 }
 
@@ -2937,6 +3441,7 @@ const ENV_SETTINGS = {
   SKINNY_TOOLS: ['tools', 'boolean'],
   SKINNY_DATE: ['date', 'boolean'],
   SKINNY_MARKDOWN: ['markdown', 'boolean'],
+  SKINNY_MCP: ['mcp', 'boolean'],
   SKINNY_IMAGES: ['images', 'boolean'],
   SKINNY_AUTOSAVE: ['autosave', 'boolean'],
   SKINNY_HIDE_THINKING: ['hideThinking', 'boolean'],
@@ -2972,6 +3477,7 @@ const BOOLEAN_FLAGS = {
   '--tools': ['tools', true], '--no-tools': ['tools', false],
   '--date': ['date', true], '--no-date': ['date', false],
   '--markdown': ['markdown', true], '--no-markdown': ['markdown', false],
+  '--mcp': ['mcp', true], '--no-mcp': ['mcp', false],
   '--images': ['images', true], '--no-images': ['images', false],
   '--autosave': ['autosave', true], '--no-autosave': ['autosave', false],
   '--hide-thinking': ['hideThinking', true], '--show-thinking': ['hideThinking', false],
@@ -3051,13 +3557,19 @@ Options:
                        (same as running \`/set autosave\`)
   --hide-thinking      Don't stream thinking-model reasoning output
                        (shown by default; same as running \`/set hidethinking\`)
-  --tools              Let the model call tools - web_search (DuckDuckGo) and
-                       fetch_page (same as running \`/set tools\`). Needs a
+  --no-tools           Don't offer the model web_search (DuckDuckGo) and
+                       fetch_page; they're on by default (same as running
+                       \`/set notools\`). They need a
                        tool-capable model (e.g. llama3.1, qwen3). With
                        OLLAMA_API_KEY set, uses Ollama's hosted search/fetch.
+  --no-mcp             Don't start the MCP servers in ${MCP_CONFIG_FILE}
+                       (standard "mcpServers" format; their tools ask before
+                       each call unless a server sets "trust": true. See /mcp.)
   --date, --no-date    Always / never tell the model today's date via the
                        system message (default: only when tools are on)
-  --api <ollama|openai>  Backend API to speak (default: ollama)
+  --api <ollama|openai|anthropic>  Backend API to speak (default: ollama)
+                       Use 'anthropic' for Claude (needs ANTHROPIC_API_KEY;
+                       the default host becomes https://api.anthropic.com)
                        Use 'openai' for OpenAI-compatible servers (vLLM,
                        llama.cpp server, LM Studio, ...). Ollama-only
                        features (/save, /show info/license/modelfile/
@@ -3075,8 +3587,9 @@ Defaults:
     SKINNY_TOOLS=true              SKINNY_AUTOSAVE=true
     OLLAMA_API_KEY=...
   Also: SKINNY_API, SKINNY_KEEP_ALIVE, SKINNY_DATE, SKINNY_MARKDOWN,
-  SKINNY_IMAGES, SKINNY_HIDE_THINKING, SKINNY_STOP_ON_EXIT, and
-  SKINNY_{USER,MODEL}_{NORMAL,ITALIC}_COLOR. Environment variables override
+  SKINNY_IMAGES, SKINNY_HIDE_THINKING, SKINNY_STOP_ON_EXIT, SKINNY_MCP, and
+  SKINNY_{USER,MODEL}_{NORMAL,ITALIC}_COLOR. OPENAI_API_KEY and
+  ANTHROPIC_API_KEY go with --api openai / anthropic. Environment variables override
   the file, and command-line flags override both.
 
 Examples:
@@ -3099,8 +3612,12 @@ async function main() {
     process.exit(1);
   }
 
-  if (options.api && !['ollama', 'openai'].includes(options.api)) {
-    console.error(`❌ Error: --api must be 'ollama' or 'openai' (got '${options.api}')\n`);
+  if (options.api && !API_NAMES.includes(options.api)) {
+    console.error(`❌ Error: --api must be 'ollama', 'openai', or 'anthropic' (got '${options.api}')\n`);
+    process.exit(1);
+  }
+  if (options.api === 'anthropic' && !ANTHROPIC_API_KEY) {
+    console.error(`❌ Error: --api anthropic needs ANTHROPIC_API_KEY (set it in the environment or ${ENV_FILE})\n`);
     process.exit(1);
   }
 

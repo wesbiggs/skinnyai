@@ -12,7 +12,7 @@ A terminal-based Node.js chat interface for Ollama and OpenAI-compatible endpoin
 - ✅ Full `ollama run` command parity (`/set`, `/show`, `/load`, `/save`, `/clear`, `/bye`, `/?`, `/list`, ...)
 - ✅ Conversation history that's actually sent back to the model each turn (via `/api/chat`)
 - ✅ `--api openai` mode for OpenAI-compatible servers (vLLM, llama.cpp server, LM Studio, ...) — see [OpenAI-compatible servers](#openai-compatible-servers)
-- ✅ Opt-in tool calling with built-in `web_search` and `fetch_page` tools (DuckDuckGo, or Ollama's hosted search with an API key)
+- ✅ Tool calling, on by default, with built-in `web_search` and `fetch_page` tools (DuckDuckGo, or Ollama's hosted search with an API key)
 - ✅ Ollama cloud models via `--host https://ollama.com` and `OLLAMA_API_KEY` — see [Ollama account](#ollama-account-cloud-models-and-hosted-search) — see [Tool calling and web search](#tool-calling-and-web-search)
 - ✅ Session saving to local Modelfiles (works with any server), optional autosave, and `/share` to an Ollama server
 - ✅ Defaults in `~/.skinny/.env`
@@ -134,6 +134,8 @@ By default the model stays loaded for its `--keep-alive` duration after you quit
 node bin/skinnyai.js llama2 --stop-on-exit
 ```
 
+Keep-alive and unloading only exist on a self-hosted Ollama, so they aren't shown (and `--stop-on-exit` does nothing) with `--api openai`, `--api anthropic`, or `--host https://ollama.com`.
+
 This fires on every way the session can end — `/exit`, `/bye`, Ctrl+D, and Ctrl+C — and is best-effort: if the unload request fails (e.g. the server already went away), it's reported but won't block the process from exiting.
 
 ## Commands
@@ -144,6 +146,7 @@ This client mirrors the command set of the native `ollama run` interactive termi
 |---------|-------------|
 | `/set` | Set session variables (see below) |
 | `/show` | Show model information (see below) |
+| `/load` | With no name, shows the same list as `/list` |
 | `/load <name>` | Restore a saved session, or switch to a different model (restoring its saved session/system message if any) |
 | `/save [name]` | Save your current session to a local file (see below) |
 | `/share [name]` | Save your current session as a model on a self-hosted Ollama server |
@@ -176,13 +179,13 @@ If generation runs out of its token/context budget while the model is still mid-
 
 ### Tool calling and web search
 
-Pass `--tools` (or run `/set tools` mid-session) to offer the model two tools:
+The model is offered two tools by default (`--no-tools`, `SKINNY_TOOLS=false`, or `/set notools` turns them off; `/set tools` turns them back on):
 
 - `web_search` — searches the web with DuckDuckGo and returns result titles, URLs, and snippets.
 - `fetch_page` — fetches a URL and returns the page's readable text, so the model can read a search result instead of guessing from its snippet.
 
 ```bash
-./bin/skinnyai.js qwen3 --tools
+./bin/skinnyai.js qwen3 --no-tools   # for a model that can't call tools
 ```
 
 When the model calls a tool, skinnyai runs it, shows a dimmed line like `🔧 searching: "..."` or `🔧 fetching: <url>`, sends the result back to the model, and streams its final answer. A single reply can involve several tool calls; after 5 rounds of tool calls, the model is asked to answer without tools. Tool calls and results are kept in the conversation history, so follow-up questions can refer to them.
@@ -210,7 +213,7 @@ Models only know their training cutoff, and many assume it's still that date —
 
 The date is added to each outgoing request, not stored in the conversation, so it's always current, and `/save` and `/show system` only ever contain your own system message.
 
-It's on by default whenever tools are on. `--date` or `/set date` turns it on without tools (it also helps with questions like "how long ago was X"); `--no-date` or `/set nodate` turns it off. Under `--api openai`, sending the system message can replace a system prompt the server would otherwise apply by default.
+It's on by default whenever tools are on (which they are by default). `--date` or `/set date` turns it on without tools (it also helps with questions like "how long ago was X"); `--no-date` or `/set nodate` turns it off. Under `--api openai`, sending the system message can replace a system prompt the server would otherwise apply by default.
 
 ### `/show`
 
@@ -341,7 +344,7 @@ If a hosted call fails — a usage limit, an outage, or an occasional page Ollam
 
 ## OpenAI-compatible servers
 
-Pass `--api openai` to talk to an OpenAI-compatible server (vLLM, llama.cpp's `server`, LM Studio, etc.) instead of Ollama:
+Pass `--api openai` to talk to an OpenAI-compatible server (vLLM, llama.cpp's `server`, LM Studio, etc.) instead of Ollama. If it wants a key (including OpenAI itself: `--host https://api.openai.com`), set `OPENAI_API_KEY`; it's sent as a bearer token to whatever `--host` is:
 
 ```bash
 ./bin/skinnyai.js my-model --api openai --host http://localhost:8000
@@ -356,6 +359,29 @@ Several commands are Ollama-specific and have no OpenAI API equivalent, so they'
 - `/load <name>` — restores a saved session by that name; otherwise it switches the active model name and starts a fresh session.
 - `--keep-alive`/`-x`/`--stop-on-exit` — no equivalent concept; `--stop-on-exit` is a no-op.
 - `/set verbose` stats — only shows token counts (from the `usage` field, if the server returns one), not timing, since OpenAI's API doesn't report duration breakdowns.
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... ./bin/skinnyai.js claude-sonnet-5-5 --api anthropic
+```
+
+Streaming, history, images, `/set system`, tools (web search and MCP), and `/list` (from `/v1/models`) work. `/set think [low|medium|high|xhigh|max]` turns on adaptive thinking (with that effort level); `nothink` just stops sending it, since newer models can't have thinking switched off. `/set parameter temperature|top_p|top_k|stop|max_tokens` are passed through (`num_predict` also sets `max_tokens`; the default is 16000). Like `--api openai`, it has no `/share`, `/show info`, or keep-alive.
+
+## MCP servers
+
+skinnyai reads `~/.skinny/mcp.json` (or the file named by `SKINNY_MCP_CONFIG`) in the format Claude Desktop, Claude Code, and Cursor share, and offers each server's tools to the model — with any `--api`, alongside the built-in web tools:
+
+```json
+{
+  "mcpServers": {
+    "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/notes"] },
+    "docs":  { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" }, "trust": true }
+  }
+}
+```
+
+- `command`/`args`/`env`/`cwd` start a local server over stdio; `url`/`headers` connect to a remote one over streamable HTTP. `${VAR}` expands from the environment. `"disabled": true` skips an entry.
+- Tools appear as `server__tool`. Each call asks `Allow this tool call? [y/N/a(lways)]` first, because a web page the model read could try to steer it. Answering `a` trusts that one tool from then on by adding it to its server's `"trust": ["tool", …]` list in `mcp.json` (the file is rewritten, pretty-printed); `"trust": true` trusts every tool on a server.
+- `/mcp` lists what's connected. A server that fails to start is reported and skipped. `--no-mcp` (or `SKINNY_MCP=false`) ignores the file. Only tools are supported — not resources, prompts, sampling, or the legacy SSE transport.
 
 ## How It Works
 

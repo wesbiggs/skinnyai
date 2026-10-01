@@ -25,9 +25,9 @@ beforeEach(() => {
 
 function run(args, input = '', { env = {}, script = SCRIPT } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [script, ...args], {
-      env: { ...process.env, SKINNY_HOME: home, ...env }
-    });
+    const childEnv = { ...process.env, SKINNY_HOME: home, SKINNY_TOOLS: 'false', ...env };
+    for (const name of Object.keys(childEnv)) if (childEnv[name] === null) delete childEnv[name];
+    const child = spawn(process.execPath, [script, ...args], { env: childEnv });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => (stdout += chunk));
@@ -103,7 +103,7 @@ describe('defaults from .env', () => {
   });
 
   it('uses the file for anything not given on the command line', async () => {
-    const { stdout } = await run([], 'hello\n/show settings\n');
+    const { stdout } = await run([], 'hello\n/show settings\n', { env: { SKINNY_TOOLS: null } });
     expect(chatRequests()[0].body.model).toBe('envmodel');
     expect(stdout).toMatch(/tools +on/);
     expect(stdout).toMatch(/autosave +on \('chat-/);
