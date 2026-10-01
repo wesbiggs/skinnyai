@@ -293,12 +293,16 @@ Colors are only applied on a real terminal; the flags are silently ignored when 
 ### Quick chat session
 ```bash
 $ ./bin/skinnyai.js llama2
-🚀 Ollama Interactive Chat
-📦 Model: llama2
-⏱️  Keep-alive: 1h
-🌐 Host: http://localhost:11434
-
-==================================================
+┌───────────────────────────────────────────────────────┐
+│ 🚀 SkinnyAI v0.9.0                                    │
+│ 📦 Model: llama2                                      │
+│ ⏳ Keep-alive: 1h                                     │
+│ 🌐 Host: http://localhost:11434                       │
+│ 🔧 Tools: web_search, fetch_page (DuckDuckGo)         │
+│                                                       │
+│ Type /help for commands.                              │
+│ Enter sends; Ctrl+J or Shift+Enter adds a new line.   │
+└───────────────────────────────────────────────────────┘
 
 > What is machine learning?
 Machine learning is a subset of artificial intelligence...
