@@ -6,7 +6,7 @@ import https from 'node:https';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import fs from 'node:fs/promises';
-import { readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import os from 'node:os';
@@ -129,6 +129,43 @@ function anthropicHeaders() {
 // It goes to whatever --host is, so a stray OPENAI_API_KEY in the
 // environment reaches a local server too; the host is always your choice.
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+
+// --- Debug log (--debug / SKINNY_DEBUG=true) ---
+//
+// One JSON object per line in $SKINNY_HOME/debug.log (readable only by you):
+// every chat request (URL, model, messages, and the tools offered), the HTTP
+// status that came back, each tool call with its arguments and result, and
+// the MCP servers' tools. API keys are never written, and big strings (images,
+// PDFs, long tool output) are cut down to a size note.
+
+const DEBUG_LOG = path.join(SKINNY_HOME, 'debug.log');
+let debugEnabled = false;
+
+async function enableDebugLog() {
+  debugEnabled = true;
+  await fs.mkdir(SKINNY_HOME, { recursive: true, mode: 0o700 });
+  await fs.appendFile(DEBUG_LOG, '', { mode: 0o600 });
+  await fs.chmod(DEBUG_LOG, 0o600);
+}
+
+function abbreviate(value) {
+  if (typeof value === 'string') {
+    if (/^data:/i.test(value) || /^[A-Za-z0-9+/=\s]{400,}$/.test(value)) return `<${value.length} characters of encoded data>`;
+    return value.length > 4000 ? `${value.slice(0, 4000)}…[${value.length - 4000} more characters]` : value;
+  }
+  if (Array.isArray(value)) return value.map(abbreviate);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, abbreviate(v)]));
+  return value;
+}
+
+function debugLog(event, details = {}) {
+  if (!debugEnabled) return;
+  try {
+    appendFileSync(DEBUG_LOG, `${JSON.stringify({ time: new Date().toISOString(), event, ...abbreviate(details) })}\n`);
+  } catch (error) {
+    debugEnabled = false; // can't write it; stop trying rather than fail the chat
+  }
+}
 
 // --- Tools (enabled with --tools or /set tools) ---
 
@@ -2046,6 +2083,7 @@ class OllamaChat {
     this.stopOnExit = Boolean(options.stopOnExit);
     this.toolsEnabled = options.tools !== false; // on unless --no-tools / SKINNY_TOOLS=false
     this.mcpEnabled = options.mcp !== false;
+    this.debug = Boolean(options.debug);
     this.queuedAttachments = []; // /attach: sent with the next message
     this.pendingFiles = []; // what the line editor attached to the line it just returned
     this.mcp = null; // set by startMcp(): { servers, tools, failures, close }
@@ -2098,6 +2136,11 @@ class OllamaChat {
     if (configs.length === 0) return;
     if (supportsColor) process.stdout.write('🔌 Starting MCP servers...\n');
     this.mcp = await startMcpServers(configs);
+    debugLog('mcp-servers', {
+      config: MCP_CONFIG_FILE,
+      started: this.mcp.servers.map((server) => ({ server: server.name, tools: server.tools.map((tool) => tool.name) })),
+      failed: this.mcp.failures
+    });
     const ok = this.mcp.servers.map((server) => `${server.name} (${server.tools.length} tool${server.tools.length === 1 ? '' : 's'})`);
     if (ok.length) this.mcpLines.push(`🔌 MCP: ${ok.join(', ')}`);
     for (const { name, error } of this.mcp.failures) this.mcpLines.push(`❌ MCP server '${name}' failed to start: ${error}`);
@@ -2559,6 +2602,7 @@ class OllamaChat {
         : declined
           ? 'Error: the user declined this tool call'
           : await runTool(tools, name, args);
+      debugLog('tool-call', { name, known: tools.has(name), arguments: args, declined, result });
       if (result.startsWith('Error:')) {
         process.stdout.write(`${ANSI.assistant.narration}   ${result}${ANSI.reset}\n`);
       }
@@ -2587,7 +2631,12 @@ class OllamaChat {
       if (!allowTools) delete body.tools;
       const path = isAnthropic ? '/v1/messages' : isOpenAI ? '/v1/chat/completions' : '/api/chat';
 
+      debugLog('request', {
+        api: this.api, url: `${this.host}${path}`, authenticated: Object.keys(this.authHeaders()).length > 0 || (this.api === 'ollama' && Boolean(OLLAMA_API_KEY) && isOllamaCom(this.host)),
+        offeredTools: (body.tools || []).map((t) => t.function?.name ?? t.name), body
+      });
       const response = await streamingPost(`${this.host}${path}`, body, this.authHeaders());
+      debugLog('response', { status: response.status, statusText: response.statusText });
 
       if (!response.ok) {
         const detail = await readErrorBody(response.body);
@@ -2839,6 +2888,7 @@ class OllamaChat {
       lines.push(`🔧 Tools: ${Object.keys(TOOLS).join(', ')} (${OLLAMA_API_KEY ? 'Ollama web search' : 'DuckDuckGo'})`);
     }
     lines.push(...(this.mcpLines || []));
+    if (this.debug) lines.push(`🐞 Debug log: ${DEBUG_LOG}`);
     lines.push('', 'Type /help for commands.', 'Enter sends; Ctrl+J or Shift+Enter adds a new line.');
     console.log('\n' + drawBox(lines, ANSI.assistant.dialogue) + '\n');
   }
@@ -2889,6 +2939,8 @@ class OllamaChat {
     console.log('  /set nomarkdown        Show responses as raw text');
     console.log('  /set images            Draw ![images](url or file path) inline (iTerm2, WezTerm, kitty, Ghostty, the SkinnyAI app)');
     console.log('  /set noimages          Show images as links (default)');
+    console.log('  /set debug             Log requests, offered tools, and tool calls to a file');
+    console.log('  /set nodebug           Stop logging (default)');
     console.log('  /set autosave          Save the session to a local file after each reply');
     console.log('  /set noautosave        Stop autosaving (default)');
     console.log('\nUse /show settings to see the current values.');
@@ -2925,6 +2977,7 @@ class OllamaChat {
       ['date', dateSetting],
       ['markdown', onOff(this.markdown)],
       ['images', images],
+      ...(this.debug ? [['debug log', DEBUG_LOG]] : []),
       ['autosave', this.autosave ? `on (${this.sessionName ? `'${this.sessionName}'` : 'named after the next reply'})` : 'off'],
       ...(this.managesModelLifetime ? [['stop on exit', onOff(this.stopOnExit)]] : []),
       ['defaults file', ENV_FILE_LOADED ? ENV_FILE : `none (${ENV_FILE})`]
@@ -3344,6 +3397,17 @@ class OllamaChat {
         this.autosave = false;
         console.log("Set 'noautosave' mode.\n");
         break;
+      case 'debug':
+        this.debug = true;
+        return enableDebugLog().then(
+          () => console.log(`Set 'debug' mode (logging requests, offered tools, and tool calls to ${DEBUG_LOG}).\n`),
+          (error) => { this.debug = false; debugEnabled = false; console.log(`Couldn't start the debug log: ${error.message}\n`); }
+        );
+      case 'nodebug':
+        this.debug = false;
+        debugEnabled = false;
+        console.log("Set 'nodebug' mode.\n");
+        break;
       case 'history':
       case 'nohistory':
         console.log(`\n'/set ${sub}' doesn't apply here - input history (Up/Down) lasts for this`);
@@ -3723,6 +3787,7 @@ class OllamaChat {
   }
 
   async start() {
+    if (this.debug) await enableDebugLog();
     await this.resolveDefaultModel();
     await this.startMcp(); // before the welcome box, which reports on it
     this.printWelcome();
@@ -3785,6 +3850,7 @@ const ENV_SETTINGS = {
   SKINNY_DATE: ['date', 'boolean'],
   SKINNY_MARKDOWN: ['markdown', 'boolean'],
   SKINNY_MCP: ['mcp', 'boolean'],
+  SKINNY_DEBUG: ['debug', 'boolean'],
   SKINNY_IMAGES: ['images', 'boolean'],
   SKINNY_AUTOSAVE: ['autosave', 'boolean'],
   SKINNY_HIDE_THINKING: ['hideThinking', 'boolean'],
@@ -3821,6 +3887,7 @@ const BOOLEAN_FLAGS = {
   '--date': ['date', true], '--no-date': ['date', false],
   '--markdown': ['markdown', true], '--no-markdown': ['markdown', false],
   '--mcp': ['mcp', true], '--no-mcp': ['mcp', false],
+  '--debug': ['debug', true], '--no-debug': ['debug', false],
   '--images': ['images', true], '--no-images': ['images', false],
   '--autosave': ['autosave', true], '--no-autosave': ['autosave', false],
   '--hide-thinking': ['hideThinking', true], '--show-thinking': ['hideThinking', false],
@@ -3908,6 +3975,8 @@ Options:
   --no-mcp             Don't start the MCP servers in ${MCP_CONFIG_FILE}
                        (standard "mcpServers" format; their tools ask before
                        each call unless a server sets "trust": true. See /mcp.)
+  --debug              Log every chat request (with the tools offered), response
+                       status, and tool call to ${DEBUG_LOG}
   --date, --no-date    Always / never tell the model today's date via the
                        system message (default: only when tools are on)
   --api <ollama|openai|anthropic>  Backend API to speak (default: ollama)
@@ -3930,7 +3999,7 @@ Defaults:
     SKINNY_TOOLS=true              SKINNY_AUTOSAVE=true
     OLLAMA_API_KEY=...
   Also: SKINNY_API, SKINNY_KEEP_ALIVE, SKINNY_DATE, SKINNY_MARKDOWN,
-  SKINNY_IMAGES, SKINNY_HIDE_THINKING, SKINNY_STOP_ON_EXIT, SKINNY_MCP, and
+  SKINNY_IMAGES, SKINNY_HIDE_THINKING, SKINNY_STOP_ON_EXIT, SKINNY_MCP, SKINNY_DEBUG, and
   SKINNY_{USER,MODEL}_{NORMAL,ITALIC}_COLOR. OPENAI_API_KEY and
   ANTHROPIC_API_KEY go with --api openai / anthropic. Environment variables override
   the file, and command-line flags override both.

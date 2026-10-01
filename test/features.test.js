@@ -23,7 +23,7 @@ beforeAll(async () => {
       'claude-sonnet-9': { created_at: '2026-06-01T00:00:00Z' }
     },
     capabilities: { vis: ['completion', 'vision'], text: ['completion'] },
-    anthropicToolCalls: { 'use echo': { name: 'fake__echo', input: { text: 'hi' } }, 'use fail': { name: 'fake__fail', input: {} } }
+    anthropicToolCalls: { 'use nope': { name: 'generate_image', input: {} }, 'use echo': { name: 'fake__echo', input: { text: 'hi' } }, 'use fail': { name: 'fake__fail', input: {} } }
   });
 });
 afterAll(() => server.close());
@@ -207,6 +207,56 @@ describe('--model default', () => {
     expect(pickDefaultModel('openai', list)).toBe('gpt-5.1');
     expect(pickDefaultModel('openai', [{ id: 'whisper-1' }])).toBeNull();
     expect(pickDefaultModel('anthropic', [{ id: 'claude-haiku-9', created_at: '2026-01-01T00:00:00Z' }])).toBe('claude-haiku-9');
+  });
+});
+
+describe('--debug', () => {
+  const readLog = () => fs.readFileSync(path.join(home, 'debug.log'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+
+  it('logs requests with the tools offered, responses, and tool calls, without secrets', async () => {
+    writeMcpConfig({ trust: true });
+    const env = { ANTHROPIC_API_KEY: 'sk-secret-key' };
+    const { stdout } = await run(['claude-x', '--api', 'anthropic', '--host', server.url, '--debug'], 'use echo\nuse nope\n', env);
+    expect(stdout).toContain('🐞 Debug log:');
+    const log = readLog();
+    const request = log.find((e) => e.event === 'request');
+    expect(request).toMatchObject({ api: 'anthropic', authenticated: true });
+    expect(request.offeredTools).toEqual(['fake__echo', 'fake__fail']);
+    expect(request.body.messages[0].content[0].text).toBe('use echo');
+    expect(log.find((e) => e.event === 'response').status).toBe(200);
+    expect(log.find((e) => e.event === 'mcp-servers').started[0]).toEqual({ server: 'fake', tools: ['echo', 'fail'] });
+    const [call, unknown] = log.filter((e) => e.event === 'tool-call');
+    expect(call).toMatchObject({ name: 'fake__echo', known: true, arguments: { text: 'hi' }, result: 'echo: >hi' });
+    // a name the model used that was never offered is flagged, which is the usual sign of a naming mismatch
+    expect(unknown).toMatchObject({ name: 'generate_image', known: false, result: "Error: unknown tool 'generate_image'" });
+    expect(fs.readFileSync(path.join(home, 'debug.log'), 'utf8')).not.toContain('sk-secret-key');
+    expect(fs.statSync(path.join(home, 'debug.log')).mode & 0o777).toBe(0o600);
+  });
+
+  it('can be switched on and off in the chat with /set debug and /set nodebug', async () => {
+    const { stdout } = await run(['m', '--api', 'openai', '--host', server.url], 'first\n/set debug\nsecond\n/set nodebug\nthird\n/show settings\n');
+    expect(stdout).toContain("Set 'debug' mode");
+    expect(stdout).toContain("Set 'nodebug' mode");
+    const requests = readLog().filter((e) => e.event === 'request');
+    expect(requests.map((r) => r.body.messages.at(-1).content)).toEqual(['second']); // not first, not third
+    expect(stdout.split('/show settings')[0]).not.toMatch(/debug log +\//);
+  });
+
+  it('lists offered tools in the OpenAI shape too', async () => {
+    writeMcpConfig();
+    await run(['m', '--api', 'openai', '--host', server.url, '--debug'], 'hi\n');
+    expect(readLog().find((e) => e.event === 'request').offeredTools).toEqual(['fake__echo', 'fake__fail']);
+  });
+
+  it('shrinks encoded data and writes nothing without --debug', async () => {
+    const image = path.join(home, 'pic.png');
+    fs.writeFileSync(image, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(3000)]));
+    await run(['vis', '--host', server.url, '--debug'], `look ${image}\n`);
+    const request = readLog().find((e) => e.event === 'request');
+    expect(JSON.stringify(request.body)).toMatch(/characters of encoded data/);
+    fs.rmSync(path.join(home, 'debug.log'));
+    await run(['vis', '--host', server.url], 'hi\n');
+    expect(fs.existsSync(path.join(home, 'debug.log'))).toBe(false);
   });
 });
 

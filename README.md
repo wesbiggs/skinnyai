@@ -172,6 +172,7 @@ This client mirrors the command set of the native `ollama run` interactive termi
 | `/set think [level]` / `/set nothink` | Enable/disable extended thinking, for models that support it |
 | `/set showthinking` / `/set hidethinking` | Show/hide a thinking model's reasoning as it streams |
 | `/set tools` / `/set notools` | Let the model call tools (`web_search`, `fetch_page`), or disable |
+| `/set debug` / `/set nodebug` | Start or stop writing the [debug log](#debugging) |
 | `/set date` / `/set nodate` | Tell the model today's date, or don't (default: only when tools are on) |
 
 `/set history`, `/set nohistory`, `/set wordwrap`, and `/set nowordwrap` are recognized but don't apply here — this client has no line-history recall and lets your terminal handle wrapping natively, so it prints a note instead of pretending to toggle something.
@@ -381,6 +382,10 @@ Drag a file from Finder into the terminal. Its path is recognized as it arrives 
 | Anything else | Refused: these APIs have no way to take it |
 
 Files are capped at 20 MB. Only a *paste* (which is what a drop is) attaches PDFs and text files; a path typed into a message only attaches images, so mentioning `~/.ssh/config` in a question doesn't upload it. When a drop doesn't register in your terminal, `/attach <path>` queues a file for your next message. PDFs and images aren't kept in saved sessions or shared models, only their text.
+
+## Debugging
+
+`--debug` (or `SKINNY_DEBUG=true`) writes `~/.skinny/debug.log`, one JSON object per line: each chat request (URL, model, messages, and `offeredTools`, the names of the tools sent), the response status, each tool call (name, whether it was one of the offered tools, arguments, result), and which MCP servers started with what tools. API keys aren't written, and encoded data (images, PDFs) is replaced by a size note. The file is readable only by you and grows until you delete it.
 
 ## Anthropic API
 

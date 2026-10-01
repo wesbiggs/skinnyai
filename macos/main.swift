@@ -111,6 +111,7 @@ let boolSettings: [BoolSetting] = [
     BoolSetting(key: "SKINNY_MARKDOWN", title: "Format replies (markdown)", detail: "Bold, lists, tables, and code blocks.", defaultValue: true),
     BoolSetting(key: "SKINNY_IMAGES", title: "Show inline images", detail: "Needs iTerm2; fetches image URLs in replies.", defaultValue: false),
     BoolSetting(key: "SKINNY_HIDE_THINKING", title: "Hide the model's thinking", detail: "Show only final answers from reasoning models.", defaultValue: false),
+    BoolSetting(key: "SKINNY_DEBUG", title: "Debug log", detail: "Record requests, offered tools, and tool calls in ~/.skinny/debug.log.", defaultValue: false),
     BoolSetting(key: "SKINNY_STOP_ON_EXIT", title: "Unload the model on exit", detail: "Frees memory for local Ollama models.", defaultValue: false, localOllamaOnly: true),
 ]
 
