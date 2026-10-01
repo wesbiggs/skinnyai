@@ -807,7 +807,7 @@ async function startMcpServers(configs) {
       tools.set(name, {
         description: `[${server.name}] ${tool.description || tool.name}`,
         parameters: tool.inputSchema?.type === 'object' ? tool.inputSchema : { type: 'object', properties: {} },
-        describe: (args) => `${server.name}: ${tool.name} ${JSON.stringify(args).slice(0, 120)}`,
+        describe: () => `${server.name}: ${tool.name}`, // just the name: arguments can be long, and --debug logs them
         needsApproval: () => !server.isTrusted(tool.name),
         trustAlways: () => server.trustTool(tool.name),
         run: (args) => server.callTool(tool.name, args)

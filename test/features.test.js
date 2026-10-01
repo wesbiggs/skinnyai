@@ -387,6 +387,7 @@ describe('MCP servers', () => {
     const first = requestsTo('/v1/messages').at(0).body;
     expect(first.tools.map((t) => t.name)).toEqual(['fake__echo', 'fake__fail']);
     expect(first.tools[0].input_schema.required).toEqual(['text']);
+    expect(stdout).toMatch(/🔧 fake: echo\n/); // the tool's name only, not its arguments
     expect(stdout).toContain('Allow this tool call? [y/N/a(lways)] y');
     expect(stdout).toContain('Tool said: echo: >hi');
     const second = requestsTo('/v1/messages').at(1).body.messages;
