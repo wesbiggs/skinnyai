@@ -39,8 +39,8 @@ function run(args, input = '', { env = {}, script = SCRIPT } = {}) {
 
 const openai = () => ['--api', 'openai', '--host', server.url];
 const chatRequests = () => server.requests.filter((r) => r.url === '/v1/chat/completions');
-// The transcript after the welcome banner.
-const transcript = (stdout) => stdout.split(`${'='.repeat(50)}\n\n`)[1];
+// The transcript after the welcome box.
+const transcript = (stdout) => stdout.split(/└─+┘\n\n/)[1];
 
 describe('piped input', () => {
   it('answers every line, echoing each after the prompt', async () => {

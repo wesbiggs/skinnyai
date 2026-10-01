@@ -73,6 +73,30 @@ describe('web tools', () => {
   });
 });
 
+describe('welcome box', () => {
+  it('names the program and version, boxes the details, and shows MCP under Tools', async () => {
+    const { VERSION } = await import('../bin/skinnyai.js');
+    expect(VERSION).toBe(JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
+    writeMcpConfig();
+    const { stdout } = await run(['m', '--api', 'openai', '--host', server.url, '--tools'], '', { SKINNY_TOOLS: 'true' });
+    const lines = stdout.split('\n').filter((l) => /^[┌│└]/.test(l));
+    expect(lines[0]).toMatch(/^┌─+┐$/);
+    expect(lines.at(-1)).toMatch(/^└─+┘$/);
+    expect(lines[1]).toContain(`🚀 SkinnyAI v${VERSION}`);
+    expect(stdout).not.toContain('Ollama Interactive Chat');
+    const body = lines.map((l) => l.replace(/^│ | │$/g, ''));
+    const tools = body.findIndex((l) => l.startsWith('🔧 Tools:'));
+    expect(body[tools + 1]).toMatch(/^🔌 MCP: fake \(2 tools\)/);
+  });
+
+  it('draws a border that lines up around wide characters', async () => {
+    const { drawBox, visibleWidth } = await import('../bin/skinnyai.js');
+    const rows = drawBox(['🚀 title', 'plain', '', '日本語']).split('\n');
+    expect(new Set(rows.map(visibleWidth)).size).toBe(1);
+    expect(rows[1].startsWith('│ 🚀 title')).toBe(true);
+  });
+});
+
 describe('welcome screen', () => {
   it('points at /help instead of listing every command', async () => {
     const { stdout } = await run(['vis', '--host', server.url], '');

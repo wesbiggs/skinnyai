@@ -12,6 +12,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 
+// Keep in step with package.json (a test checks).
+const VERSION = '0.9.0';
+
 const DEFAULT_KEEP_ALIVE = '1h';
 const DEFAULT_OLLAMA_HOST = 'http://localhost:11434';
 const DEFAULT_ANTHROPIC_HOST = 'https://api.anthropic.com';
@@ -584,7 +587,7 @@ class McpServer {
     await this.request('initialize', {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: 'skinnyai', version: '0.9.0' }
+      clientInfo: { name: 'skinnyai', version: VERSION }
     }, MCP_TIMEOUT_MS);
     await this.notify('notifications/initialized');
     let cursor;
@@ -2002,6 +2005,32 @@ async function listLocalSessions() {
   }
 }
 
+// Cuts `text` to at most `width` terminal columns, ending in an ellipsis if it had to.
+function truncateToWidth(text, width) {
+  if (visibleWidth(text) <= width) return text;
+  let out = '';
+  let used = 1; // room for the ellipsis
+  for (const { segment } of graphemes.segment(text)) {
+    used += graphemeWidth(segment);
+    if (used > width) break;
+    out += segment;
+  }
+  return `${out}…`;
+}
+
+// Text in a thin-line box, the border in `color`. The box is as wide as the
+// longest line, or the terminal if that's narrower (longer lines are cut).
+function drawBox(lines, color = '') {
+  const reset = color ? ANSI.reset : '';
+  const inner = Math.max(10, Math.min(Math.max(...lines.map(visibleWidth)), (process.stdout.columns || 80) - 4));
+  const edge = (left, right) => `${color}${left}${'─'.repeat(inner + 2)}${right}${reset}`;
+  const row = (line) => {
+    const fitted = truncateToWidth(line, inner);
+    return `${color}│${reset} ${fitted}${' '.repeat(inner - visibleWidth(fitted))} ${color}│${reset}`;
+  };
+  return [edge('┌', '┐'), ...lines.map(row), edge('└', '┘')].join('\n');
+}
+
 class OllamaChat {
   constructor(model, options = {}) {
     this.model = model;
@@ -2054,21 +2083,24 @@ class OllamaChat {
     return toolDefinitions(this.activeTools(), today);
   }
 
+  // Starts the configured MCP servers and collects what to say about them
+  // (this.mcpLines); the welcome box shows it under the Tools line.
   async startMcp() {
+    this.mcpLines = [];
     if (!this.mcpEnabled) return;
     let configs;
     try {
       configs = loadMcpConfig();
     } catch (error) {
-      console.log(`⚠️  MCP: ${error.message}\n`);
+      this.mcpLines.push(`❌ MCP: ${error.message}`);
       return;
     }
     if (configs.length === 0) return;
+    if (supportsColor) process.stdout.write('🔌 Starting MCP servers...\n');
     this.mcp = await startMcpServers(configs);
     const ok = this.mcp.servers.map((server) => `${server.name} (${server.tools.length} tool${server.tools.length === 1 ? '' : 's'})`);
-    if (ok.length) console.log(`🔌 MCP: ${ok.join(', ')}`);
-    for (const { name, error } of this.mcp.failures) console.log(`⚠️  MCP server '${name}' failed to start: ${error}`);
-    if (ok.length || this.mcp.failures.length) console.log('');
+    if (ok.length) this.mcpLines.push(`🔌 MCP: ${ok.join(', ')}`);
+    for (const { name, error } of this.mcp.failures) this.mcpLines.push(`❌ MCP server '${name}' failed to start: ${error}`);
   }
 
   printMcp() {
@@ -2796,16 +2828,19 @@ class OllamaChat {
 
   printWelcome() {
     console.clear?.();
-    console.log('\n🚀 Ollama Interactive Chat');
-    console.log(`📦 Model: ${this.model}${this.modelIsDefault ? ' (the default)' : ''}`);
-    if (this.managesModelLifetime) console.log(`⏱️  Keep-alive: ${this.keepAlive}`);
-    if (this.api !== 'ollama') console.log(`🔌 API: ${API_LABELS[this.api]}`);
-    console.log(`🌐 Host: ${this.host}`);
+    const lines = [
+      `🚀 SkinnyAI v${VERSION}`,
+      `📦 Model: ${this.model}${this.modelIsDefault ? ' (the default)' : ''}`
+    ];
+    if (this.managesModelLifetime) lines.push(`⏳ Keep-alive: ${this.keepAlive}`);
+    if (this.api !== 'ollama') lines.push(`🔌 API: ${API_LABELS[this.api]}`);
+    lines.push(`🌐 Host: ${this.host}`);
     if (this.toolsEnabled) {
-      console.log(`🔧 Tools: ${Object.keys(TOOLS).join(', ')} (${OLLAMA_API_KEY ? 'Ollama web search' : 'DuckDuckGo'})`);
+      lines.push(`🔧 Tools: ${Object.keys(TOOLS).join(', ')} (${OLLAMA_API_KEY ? 'Ollama web search' : 'DuckDuckGo'})`);
     }
-    console.log('\nType /help for commands. Enter sends; Ctrl+J or Shift+Enter adds a new line.');
-    console.log('\n' + '='.repeat(50) + '\n');
+    lines.push(...(this.mcpLines || []));
+    lines.push('', 'Type /help for commands.', 'Enter sends; Ctrl+J or Shift+Enter adds a new line.');
+    console.log('\n' + drawBox(lines, ANSI.assistant.dialogue) + '\n');
   }
 
   printCommandList() {
@@ -3689,8 +3724,8 @@ class OllamaChat {
 
   async start() {
     await this.resolveDefaultModel();
+    await this.startMcp(); // before the welcome box, which reports on it
     this.printWelcome();
-    await this.startMcp();
     await this.loadModelContext();
 
     while (true) {
@@ -3956,7 +3991,7 @@ if (invokedDirectly()) main().catch(console.error);
 export {
   charWidth, graphemeWidth, visibleWidth, createInlineStyler, styleLine, createWordWrapper,
   splitTableRow, wrapStyled, renderTable, createMarkdownRenderer, inputPosition,
-  sniffImage, imageSequence, loadImage, pickDefaultModel, extractAttachments, classifyFile,
+  drawBox, VERSION, sniffImage, imageSequence, loadImage, pickDefaultModel, extractAttachments, classifyFile,
   formatModelfile, parseModelfile, saveLocalSession, readLocalSession, listLocalSessions,
   localSessionExists, isAutosaveName, autosaveName, sessionPath,
   loadEnvFile, envOptions, parseArgs, isOllamaCom, OllamaChat, main,
