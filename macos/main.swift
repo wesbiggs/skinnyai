@@ -17,6 +17,8 @@ let homeDirectory: URL = {
 }()
 let envFileURL = homeDirectory.appendingPathComponent(".env")
 let sessionsURL = homeDirectory.appendingPathComponent("sessions")
+/// The running chat's process id, written by the launcher script (which then execs the chat, keeping the pid).
+let chatPidURL = homeDirectory.appendingPathComponent("app-chat.pid")
 
 // MARK: - .env file
 // Edits keep comments, blank lines, and variables this app doesn't know about.
@@ -97,7 +99,10 @@ struct BoolSetting {
     let key: String
     let title: String
     let detail: String
+    /// What the app offers (and shows) when the variable isn't in .env yet.
     let defaultValue: Bool
+    /// Only meaningful for a self-hosted Ollama, which loads and unloads models itself.
+    var localOllamaOnly = false
 }
 
 let boolSettings: [BoolSetting] = [
@@ -106,7 +111,7 @@ let boolSettings: [BoolSetting] = [
     BoolSetting(key: "SKINNY_MARKDOWN", title: "Format replies (markdown)", detail: "Bold, lists, tables, and code blocks.", defaultValue: true),
     BoolSetting(key: "SKINNY_IMAGES", title: "Show inline images", detail: "Needs iTerm2; fetches image URLs in replies.", defaultValue: false),
     BoolSetting(key: "SKINNY_HIDE_THINKING", title: "Hide the model's thinking", detail: "Show only final answers from reasoning models.", defaultValue: false),
-    BoolSetting(key: "SKINNY_STOP_ON_EXIT", title: "Unload the model on exit", detail: "Frees memory for local Ollama models.", defaultValue: false),
+    BoolSetting(key: "SKINNY_STOP_ON_EXIT", title: "Unload the model on exit", detail: "Frees memory for local Ollama models.", defaultValue: false, localOllamaOnly: true),
 ]
 
 func parseBool(_ text: String?) -> Bool? {
@@ -120,28 +125,181 @@ func parseBool(_ text: String?) -> Bool? {
 
 final class SettingsModel: ObservableObject {
     @Published var apiKey = ""
+    @Published var anthropicKey = ""
     @Published var host = ""
-    @Published var api = "ollama"
+    /// ollama-local, ollama-cloud, openai-cloud, openai-other, or anthropic.
+    @Published var provider = "ollama-local" {
+        didSet {
+            // Picking another provider fills in its usual address, since one provider's URL is wrong for
+            // another (not while loading saved settings), and its model names don't carry over either.
+            guard !loading, provider != oldValue else { return }
+            host = SettingsModel.suggestedHost(for: provider)
+            model = SettingsModel.supportsDefaultModel(provider) ? "default" : ""
+            typeModelName = false
+        }
+    }
+    @Published var openaiKey = ""
+
+    /// The skinnyai program's API (SKINNY_API) behind the provider.
+    var api: String {
+        if provider.hasPrefix("ollama") { return "ollama" }
+        return provider.hasPrefix("openai") ? "openai" : "anthropic"
+    }
     @Published var model = ""
     @Published var keepAlive = ""
     @Published var flags: [String: Bool] = [:]
     @Published var terminal = UserDefaults.standard.string(forKey: "chatIn") ?? "builtin"
     @Published var message: String?
+    @Published var availableModels: [String] = []
+    @Published var modelsStatus: String?
+    @Published var loadingModels = false
+    @Published var typeModelName = false
+    private var modelsRequest = 0
+    private var loading = false
+
+    /// The address offered when a provider is picked. (Other OpenAI-compatible servers vary — LM Studio
+    /// is :1234, vLLM :8000 — but Ollama also serves that API on its own port, so that's the starting point.)
+    static func suggestedHost(for provider: String) -> String {
+        switch provider {
+        case "ollama-cloud": return "https://ollama.com"
+        case "openai-cloud": return "https://api.openai.com"
+        case "anthropic": return "https://api.anthropic.com"
+        default: return "http://localhost:11434"
+        }
+    }
+
+    /// What the skinnyai program connects to when SKINNY_HOST isn't set.
+    static func programHost(for api: String) -> String {
+        api == "anthropic" ? "https://api.anthropic.com" : "http://localhost:11434"
+    }
+
+    /// OpenAI and Anthropic have no flagship alias, so "default" tells skinnyai to look up the newest
+    /// flagship from the server's model list each time it starts.
+    static func supportsDefaultModel(_ provider: String) -> Bool { provider == "openai-cloud" || provider == "anthropic" }
+
+    static func hostName(_ text: String) -> String {
+        URL(string: text.contains("://") ? text : "http://" + text)?.host?.lowercased() ?? ""
+    }
+
+    /// Which provider a saved API and server amount to.
+    static func provider(api: String, host: String) -> String {
+        let name = hostName(host)
+        switch api {
+        case "anthropic": return "anthropic"
+        case "openai": return name == "api.openai.com" ? "openai-cloud" : "openai-other"
+        default: return name == "ollama.com" || name.hasSuffix(".ollama.com") ? "ollama-cloud" : "ollama-local"
+        }
+    }
 
     private var env = EnvFile(contentsOf: envFileURL)
 
     init() { load() }
 
     func load() {
+        loading = true
+        defer { loading = false }
         env = EnvFile(contentsOf: envFileURL)
         apiKey = env.value("OLLAMA_API_KEY") ?? ""
-        host = env.value("SKINNY_HOST") ?? ""
-        api = env.value("SKINNY_API") == "openai" ? "openai" : "ollama"
+        anthropicKey = env.value("ANTHROPIC_API_KEY") ?? ""
+        openaiKey = env.value("OPENAI_API_KEY") ?? ""
+        let savedAPI = env.value("SKINNY_API") ?? ""
+        let savedHost = env.value("SKINNY_HOST")
+        let savedProgramAPI = ["openai", "anthropic"].contains(savedAPI) ? savedAPI : "ollama"
+        let effectiveHost = savedHost ?? SettingsModel.programHost(for: savedProgramAPI)
+        provider = SettingsModel.provider(api: savedProgramAPI, host: effectiveHost)
+        host = effectiveHost
         model = env.value("SKINNY_MODEL") ?? ""
         keepAlive = env.value("SKINNY_KEEP_ALIVE") ?? ""
         for setting in boolSettings {
             flags[setting.key] = parseBool(env.value(setting.key)) ?? setting.defaultValue
         }
+        refreshModels()
+    }
+
+    // MARK: Model list
+
+    var serverURL: URL? {
+        let typed = host.trimmingCharacters(in: .whitespaces)
+        var text = typed.isEmpty ? SettingsModel.suggestedHost(for: provider) : typed
+        if !text.contains("://") { text = "http://" + text }
+        while text.hasSuffix("/") { text.removeLast() }
+        return URL(string: text)
+    }
+
+    var isOllamaCom: Bool {
+        let name = serverURL?.host?.lowercased() ?? ""
+        return name == "ollama.com" || name.hasSuffix(".ollama.com")
+    }
+
+    /// keep-alive and unloading only apply to a self-hosted Ollama.
+    var managesModelLifetime: Bool { api == "ollama" && !isOllamaCom }
+
+    private var refreshWork: DispatchWorkItem?
+
+    /// Asks the server for its models a moment after the last edit to the server or key.
+    func scheduleRefresh() {
+        refreshWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.refreshModels() }
+        refreshWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
+    }
+
+    func refreshModels() {
+        refreshWork?.cancel()
+        modelsRequest += 1
+        let request = modelsRequest
+        guard let base = serverURL else {
+            availableModels = []
+            modelsStatus = "That server address doesn't look right."
+            return
+        }
+        guard var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return }
+        let basePath = components.path
+        components.path = basePath + (api == "ollama" ? "/api/tags" : "/v1/models")
+        if api == "anthropic" { components.queryItems = [URLQueryItem(name: "limit", value: "100")] }
+        guard let url = components.url else { return }
+        var urlRequest = URLRequest(url: url, timeoutInterval: 6)
+        let ollamaKey = apiKey.trimmingCharacters(in: .whitespaces)
+        let claudeKey = anthropicKey.trimmingCharacters(in: .whitespaces)
+        let openaiToken = openaiKey.trimmingCharacters(in: .whitespaces)
+        if api == "openai" && !openaiToken.isEmpty {
+            urlRequest.setValue("Bearer \(openaiToken)", forHTTPHeaderField: "Authorization")
+        } else if api == "anthropic" {
+            urlRequest.setValue(claudeKey, forHTTPHeaderField: "x-api-key")
+            urlRequest.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        } else if api == "ollama" && isOllamaCom && url.scheme == "https" && !ollamaKey.isEmpty {
+            urlRequest.setValue("Bearer \(ollamaKey)", forHTTPHeaderField: "Authorization")
+        }
+        let isOllama = api == "ollama"
+        loadingModels = true
+        modelsStatus = nil
+        URLSession.shared.dataTask(with: urlRequest) { [weak self] data, response, error in
+            var names: [String] = []
+            var failure: String?
+            if let error {
+                failure = error.localizedDescription
+            } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                failure = http.statusCode == 401 || http.statusCode == 403 ? "the server rejected the API key" : "the server answered HTTP \(http.statusCode)"
+            } else if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if isOllama {
+                    names = (json["models"] as? [[String: Any]])?.compactMap { $0["name"] as? String } ?? []
+                } else {
+                    names = (json["data"] as? [[String: Any]])?.compactMap { $0["id"] as? String } ?? []
+                }
+            } else {
+                failure = "unexpected reply"
+            }
+            DispatchQueue.main.async {
+                guard let self, request == self.modelsRequest else { return } // a newer request superseded this one
+                self.loadingModels = false
+                self.availableModels = names.sorted()
+                if let failure {
+                    self.modelsStatus = "Couldn't list models: \(failure)"
+                } else if names.isEmpty {
+                    self.modelsStatus = "The server has no models yet."
+                }
+            }
+        }.resume()
     }
 
     var isConfigured: Bool { !(EnvFile(contentsOf: envFileURL).value("SKINNY_MODEL") ?? "").isEmpty }
@@ -150,13 +308,17 @@ final class SettingsModel: ObservableObject {
     func save() -> Bool {
         env = EnvFile(contentsOf: envFileURL) // pick up edits made outside the app
         env.set("OLLAMA_API_KEY", apiKey.trimmingCharacters(in: .whitespaces))
-        env.set("SKINNY_HOST", host.trimmingCharacters(in: .whitespaces))
-        env.set("SKINNY_API", api == "openai" ? "openai" : nil)
+        env.set("ANTHROPIC_API_KEY", anthropicKey.trimmingCharacters(in: .whitespaces))
+        env.set("OPENAI_API_KEY", openaiKey.trimmingCharacters(in: .whitespaces))
+        // An address the program would use anyway isn't written out.
+        let typedHost = host.trimmingCharacters(in: .whitespaces)
+        env.set("SKINNY_HOST", typedHost == SettingsModel.programHost(for: api) ? nil : typedHost)
+        env.set("SKINNY_API", api == "ollama" ? nil : api)
         env.set("SKINNY_MODEL", model.trimmingCharacters(in: .whitespaces))
         env.set("SKINNY_KEEP_ALIVE", keepAlive.trimmingCharacters(in: .whitespaces))
         for setting in boolSettings {
             let value = flags[setting.key] ?? setting.defaultValue
-            // Leave variables alone when they already match the default and aren't in the file.
+            // Leave variables alone when the program would already do this without them.
             if value == setting.defaultValue && env.value(setting.key) == nil { continue }
             env.set(setting.key, value ? "true" : "false")
         }
@@ -179,23 +341,72 @@ struct SettingsView: View {
     var onSave: (Bool) -> Void
     var onCancel: () -> Void
 
+    /// A drop-down of what the server offers, refreshed whenever the server changes;
+    /// a text field when it can't be listed (or on request, for a name that isn't in the list).
+    @ViewBuilder private var modelRow: some View {
+        let listed = !model.availableModels.isEmpty && !model.typeModelName
+        HStack {
+            if listed {
+                Picker("Model", selection: $model.model) {
+                    if SettingsModel.supportsDefaultModel(model.provider) { Text("Default (newest flagship)").tag("default") }
+                    if model.model.isEmpty { Text("Choose a model…").tag("") }
+                    if !model.model.isEmpty && model.model != "default" && !model.availableModels.contains(model.model) { Text(model.model).tag(model.model) }
+                    ForEach(model.availableModels, id: \.self) { Text($0).tag($0) }
+                }
+            } else {
+                TextField("Model", text: $model.model, prompt: Text("e.g. gemma4:31b"))
+            }
+            if model.loadingModels {
+                ProgressView().controlSize(.small)
+            } else {
+                Button { model.refreshModels() } label: { Image(systemName: "arrow.clockwise") }
+                    .help("Refresh the list of models")
+                    .buttonStyle(.borderless)
+            }
+        }
+        if let status = model.modelsStatus {
+            Text(status).font(.caption).foregroundStyle(.secondary)
+        }
+        if !model.availableModels.isEmpty {
+            Toggle("Type a model name instead", isOn: $model.typeModelName).font(.caption)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Form {
                 Section("Connection") {
-                    SecureField("Ollama API key", text: $model.apiKey, prompt: Text("needed for ollama.com cloud models and search"))
-                    Link("Get a free key at ollama.com/settings/keys", destination: URL(string: "https://ollama.com/settings/keys")!)
-                        .font(.caption)
-                    TextField("Server", text: $model.host, prompt: Text("http://localhost:11434"))
-                    Picker("API", selection: $model.api) {
-                        Text("Ollama").tag("ollama")
-                        Text("OpenAI-compatible").tag("openai")
+                    Picker("Provider", selection: $model.provider) {
+                        Text("Ollama (Self-Hosted)").tag("ollama-local")
+                        Text("Ollama (Cloud)").tag("ollama-cloud")
+                        Text("OpenAI (Cloud)").tag("openai-cloud")
+                        Text("Other OpenAI-compatible").tag("openai-other")
+                        Text("Anthropic (Claude)").tag("anthropic")
                     }
-                    TextField("Model", text: $model.model, prompt: Text("e.g. gemma4:31b"))
-                    TextField("Keep model loaded", text: $model.keepAlive, prompt: Text("1h"))
+                    switch model.provider {
+                    case "anthropic":
+                        SecureField("Anthropic API key", text: $model.anthropicKey, prompt: Text("sk-ant-…"))
+                    case "openai-cloud":
+                        SecureField("OpenAI API key", text: $model.openaiKey, prompt: Text("sk-…"))
+                        Link("Get a key at platform.openai.com/api-keys", destination: URL(string: "https://platform.openai.com/api-keys")!)
+                            .font(.caption)
+                    case "openai-other":
+                        SecureField("API key", text: $model.openaiKey, prompt: Text("only if the server wants one"))
+                    case "ollama-cloud":
+                        SecureField("Ollama API key", text: $model.apiKey, prompt: Text("needed for cloud models and search"))
+                        Link("Get a free key at ollama.com/settings/keys", destination: URL(string: "https://ollama.com/settings/keys")!)
+                            .font(.caption)
+                    default:
+                        EmptyView() // a self-hosted Ollama doesn't need a key
+                    }
+                    TextField("Server", text: $model.host, prompt: Text(SettingsModel.suggestedHost(for: model.provider)))
+                    modelRow
+                    if model.managesModelLifetime {
+                        TextField("Keep model loaded", text: $model.keepAlive, prompt: Text("1h"))
+                    }
                 }
                 Section("Behavior") {
-                    ForEach(boolSettings, id: \.key) { setting in
+                    ForEach(boolSettings.filter { !$0.localOllamaOnly || model.managesModelLifetime }, id: \.key) { setting in
                         Toggle(isOn: Binding(
                             get: { model.flags[setting.key] ?? setting.defaultValue },
                             set: { model.flags[setting.key] = $0 }
@@ -224,6 +435,11 @@ struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            .onChange(of: model.host) { _ in model.scheduleRefresh() }
+            .onChange(of: model.provider) { _ in model.scheduleRefresh() }
+            .onChange(of: model.apiKey) { _ in if model.isOllamaCom { model.scheduleRefresh() } }
+            .onChange(of: model.anthropicKey) { _ in if model.api == "anthropic" { model.scheduleRefresh() } }
+            .onChange(of: model.openaiKey) { _ in if model.api == "openai" { model.scheduleRefresh() } }
 
             HStack {
                 if let message = model.message {
@@ -239,7 +455,7 @@ struct SettingsView: View {
             }
             .padding(12)
         }
-        .frame(width: 520, height: 740)
+        .frame(width: 520, height: 780)
     }
 }
 
@@ -385,6 +601,8 @@ func startChat() {
     }
     let script = FileManager.default.temporaryDirectory.appendingPathComponent("skinnyai-\(UUID().uuidString).command")
     var body = "#!/bin/zsh\nrm -f -- \"$0\"\n"
+    // The exec below keeps this shell's pid, so the app can tell whether this chat is still open.
+    body += "mkdir -p \(shellQuote(homeDirectory.path)) && echo $$ > \(shellQuote(chatPidURL.path))\n"
     if let custom = ProcessInfo.processInfo.environment["SKINNY_HOME"], !custom.isEmpty { body += "export SKINNY_HOME=\(shellQuote(custom))\n" }
     body += "exec \(shellQuote(binary.path))\n"
     do {
@@ -394,9 +612,36 @@ func startChat() {
         alert("Couldn't start a chat: \(error.localizedDescription)")
         return
     }
+    UserDefaults.standard.set(Bundle(url: app)?.bundleIdentifier, forKey: "chatTerminal")
     NSWorkspace.shared.open([script], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration()) { _, error in
         if let error { DispatchQueue.main.async { alert("Couldn't open \(app.lastPathComponent): \(error.localizedDescription)") } }
     }
+}
+
+/// Whether a chat started by this app is still running.
+func chatIsRunning() -> Bool {
+    if !chatWindows.isEmpty { return true }
+    guard let text = try? String(contentsOf: chatPidURL, encoding: .utf8),
+          let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1,
+          kill(pid, 0) == 0 else { return false }
+    // The pid may have been reused by something else since the chat closed.
+    var buffer = [CChar](repeating: 0, count: 4096)
+    guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return false }
+    return String(cString: buffer).hasSuffix("/skinnyai-cli")
+}
+
+/// Brings the terminal app holding the running chat to the front (no automation permission needed,
+/// so it can't pick the exact window: the terminal shows whichever window it had in front).
+func focusChat() {
+    if let chat = chatWindows.last {
+        NSApp.activate(ignoringOtherApps: true)
+        if chat.window.isMiniaturized { chat.window.deminiaturize(nil) }
+        chat.window.makeKeyAndOrderFront(nil)
+        return
+    }
+    let id = UserDefaults.standard.string(forKey: "chatTerminal") ?? ""
+    let terminal = NSRunningApplication.runningApplications(withBundleIdentifier: id).first
+    if terminal?.activate(options: [.activateIgnoringOtherApps]) != true { startChat() }
 }
 
 func alert(_ text: String) {
@@ -414,12 +659,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
         NSApp.activate(ignoringOtherApps: true)
-        if settings.isConfigured { startChat() } else { showSettings() }
+        openChat()
     }
 
-    // Clicking the Dock icon again starts another chat.
+    /// Switches to the chat that's already open, or starts one.
+    private func openChat() {
+        if !settings.isConfigured { showSettings() }
+        else if chatIsRunning() { focusChat() }
+        else { startChat() }
+    }
+
+    // Clicking the Dock icon again goes back to the open chat rather than starting another.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if settings.isConfigured { startChat() } else { showSettings() }
+        if settingsWindow?.isVisible == true { settingsWindow?.makeKeyAndOrderFront(nil) } else { openChat() }
         return false
     }
 
