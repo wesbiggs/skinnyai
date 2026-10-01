@@ -148,6 +148,7 @@ final class SettingsModel: ObservableObject {
     @Published var model = ""
     @Published var keepAlive = ""
     @Published var flags: [String: Bool] = [:]
+    @Published var fontSize = Double(currentFontSize())
     @Published var terminal = UserDefaults.standard.string(forKey: "chatIn") ?? "builtin"
     @Published var message: String?
     @Published var availableModels: [String] = []
@@ -198,6 +199,7 @@ final class SettingsModel: ObservableObject {
     func load() {
         loading = true
         defer { loading = false }
+        fontSize = Double(currentFontSize())
         env = EnvFile(contentsOf: envFileURL)
         apiKey = env.value("OLLAMA_API_KEY") ?? ""
         anthropicKey = env.value("ANTHROPIC_API_KEY") ?? ""
@@ -323,6 +325,7 @@ final class SettingsModel: ObservableObject {
             env.set(setting.key, value ? "true" : "false")
         }
         UserDefaults.standard.set(terminal, forKey: "chatIn")
+        setFontSize(CGFloat(fontSize))
         do {
             try env.write(to: envFileURL)
             message = nil
@@ -425,6 +428,9 @@ struct SettingsView: View {
                         Text("Terminal").tag("terminal")
                         Text("iTerm").tag("iterm")
                     }
+                    Stepper(value: $model.fontSize, in: 8...40, step: 1) {
+                        Text("Font size: \(Int(model.fontSize)) pt")
+                    }
                     HStack {
                         Button("Open .env in Editor") { NSWorkspace.shared.open(ensureEnvFile()) }
                         Button("Show Saved Chats") {
@@ -483,6 +489,20 @@ func terminalApp(preference: String) -> URL? {
 
 // MARK: - Built-in chat windows
 
+let defaultFontSize: CGFloat = 13
+
+func currentFontSize() -> CGFloat {
+    let saved = UserDefaults.standard.double(forKey: "fontSize")
+    return saved >= 8 ? CGFloat(saved) : defaultFontSize
+}
+
+/// Remembers the size and applies it to every open chat window.
+func setFontSize(_ size: CGFloat) {
+    let clamped = min(40, max(8, size.rounded()))
+    UserDefaults.standard.set(Double(clamped), forKey: "fontSize")
+    for chat in chatWindows { chat.applyFontSize() }
+}
+
 /// A terminal view that accepts files dragged onto it, typing their paths as a paste would
 /// (skinnyai recognizes the paths and attaches the files).
 final class ChatTerminalView: LocalProcessTerminalView {
@@ -529,7 +549,7 @@ final class ChatWindow: NSObject, NSWindowDelegate, LocalProcessTerminalViewDele
     init(binary: String, cascadeFrom previous: NSWindow?) {
         terminal = ChatTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 620))
         terminal.registerForDraggedTypes([.fileURL])
-        terminal.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        terminal.font = NSFont.monospacedSystemFont(ofSize: currentFontSize(), weight: .regular)
         window = NSWindow(contentRect: terminal.frame, styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         super.init()
@@ -563,6 +583,10 @@ final class ChatWindow: NSObject, NSWindowDelegate, LocalProcessTerminalViewDele
         terminal.startProcess(executable: binary, args: [],
                               environment: environment.map { "\($0.key)=\($0.value)" },
                               currentDirectory: FileManager.default.homeDirectoryForCurrentUser.path)
+    }
+
+    func applyFontSize() {
+        terminal.font = NSFont.monospacedSystemFont(ofSize: currentFontSize(), weight: .regular)
     }
 
     func show() {
@@ -672,6 +696,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
+        // Option+= / Option+- / Option+0 zoom the chat text. The terminal view would take these keys for
+        // its program (Option is Meta there), so they're caught before it sees them.
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+            guard let self, modifiers == .option || modifiers == [.option, .shift],
+                  chatWindows.contains(where: { $0.window === NSApp.keyWindow }) else { return event }
+            switch event.keyCode {
+            case 24: self.biggerText(nil); return nil     // =
+            case 27: self.smallerText(nil); return nil    // -
+            case 29: self.actualSize(nil); return nil     // 0
+            default: return event
+            }
+        }
         NSApp.activate(ignoringOtherApps: true)
         openChat()
     }
@@ -717,6 +754,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
+    @objc func biggerText(_ sender: Any?) { zoom(to: currentFontSize() + 1) }
+    @objc func smallerText(_ sender: Any?) { zoom(to: currentFontSize() - 1) }
+    @objc func actualSize(_ sender: Any?) { zoom(to: defaultFontSize) }
+
+    private func zoom(to size: CGFloat) {
+        setFontSize(size)
+        settings.fontSize = Double(currentFontSize()) // keeps an open Settings window in step
+    }
+
     @objc func showHelp(_ sender: Any?) {
         NSWorkspace.shared.open(URL(string: "https://github.com/wesbiggs/skinnyai#readme")!)
     }
@@ -725,8 +771,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let name = "SkinnyAI"
         let main = NSMenu()
 
-        func add(_ title: String, _ menu: NSMenu, _ action: Selector?, _ key: String = "", target: AnyObject? = nil) {
+        func add(_ title: String, _ menu: NSMenu, _ action: Selector?, _ key: String = "", target: AnyObject? = nil,
+                 modifiers: NSEvent.ModifierFlags = .command) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
             item.target = target
             menu.addItem(item)
         }
@@ -757,6 +805,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add("Copy", edit, #selector(NSText.copy(_:)), "c")
         add("Paste", edit, #selector(NSText.paste(_:)), "v")
         add("Select All", edit, #selector(NSText.selectAll(_:)), "a")
+
+        let view = submenu("View")
+        add("Bigger Text", view, #selector(biggerText(_:)), "=", target: self, modifiers: .option)
+        add("Smaller Text", view, #selector(smallerText(_:)), "-", target: self, modifiers: .option)
+        add("Actual Size", view, #selector(actualSize(_:)), "0", target: self, modifiers: .option)
 
         let window = submenu("Window")
         add("Close", window, #selector(NSWindow.performClose(_:)), "w")
