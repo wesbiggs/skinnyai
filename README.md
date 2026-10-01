@@ -457,7 +457,9 @@ The whole tool is the single file `bin/skinnyai.js`, with no runtime dependencie
 
 ## macOS app
 
-`npm run build:app` builds `dist/SkinnyAI.app`: a small native shell around a standalone `skinnyai` binary (Node is embedded, so nothing needs installing). Opening it starts a chat in a new Terminal window, or iTerm if it's installed (**Settings… → Open chats in** overrides that). **SkinnyAI → Settings…** (⌘,) edits `~/.skinny/.env`: API key, server, model, and the on/off options. It keeps comments and any variables it doesn't know about, and writes the file readable only by you. On first launch, with no model set, Settings opens automatically.
+`npm run build:app` builds `dist/SkinnyAI.app`: a small native shell around a standalone `skinnyai` binary (Node is embedded, so nothing needs installing). Opening it starts a chat in its own terminal window (built on [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm), with inline images and Shift+Enter); ⌘N opens another, and clicking the Dock icon brings the open chat forward. **Settings… → Open chats in** can send chats to Terminal or iTerm instead. **SkinnyAI → Settings…** (⌘,) edits `~/.skinny/.env`: API key, server, model, and the on/off options. It keeps comments and any variables it doesn't know about, and writes the file readable only by you. On first launch, with no model set, Settings opens automatically (choosing an API fills in its usual server address; web search and markdown are on by default). The Model field is a drop-down of what the server offers, refreshed when you change the server, API, or key. Clicking the Dock icon while a chat is open brings its terminal forward instead of starting another; **File → New Chat** (⌘N) always starts one.
+
+Building it needs Xcode with its Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`); the Swift part is built with SwiftPM (`Package.swift`).
 
 ```bash
 npm run build:app          # ad-hoc signed: runs on this Mac only

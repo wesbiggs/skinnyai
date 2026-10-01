@@ -1311,7 +1311,7 @@ function renderTable(rows, role) {
 function detectImageProtocol() {
   const env = process.env;
   if (!process.stdout.isTTY || env.TMUX || /^screen/.test(env.TERM || '')) return null;
-  if (env.TERM_PROGRAM === 'iTerm.app' || env.LC_TERMINAL === 'iTerm2' || env.TERM_PROGRAM === 'WezTerm') return 'iterm';
+  if (env.TERM_PROGRAM === 'iTerm.app' || env.LC_TERMINAL === 'iTerm2' || env.TERM_PROGRAM === 'WezTerm' || env.TERM_PROGRAM === 'SkinnyAI') return 'iterm';
   if (env.TERM === 'xterm-kitty' || env.KITTY_WINDOW_ID || env.TERM_PROGRAM === 'ghostty') return 'kitty';
   return null;
 }

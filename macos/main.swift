@@ -1,8 +1,10 @@
 // SkinnyAI.app: a thin native shell around the bundled `skinnyai` binary.
-// It opens chats in Terminal.app (or iTerm2, if installed) and provides a
-// Settings window (Cmd-,) that edits ~/.skinny/.env.
+// It runs chats in its own terminal windows (SwiftTerm), or in Terminal.app /
+// iTerm2 if preferred, and provides a Settings window (Cmd-,) that edits
+// ~/.skinny/.env.
 
 import AppKit
+import SwiftTerm
 import SwiftUI
 
 // MARK: - Paths
@@ -123,7 +125,7 @@ final class SettingsModel: ObservableObject {
     @Published var model = ""
     @Published var keepAlive = ""
     @Published var flags: [String: Bool] = [:]
-    @Published var terminal = UserDefaults.standard.string(forKey: "terminal") ?? "auto"
+    @Published var terminal = UserDefaults.standard.string(forKey: "chatIn") ?? "builtin"
     @Published var message: String?
 
     private var env = EnvFile(contentsOf: envFileURL)
@@ -158,7 +160,7 @@ final class SettingsModel: ObservableObject {
             if value == setting.defaultValue && env.value(setting.key) == nil { continue }
             env.set(setting.key, value ? "true" : "false")
         }
-        UserDefaults.standard.set(terminal, forKey: "terminal")
+        UserDefaults.standard.set(terminal, forKey: "chatIn")
         do {
             try env.write(to: envFileURL)
             message = nil
@@ -207,6 +209,7 @@ struct SettingsView: View {
                 }
                 Section("App") {
                     Picker("Open chats in", selection: $model.terminal) {
+                        Text("SkinnyAI window").tag("builtin")
                         Text("Automatic (iTerm if installed)").tag("auto")
                         Text("Terminal").tag("terminal")
                         Text("iTerm").tag("iterm")
@@ -262,6 +265,107 @@ func terminalApp(preference: String) -> URL? {
     }
 }
 
+// MARK: - Built-in chat windows
+
+/// A terminal view that accepts files dragged onto it, typing their paths as a paste would
+/// (skinnyai recognizes the paths and attaches the files).
+final class ChatTerminalView: LocalProcessTerminalView {
+    private func droppedFiles(_ sender: NSDraggingInfo) -> [URL] {
+        (sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+                                               options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        droppedFiles(sender).isEmpty ? [] : .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        droppedFiles(sender).isEmpty ? [] : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let files = droppedFiles(sender)
+        if files.isEmpty { return false }
+        // Backslash-escape anything the shell would, like Terminal.app does; each path ends in a space.
+        let special = CharacterSet(charactersIn: " !\"#$&'()*;<>?[\\]^`{|}~")
+        let text = files.map { url in
+            String(url.path.flatMap { ch -> [Character] in
+                ch.unicodeScalars.allSatisfy({ !special.contains($0) }) ? [ch] : ["\\", ch]
+            })
+        }.joined(separator: " ") + " "
+        if getTerminal().bracketedPasteMode {
+            send(txt: "\u{1b}[200~" + text + "\u{1b}[201~")
+        } else {
+            send(txt: text)
+        }
+        window?.makeFirstResponder(self)
+        return true
+    }
+}
+
+/// One chat: a terminal view running the bundled skinnyai binary.
+final class ChatWindow: NSObject, NSWindowDelegate, LocalProcessTerminalViewDelegate {
+    let window: NSWindow
+    private let terminal: ChatTerminalView
+    private var finished = false
+    var onClose: ((ChatWindow) -> Void)?
+
+    init(binary: String, cascadeFrom previous: NSWindow?) {
+        terminal = ChatTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 620))
+        terminal.registerForDraggedTypes([.fileURL])
+        terminal.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        window = NSWindow(contentRect: terminal.frame, styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                          backing: .buffered, defer: false)
+        super.init()
+        window.title = "SkinnyAI"
+        window.contentView = terminal
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.minSize = NSSize(width: 480, height: 300)
+        if let previous { window.setFrameTopLeftPoint(window.cascadeTopLeft(from: NSPoint(x: previous.frame.minX, y: previous.frame.maxY))) }
+        else { window.center() }
+        terminal.processDelegate = self
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["TERM"] = "xterm-256color"
+        environment["COLORTERM"] = "truecolor"
+        environment["TERM_PROGRAM"] = "SkinnyAI" // skinnyai draws inline images for this terminal
+        terminal.startProcess(executable: binary, args: [],
+                              environment: environment.map { "\($0.key)=\($0.value)" },
+                              currentDirectory: FileManager.default.homeDirectoryForCurrentUser.path)
+    }
+
+    func show() {
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(terminal)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if !finished { terminal.terminate() }
+        onClose?(self)
+    }
+
+    func processTerminated(source: TerminalView, exitCode: Int32?) {
+        finished = true
+        // A clean exit (/bye, Ctrl+D) closes the window; a failure stays up so its message can be read.
+        if exitCode == 0 || exitCode == nil { window.close() } else { window.title = "SkinnyAI (exited with code \(exitCode ?? -1))" }
+    }
+
+    func setTerminalTitle(source: LocalProcessTerminalView, title: String) { window.title = title.isEmpty ? "SkinnyAI" : title }
+    func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
+    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+}
+
+var chatWindows: [ChatWindow] = []
+
+func openChatWindow(binary: URL) {
+    let chat = ChatWindow(binary: binary.path, cascadeFrom: chatWindows.last?.window)
+    chat.onClose = { closed in chatWindows.removeAll { $0 === closed } }
+    chatWindows.append(chat)
+    NSApp.activate(ignoringOtherApps: true)
+    chat.show()
+}
+
 /// Opens a new terminal window running skinnyai. A .command file does this
 /// without the Automation permission prompt that scripting the terminal would need.
 func startChat() {
@@ -270,7 +374,12 @@ func startChat() {
         alert("The skinnyai program is missing from this app.")
         return
     }
-    guard let app = terminalApp(preference: UserDefaults.standard.string(forKey: "terminal") ?? "auto") else {
+    let preference = UserDefaults.standard.string(forKey: "chatIn") ?? "builtin"
+    if preference == "builtin" {
+        openChatWindow(binary: URL(fileURLWithPath: binary.path))
+        return
+    }
+    guard let app = terminalApp(preference: preference) else {
         alert("Couldn't find Terminal or iTerm.")
         return
     }
