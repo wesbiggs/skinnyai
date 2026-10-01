@@ -738,13 +738,33 @@ class McpServer {
 
   async callTool(name, args) {
     const result = await this.request('tools/call', { name, arguments: args });
-    const text = (result.content || []).map((part) => {
-      if (part.type === 'text') return part.text;
-      if (part.type === 'resource') return part.resource?.text ?? `[resource ${part.resource?.uri ?? ''}]`;
-      return `[${part.type} content not shown]`;
-    }).join('\n') || (result.structuredContent ? JSON.stringify(result.structuredContent) : '');
-    const clipped = text.length > MCP_MAX_RESULT_CHARS ? `${text.slice(0, MCP_MAX_RESULT_CHARS)}\n[truncated]` : text;
-    return result.isError ? `Error: ${clipped || 'the tool reported an error'}` : clipped || '(no output)';
+    // Images (MCP "image" content: base64 data and a mimeType) are relayed to
+    // the model as they came, in order: as image_url parts (data: URLs) in a
+    // tool message's content array, or, for Anthropic, as image blocks inside
+    // the tool_result. `text` carries a short marker where each image was.
+    const images = [];
+    const parts = [];
+    const clip = (text) => (text.length > MCP_MAX_RESULT_CHARS ? `${text.slice(0, MCP_MAX_RESULT_CHARS)}\n[truncated]` : text);
+    const markers = [];
+    for (const part of result.content || []) {
+      if (part.type === 'image' && part.data) {
+        const mime = part.mimeType || 'image/png';
+        images.push({ mime, data: part.data });
+        parts.push({ type: 'image', mime, data: part.data });
+        markers.push(`[image: ${mime}, ${Math.round(part.data.length * 0.75 / 1024)} KB]`);
+        continue;
+      }
+      const text = part.type === 'text' ? part.text
+        : part.type === 'resource' ? part.resource?.text ?? `[resource ${part.resource?.uri ?? ''}]`
+        : `[${part.type} content not shown]`;
+      parts.push({ type: 'text', text: clip(text) });
+      markers.push(clip(text));
+    }
+    const fallback = markers.length === 0 && result.structuredContent ? clip(JSON.stringify(result.structuredContent)) : '';
+    if (fallback) parts.push({ type: 'text', text: fallback });
+    const finish = (text) => (result.isError ? `Error: ${text || 'the tool reported an error'}` : text || '(no output)');
+    const summary = finish(markers.join('\n') || fallback);
+    return images.length ? { text: summary, parts, images } : summary;
   }
 
   isTrusted(toolName) {
@@ -2201,7 +2221,22 @@ class OllamaChat {
       const rest = system ? this.history.slice(1) : this.history;
       messages = [{ role: 'system', content: system ? `${dateLine}\n\n${system}` : dateLine }, ...rest];
     }
-    return messages.map((m) => this.wireMessage(m));
+    // A tool result's images are relayed as they were returned. Anthropic takes
+    // them inside the tool_result (buildAnthropicChatBody). OpenAI-style servers
+    // get the result's parts as a content array, with each image as an image_url
+    // part (a data: URL); Ollama's tool messages are plain text, so there the
+    // data: URLs sit in the text.
+    return messages.map((m) => {
+      if (m.role !== 'tool') return this.wireMessage(m);
+      if (this.api === 'anthropic') return m;
+      const { images, parts, ...text } = m;
+      if (!parts) return text;
+      const url = (p) => `data:${p.mime};base64,${p.data}`;
+      if (this.api === 'openai') {
+        return { ...text, content: parts.map((p) => (p.type === 'image' ? { type: 'image_url', image_url: { url: url(p) } } : p)) };
+      }
+      return { ...text, content: parts.map((p) => (p.type === 'image' ? url(p) : p.text)).join('\n') };
+    });
   }
 
   // History keeps attached images as { mime, data } and PDFs as { name, mime,
@@ -2465,7 +2500,10 @@ class OllamaChat {
       if (m.role === 'system') continue;
       const blocks = typeof m.content === 'string' ? (m.content ? [{ type: 'text', text: m.content }] : []) : m.content;
       if (m.role === 'tool') {
-        push('user', [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: m.content, ...(m.content.startsWith('Error:') && { is_error: true }) }]);
+        const result = m.images?.length
+          ? [{ type: 'text', text: m.content }, ...m.images.map((i) => ({ type: 'image', source: { type: 'base64', media_type: i.mime, data: i.data } }))]
+          : m.content;
+        push('user', [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: result, ...(m.content.startsWith('Error:') && { is_error: true }) }]);
       } else if (m.role === 'assistant') {
         const calls = (m.tool_calls || []).map((c) => {
           let input = c.function.arguments;
@@ -2597,21 +2635,28 @@ class OllamaChat {
           console.log(`${CHROME_COLOR}   ${saved ? `Saved: this tool is now trusted in ${MCP_CONFIG_FILE}` : `Couldn't update ${MCP_CONFIG_FILE}; trusted for this session only`}${ANSI.reset}`);
         }
       }
-      const result = args === null
+      const outcome = args === null
         ? `Error: couldn't parse arguments for '${name}' as JSON`
         : declined
           ? 'Error: the user declined this tool call'
           : await runTool(tools, name, args);
-      debugLog('tool-call', { name, known: tools.has(name), arguments: args, declined, result });
+      // A tool may return images along with its text (MCP image content);
+      // they go to the model as received (see requestMessages).
+      const result = typeof outcome === 'string' ? outcome : outcome.text;
+      const images = typeof outcome === 'string' ? [] : outcome.images;
+      debugLog('tool-call', { name, known: tools.has(name), arguments: args, declined, result, images: images.length });
       if (result.startsWith('Error:')) {
         process.stdout.write(`${ANSI.assistant.narration}   ${result}${ANSI.reset}\n`);
       }
 
-      if (this.api !== 'ollama') {
-        this.history.push({ role: 'tool', tool_call_id: call.id, content: result });
-      } else {
-        this.history.push({ role: 'tool', tool_name: name, content: result });
+      const message = this.api !== 'ollama'
+        ? { role: 'tool', tool_call_id: call.id, content: result }
+        : { role: 'tool', tool_name: name, content: result };
+      if (images.length) {
+        message.images = images;
+        message.parts = outcome.parts;
       }
+      this.history.push(message);
     }
     process.stdout.write('\n');
   }

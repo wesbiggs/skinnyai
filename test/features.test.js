@@ -23,7 +23,8 @@ beforeAll(async () => {
       'claude-sonnet-9': { created_at: '2026-06-01T00:00:00Z' }
     },
     capabilities: { vis: ['completion', 'vision'], text: ['completion'] },
-    anthropicToolCalls: { 'use nope': { name: 'generate_image', input: {} }, 'use echo': { name: 'fake__echo', input: { text: 'hi' } }, 'use fail': { name: 'fake__fail', input: {} } }
+    openaiToolCalls: { 'use draw': { name: 'fake__draw', input: {} } },
+    anthropicToolCalls: { 'use draw': { name: 'fake__draw', input: {} }, 'use nope': { name: 'generate_image', input: {} }, 'use echo': { name: 'fake__echo', input: { text: 'hi' } }, 'use fail': { name: 'fake__fail', input: {} } }
   });
 });
 afterAll(() => server.close());
@@ -86,7 +87,7 @@ describe('welcome box', () => {
     expect(stdout).not.toContain('Ollama Interactive Chat');
     const body = lines.map((l) => l.replace(/^│ | │$/g, ''));
     const tools = body.findIndex((l) => l.startsWith('🔧 Tools:'));
-    expect(body[tools + 1]).toMatch(/^🔌 MCP: fake \(2 tools\)/);
+    expect(body[tools + 1]).toMatch(/^🔌 MCP: fake \(3 tools\)/);
   });
 
   it('draws a border that lines up around wide characters', async () => {
@@ -221,10 +222,10 @@ describe('--debug', () => {
     const log = readLog();
     const request = log.find((e) => e.event === 'request');
     expect(request).toMatchObject({ api: 'anthropic', authenticated: true });
-    expect(request.offeredTools).toEqual(['fake__echo', 'fake__fail']);
+    expect(request.offeredTools).toEqual(['fake__echo', 'fake__fail', 'fake__draw']);
     expect(request.body.messages[0].content[0].text).toBe('use echo');
     expect(log.find((e) => e.event === 'response').status).toBe(200);
-    expect(log.find((e) => e.event === 'mcp-servers').started[0]).toEqual({ server: 'fake', tools: ['echo', 'fail'] });
+    expect(log.find((e) => e.event === 'mcp-servers').started[0]).toEqual({ server: 'fake', tools: ['echo', 'fail', 'draw'] });
     const [call, unknown] = log.filter((e) => e.event === 'tool-call');
     expect(call).toMatchObject({ name: 'fake__echo', known: true, arguments: { text: 'hi' }, result: 'echo: >hi' });
     // a name the model used that was never offered is flagged, which is the usual sign of a naming mismatch
@@ -245,7 +246,7 @@ describe('--debug', () => {
   it('lists offered tools in the OpenAI shape too', async () => {
     writeMcpConfig();
     await run(['m', '--api', 'openai', '--host', server.url, '--debug'], 'hi\n');
-    expect(readLog().find((e) => e.event === 'request').offeredTools).toEqual(['fake__echo', 'fake__fail']);
+    expect(readLog().find((e) => e.event === 'request').offeredTools).toEqual(['fake__echo', 'fake__fail', 'fake__draw']);
   });
 
   it('shrinks encoded data and writes nothing without --debug', async () => {
@@ -369,6 +370,45 @@ describe('--api anthropic', () => {
   });
 });
 
+describe('images in tool results', () => {
+  const png = { mime: 'image/png', data: 'AAAA' };
+  const history = [
+    { role: 'user', content: 'draw' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 't', arguments: '{}' } }, { id: 'c2', function: { name: 't', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'c1', content: 'saved to /tmp/p.png\n[image: image/png, 0 KB]', images: [png], parts: [{ type: 'image', ...png }, { type: 'text', text: 'saved to /tmp/p.png' }] },
+    { role: 'tool', tool_call_id: 'c2', content: 'two' }
+  ];
+
+  it('are relayed in order as image_url parts for OpenAI-style servers', async () => {
+    const { OllamaChat } = await import('../bin/skinnyai.js');
+    const chat = new OllamaChat('m', { api: 'openai', host: server.url });
+    chat.history = structuredClone(history);
+    const sent = chat.requestMessages('');
+    expect(sent.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'tool']); // no extra messages
+    expect(sent[2]).toEqual({
+      role: 'tool',
+      tool_call_id: 'c1',
+      content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }, { type: 'text', text: 'saved to /tmp/p.png' }]
+    });
+    expect(sent[3].content).toBe('two');
+  });
+
+  it('are data: URLs in the text for Ollama, whose tool messages are plain text', async () => {
+    const { OllamaChat } = await import('../bin/skinnyai.js');
+    const chat = new OllamaChat('m', { host: server.url });
+    chat.history = structuredClone(history);
+    expect(chat.requestMessages('')[2].content).toBe('data:image/png;base64,AAAA\nsaved to /tmp/p.png');
+  });
+
+  it('reach a stub that answers tool results with markdown exactly once (no duplicated image data)', async () => {
+    writeMcpConfig({ trust: true });
+    const { stdout } = await run(['m', '--api', 'openai', '--host', server.url], 'use draw\n');
+    expect(stdout.match(/iVBORw0KGgo/g)).toHaveLength(1);
+    expect(stdout).toContain('![Image](data:image/png;base64,iVBORw0KGgo');
+    expect(stdout).toContain('saved to /tmp/pic.png');
+  });
+});
+
 describe('MCP servers', () => {
   const claude = () => ['claude-x', '--api', 'anthropic', '--host', server.url];
   const env = { ANTHROPIC_API_KEY: 'sk-test' };
@@ -382,10 +422,10 @@ describe('MCP servers', () => {
   it('lists the tools, and calls one once the user approves', async () => {
     writeMcpConfig();
     const { stdout } = await run(claude(), '/mcp\nuse echo\ny\n', env);
-    expect(stdout).toContain('🔌 MCP: fake (2 tools)');
+    expect(stdout).toContain('🔌 MCP: fake (3 tools)');
     expect(stdout).toContain('echo - Echo the text back');
     const first = requestsTo('/v1/messages').at(0).body;
-    expect(first.tools.map((t) => t.name)).toEqual(['fake__echo', 'fake__fail']);
+    expect(first.tools.map((t) => t.name)).toEqual(['fake__echo', 'fake__fail', 'fake__draw']);
     expect(first.tools[0].input_schema.required).toEqual(['text']);
     expect(stdout).toMatch(/🔧 fake: echo\n/); // the tool's name only, not its arguments
     expect(stdout).toContain('Allow this tool call? [y/N/a(lways)] y');
@@ -393,6 +433,17 @@ describe('MCP servers', () => {
     const second = requestsTo('/v1/messages').at(1).body.messages;
     expect(second.at(-2).content.at(-1)).toMatchObject({ type: 'tool_use', id: 'toolu_1', name: 'fake__echo', input: { text: 'hi' } });
     expect(second.at(-1).content[0]).toMatchObject({ type: 'tool_result', tool_use_id: 'toolu_1', content: 'echo: >hi' });
+  });
+
+  it('relays an image a tool returns to the model, not a placeholder', async () => {
+    writeMcpConfig({ trust: true });
+    const { stdout } = await run(claude(), 'use draw\n', env);
+    expect(stdout).not.toContain('content not shown');
+    const result = requestsTo('/v1/messages').at(1).body.messages.at(-1).content[0];
+    expect(result.type).toBe('tool_result');
+    expect(result.content[0]).toEqual({ type: 'text', text: 'saved to /tmp/pic.png\n[image: image/png, 0 KB]' });
+    expect(result.content[1]).toMatchObject({ type: 'image', source: { type: 'base64', media_type: 'image/png' } });
+    expect(result.content[1].source.data).toMatch(/^iVBORw0KGgo/);
   });
 
   it('does not run a tool the user declines', async () => {

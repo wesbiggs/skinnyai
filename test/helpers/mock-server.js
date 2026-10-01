@@ -3,7 +3,7 @@
 // message as "You said: **...**", or return `replies[message]` when set.
 import http from 'node:http';
 
-export async function startMockServer({ replies = {}, models = [], canCreate = false, capabilities, anthropicToolCalls = {}, modelMeta = {} } = {}) {
+export async function startMockServer({ replies = {}, models = [], canCreate = false, capabilities, anthropicToolCalls = {}, modelMeta = {}, openaiToolCalls = {} } = {}) {
   const created = [];
   const requests = [];
   const existing = new Set(models);
@@ -22,7 +22,22 @@ export async function startMockServer({ replies = {}, models = [], canCreate = f
 
       if (url === '/v1/chat/completions') {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-        const text = reply(json.messages);
+        const lastMessage = json.messages.at(-1);
+        const toolCall = lastMessage.role === 'user' ? openaiToolCalls[lastMessage.content] : null;
+        if (toolCall) {
+          const call = { index: 0, id: 'call_1', type: 'function', function: { name: toolCall.name, arguments: JSON.stringify(toolCall.input) } };
+          res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [call] }, finish_reason: null }] })}\n\n`);
+          res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] })}\n\ndata: [DONE]\n\n`);
+          return res.end();
+        }
+        // Like mfluxible's chat stub: answer a tool result with its images as markdown, then its text.
+        let text = reply(json.messages);
+        if (lastMessage.role === 'tool') {
+          const parts = Array.isArray(lastMessage.content) ? lastMessage.content : [{ type: 'text', text: lastMessage.content }];
+          const images = parts.filter((p) => p.type === 'image_url').map((p) => `![Image](${p.image_url.url})`);
+          const captions = parts.filter((p) => p.type === 'text').map((p) => p.text).join('\n').trim();
+          text = [...images, captions].filter(Boolean).join('\n\n');
+        }
         for (let i = 0; i < text.length; i += 7) {
           res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(i, i + 7) } }] })}\n\n`);
         }

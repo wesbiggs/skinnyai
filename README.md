@@ -412,6 +412,7 @@ skinnyai reads `~/.skinny/mcp.json` (or the file named by `SKINNY_MCP_CONFIG`) i
 
 - `command`/`args`/`env`/`cwd` start a local server over stdio; `url`/`headers` connect to a remote one over streamable HTTP. `${VAR}` expands from the environment. `"disabled": true` skips an entry.
 - Tools appear as `server__tool`. Each call asks `Allow this tool call? [y/N/a(lways)]` first, because a web page the model read could try to steer it. Answering `a` trusts that one tool from then on by adding it to its server's `"trust": ["tool", …]` list in `mcp.json` (the file is rewritten, pretty-printed); `"trust": true` trusts every tool on a server.
+- A tool can return images (MCP `image` content), and they're relayed to the model as returned: as image blocks inside the tool result for Anthropic, for OpenAI-style servers as the tool message's content array with each image an `image_url` part (a `data:` URL), in order, and for Ollama (whose tool messages are plain text) as `data:` URLs in the text. skinnyai doesn't draw them itself; a model that answers with `![alt](data:image/png;base64,…)` (or a file path) gets the image drawn when images are on (`/set images`). A large image is a lot of text for a real model to take in, and it stays in the conversation, so it's re-sent with every later turn.
 - `/mcp` lists what's connected. A server that fails to start is reported and skipped. `--no-mcp` (or `SKINNY_MCP=false`) ignores the file. Only tools are supported — not resources, prompts, sampling, or the legacy SSE transport.
 
 ## How It Works
