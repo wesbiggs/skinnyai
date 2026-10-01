@@ -1344,13 +1344,32 @@ function sniffImage(bytes) {
   return null;
 }
 
-// Fetches an image from an http(s) or data: URL. Web images get the same
+// The file an image reference points to, if it's a local one: an absolute
+// path, ~/path, or file:// URL (percent-encoded paths are decoded). Else null.
+function localImagePath(reference) {
+  if (/^file:\/\//i.test(reference)) {
+    try { return decodeURIComponent(new URL(reference).pathname); } catch (e) { return null; }
+  }
+  const plain = reference.startsWith('~/') ? path.join(os.homedir(), reference.slice(2)) : reference;
+  if (!path.isAbsolute(plain)) return null;
+  try { return decodeURIComponent(plain); } catch (e) { return plain; }
+}
+
+// Loads an image from an http(s) or data: URL, or a local file. Web images get the same
 // guards as fetch_page: public addresses only, and a size cap.
 async function loadImage(url) {
   let bytes;
   const data = /^data:image\/[\w.+-]+;base64,(.*)$/is.exec(url);
+  const local = localImagePath(url);
   if (data) {
     bytes = Buffer.from(data[1], 'base64');
+  } else if (local) {
+    // A file on this machine (say, one an image-generating tool just wrote).
+    // It's only drawn on your own screen, never sent anywhere.
+    const stat = await fs.stat(local);
+    if (!stat.isFile()) throw new Error('not a file');
+    if (stat.size > MAX_ATTACHMENT_BYTES) throw new Error(`larger than ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB`);
+    bytes = await fs.readFile(local);
   } else {
     const { res } = await fetchPublic(new URL(url), 'image/png,image/jpeg,image/gif,image/webp;q=0.9,image/*;q=0.5');
     const read = await readCappedBytes(res);
@@ -1721,13 +1740,16 @@ function createMarkdownRenderer(role, startColumn = 0, { markdown = true, images
   function writeLink(linkText, url, image) {
     if (image) {
       // Images show as a clickable caption; the picture itself follows the line.
-      const drawable = drawImages && /^(https?:|data:image\/)/i.test(url);
+      // A local file (path or file: URL) is drawn too, and its caption opens it.
+      const local = localImagePath(url);
+      const drawable = drawImages && (/^(https?:|data:image\/)/i.test(url) || local !== null);
       if (drawable) queuedImages.push({ url });
       linkText = `🖼\uFE0F ${linkText || (drawable ? 'image' : url)}`;
       if (/^data:/i.test(url)) {
         wrapper.write(linkText);
         return;
       }
+      if (local) url = pathToFileURL(local).href;
     }
     // Only web/mail/file links; anything else is shown as plain text.
     if (!/^(https?|mailto|ftp|file):/i.test(url)) {
@@ -2830,7 +2852,7 @@ class OllamaChat {
     console.log("  /set nodate            Don't tell the model today's date");
     console.log('  /set markdown          Render markdown in responses (default)');
     console.log('  /set nomarkdown        Show responses as raw text');
-    console.log('  /set images            Download and draw ![images](url) inline (iTerm2, WezTerm, kitty, Ghostty)');
+    console.log('  /set images            Draw ![images](url or file path) inline (iTerm2, WezTerm, kitty, Ghostty, the SkinnyAI app)');
     console.log('  /set noimages          Show images as links (default)');
     console.log('  /set autosave          Save the session to a local file after each reply');
     console.log('  /set noautosave        Stop autosaving (default)');

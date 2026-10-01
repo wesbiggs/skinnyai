@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { fakeTTY, render, stripAnsi } from './helpers/tty.js';
 
@@ -72,6 +75,38 @@ describe('imageSequence', () => {
     const chunks = [...sequence.matchAll(/\x1b_G([^;]*);([^\x1b]*)\x1b\\/g)];
     expect(chunks.map((m) => m[1])).toEqual(['a=T,f=100,q=2,r=1,m=1', 'm=1', 'm=0']);
     expect(chunks.map((m) => m[2]).join('')).toBe(bytes.toString('base64'));
+  });
+});
+
+describe('local image files', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skinnyai-local-'));
+  const file = path.join(dir, 'my pic.png');
+  fs.writeFileSync(file, fakePng(32, 32));
+
+  it('loads an absolute path, a ~ path, and a file:// URL', async () => {
+    expect((await skinnyai.loadImage(file)).format).toBe('png');
+    expect((await skinnyai.loadImage(`file://${file.replace(/ /g, '%20')}`)).width).toBe(32);
+    const home = fs.mkdtempSync(path.join(os.homedir(), '.skinnyai-test-'));
+    try {
+      fs.writeFileSync(path.join(home, 'a.png'), fakePng(8, 8));
+      expect((await skinnyai.loadImage(`~/${path.basename(home)}/a.png`)).width).toBe(8);
+    } finally {
+      fs.rmSync(home, { recursive: true });
+    }
+  });
+
+  it('refuses things that are not images, and missing files', async () => {
+    fs.writeFileSync(path.join(dir, 'note.txt'), 'hello');
+    await expect(skinnyai.loadImage(path.join(dir, 'note.txt'))).rejects.toThrow('not a PNG');
+    await expect(skinnyai.loadImage(path.join(dir, 'nope.png'))).rejects.toThrow();
+    await expect(skinnyai.loadImage(dir)).rejects.toThrow('not a file');
+  });
+
+  it('draws one mentioned in markdown', async () => {
+    const out = await render(skinnyai, `![Generated](${path.join(dir, 'x.png')})\n`, { images: true });
+    expect(stripAnsi(out)).toContain("couldn't show image"); // no such file, reported in place of the image
+    const fine = await render(skinnyai, `![Generated](${file.replace(/ /g, '%20')})\n`, { images: true });
+    expect(fine).toContain('\x1b]1337;File=inline=1');
   });
 });
 
