@@ -1379,6 +1379,108 @@ function pickDefaultModel(api, models) {
   return newest(models.filter((m) => /^gpt-\d/.test(m.id) && !OPENAI_NON_FLAGSHIP.test(m.id) && !/-\d{4}-\d{2}-\d{2}$/.test(m.id)));
 }
 
+// --- Files attached to your messages (drag a file into the terminal, or /attach) ---
+//
+// Images go to any API that takes them. PDFs go to Anthropic (document
+// blocks) and OpenAI (file parts). Text files are pasted into the message
+// itself, so they work everywhere and are saved with the session. Other
+// kinds of file can't be sent by these APIs, so they're refused.
+
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+const MAX_TEXT_ATTACHMENT_BYTES = 300 * 1024;
+const IMAGE_MIME = { png: 'image/png', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+
+// What a file is, from its contents: { kind: 'image' | 'pdf' | 'text', mime }, or null.
+function classifyFile(bytes) {
+  const image = sniffImage(bytes);
+  if (image) return { kind: 'image', mime: IMAGE_MIME[image.format] };
+  if (bytes.length >= 5 && bytes.toString('latin1', 0, 5) === '%PDF-') return { kind: 'pdf', mime: 'application/pdf' };
+  if (!bytes.subarray(0, 8192).includes(0)) {
+    try {
+      new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      return { kind: 'text', mime: 'text/plain' };
+    } catch (e) { /* not UTF-8 */ }
+  }
+  return null;
+}
+
+// Terminals turn a dropped file into its path in the input: backslash-escaped
+// (Terminal.app, iTerm2), quoted, or a file:// URL. A token that looks like a
+// path is only taken when it names an existing file of a kind we can send;
+// anything else stays in the message as typed. Returns the message without
+// those paths, and the attachments as { kind, name, mime, data } (base64
+// `data`, or `text` for a text file); `skipped` explains any file that was
+// found but couldn't be attached.
+//   anyFile   false: only images are taken (a path in ordinary prose
+//             shouldn't upload a file); true: PDFs and text files too, for
+//             when the user clearly means it (a paste, or /attach).
+//   complete  false while the message is still being typed: whitespace is
+//             left as is, and problems aren't reported.
+//   allowEnd  a path at the very end counts (default only when complete);
+//             otherwise it may be unfinished.
+function extractAttachments(text, { anyFile = false, complete = true, allowEnd = complete } = {}) {
+  const attachments = [];
+  const skipped = [];
+  const tokens = /'([^']*)'|"([^"]*)"|((?:\\[\s\S]|[^\s\\])+)/g;
+  let out = '';
+  let last = 0;
+  for (const match of text.matchAll(tokens)) {
+    if (!allowEnd && match.index + match[0].length >= text.length) continue;
+    if (match.index < last) continue;
+    let candidate = match[1] ?? match[2] ?? match[3].replace(/\\([\s\S])/g, '$1');
+    if (/^file:\/\//i.test(candidate)) {
+      try { candidate = decodeURIComponent(new URL(candidate).pathname); } catch (e) { continue; }
+    } else if (candidate.startsWith('~/')) {
+      candidate = path.join(os.homedir(), candidate.slice(2));
+    }
+    if (!path.isAbsolute(candidate)) continue;
+    const name = path.basename(candidate);
+    let bytes;
+    let size;
+    try {
+      const stat = statSync(candidate);
+      if (!stat.isFile()) continue;
+      size = stat.size;
+      if (size > MAX_ATTACHMENT_BYTES) {
+        if (complete && (anyFile || /\.(png|jpe?g|gif|webp)$/i.test(candidate))) {
+          skipped.push(`${name} is larger than ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB`);
+        }
+        continue;
+      }
+      bytes = readFileSync(candidate);
+    } catch (e) {
+      continue;
+    }
+    const type = classifyFile(bytes);
+    if (!type) {
+      if (anyFile && complete) skipped.push(`${name} isn't an image, PDF, or text file, which are the kinds that can be sent`);
+      continue;
+    }
+    if (type.kind !== 'image' && !anyFile) continue;
+    if (type.kind === 'text' && size > MAX_TEXT_ATTACHMENT_BYTES) {
+      if (complete) skipped.push(`${name} is larger than ${MAX_TEXT_ATTACHMENT_BYTES / 1024} KB, too much text to paste into a message`);
+      continue;
+    }
+    attachments.push(type.kind === 'text'
+      ? { ...type, name, text: bytes.toString('utf8') }
+      : { ...type, name, data: bytes.toString('base64') });
+    out += text.slice(last, match.index);
+    last = match.index + match[0].length;
+    while (!complete && /[ \t]/.test(text[last] ?? '')) last++; // drop the gap the path leaves
+  }
+  out += text.slice(last);
+  return { text: complete ? out.replace(/[ \t]{2,}/g, ' ').trim() : out, attachments, skipped };
+}
+
+// A text file as it appears in the message: after a marker line, in a fence
+// longer than any run of backticks inside the file.
+function inlineFile(name, content) {
+  const longest = Math.max(2, ...(content.match(/`+/g) || []).map((run) => run.length));
+  const fence = '`'.repeat(longest + 1);
+  return `[attached file: ${name}]\n${fence}\n${content.replace(/\n$/, '')}\n${fence}`;
+}
+const INLINE_FILE = /\n*\[attached file: ([^\]\n]+)\]\n(`{3,})\n[\s\S]*?\n\2/g;
+
 // Escape sequence that draws an image at the cursor, scaled down to fit
 // the terminal width and at most ~60% of its height, followed by a newline.
 // Pixel-to-cell conversion assumes a typical 8x16 cell, since terminals
@@ -1975,11 +2077,68 @@ class OllamaChat {
   // The date goes into the outgoing system message rather than into history,
   // so it's always current and never ends up in /save or /show system.
   requestMessages(today) {
-    if (!today) return this.history;
-    const dateLine = `Today's date is ${today}.`;
-    const system = this.getSystemMessage();
-    const rest = system ? this.history.slice(1) : this.history;
-    return [{ role: 'system', content: system ? `${dateLine}\n\n${system}` : dateLine }, ...rest];
+    let messages = this.history;
+    if (today) {
+      const dateLine = `Today's date is ${today}.`;
+      const system = this.getSystemMessage();
+      const rest = system ? this.history.slice(1) : this.history;
+      messages = [{ role: 'system', content: system ? `${dateLine}\n\n${system}` : dateLine }, ...rest];
+    }
+    return messages.map((m) => this.wireMessage(m));
+  }
+
+  // History keeps attached images as { mime, data } and PDFs as { name, mime,
+  // data } (base64); each API wants them differently: Ollama a plain list of base64 strings on the message,
+  // OpenAI-style servers content parts with data: URLs.
+  wireMessage(message) {
+    const { images = [], documents = [], ...rest } = message;
+    if (!images.length && !documents.length) return message;
+    if (this.api === 'anthropic') {
+      return {
+        ...rest,
+        content: [
+          ...images.map((i) => ({ type: 'image', source: { type: 'base64', media_type: i.mime, data: i.data } })),
+          ...documents.map((d) => ({ type: 'document', title: d.name, source: { type: 'base64', media_type: d.mime, data: d.data } })),
+          ...(message.content ? [{ type: 'text', text: message.content }] : [])
+        ]
+      };
+    }
+    if (this.api === 'openai') {
+      return {
+        ...rest,
+        content: [
+          ...(message.content ? [{ type: 'text', text: message.content }] : []),
+          ...images.map((i) => ({ type: 'image_url', image_url: { url: `data:${i.mime};base64,${i.data}` } })),
+          ...documents.map((d) => ({ type: 'file', file: { filename: d.name, file_data: `data:${d.mime};base64,${d.data}` } }))
+        ]
+      };
+    }
+    return { ...rest, ...(images.length && { images: images.map((i) => i.data) }) };
+  }
+
+  // Ollama lists what a model can do (vision, tools, ...) in /api/show.
+  // Returns false only when the server says the model can't see images;
+  // anywhere that can't tell (OpenAI-style servers, older Ollama), it
+  // gives the benefit of the doubt.
+  async supportsVision() {
+    if (this.api !== 'ollama') return true;
+    this.visionCache ??= new Map();
+    if (!this.visionCache.has(this.model)) {
+      let capable = true;
+      try {
+        const response = await hostFetch(`${this.host}/api/show`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: this.model })
+        });
+        const info = response.ok ? await response.json() : {};
+        if (Array.isArray(info.capabilities)) capable = info.capabilities.includes('vision');
+      } catch (error) {
+        // Unknown; don't warn.
+      }
+      this.visionCache.set(this.model, capable);
+    }
+    return this.visionCache.get(this.model);
   }
 
   // Unloads the current model from Ollama (same effect as `ollama stop`),
@@ -2093,7 +2252,7 @@ class OllamaChat {
         console.log(`💬 System: ${message.content}\n`);
       } else if (message.role === 'user') {
         process.stdout.write(styledPrompt());
-        await this.writeWrapped('user', message.content, PROMPT.length);
+        await this.writeWrapped('user', message.content.replace(INLINE_FILE, '\n📎 $1'), PROMPT.length);
         process.stdout.write('\n');
       } else if (message.role === 'assistant' && message.content) {
         process.stdout.write('\n');
@@ -2216,11 +2375,38 @@ class OllamaChat {
     if (tools.length) body.tools = tools.map((t) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters }));
     return body;
   }
-  async chat(prompt) {
-    // Add to history
-    this.history.push({ role: 'user', content: prompt });
 
+  // `attached` holds files the line editor already attached (and showed) as
+  // the message was typed, and /attach ones are queued; images left as paths
+  // in the text are found here.
+  async chat(prompt, attached = []) {
+    const found = extractAttachments(prompt);
+    const all = [...this.queuedAttachments.splice(0), ...attached, ...found.attachments];
+    const skipped = [...found.skipped];
+    const images = all.filter((a) => a.kind === 'image');
+    let documents = all.filter((a) => a.kind === 'pdf');
+    const texts = all.filter((a) => a.kind === 'text');
+    if (documents.length && this.api === 'ollama') {
+      skipped.push(`${documents.map((d) => d.name).join(', ')}: Ollama can only take images and text, not PDFs`);
+      documents = [];
+    }
+    let content = all.length ? found.text : prompt;
+    if (!content && (images.length || documents.length || texts.length)) {
+      content = images.length && images.length === all.length ? 'What is in this image?' : 'Summarize the attached file.';
+    }
+    content = [content, ...texts.map((t) => inlineFile(t.name, t.text))].filter(Boolean).join('\n\n');
+    const message = { role: 'user', content };
+    if (images.length) message.images = images.map(({ mime, data }) => ({ mime, data }));
+    if (documents.length) message.documents = documents.map(({ name, mime, data }) => ({ name, mime, data }));
     process.stdout.write('\n');
+    for (const why of skipped) console.log(`${CHROME_COLOR}⚠️  Not attached: ${why}${ANSI.reset}`);
+    for (const file of found.attachments) console.log(`${CHROME_COLOR}📎 Attached ${file.name}${ANSI.reset}`);
+    const blind = images.length > 0 && !await this.supportsVision();
+    if (blind) {
+      console.log(`⚠️  '${this.model}' doesn't list vision support, so it may ignore or reject the image. Use /load to switch to a vision model.`);
+    }
+    if (found.attachments.length || skipped.length || blind) process.stdout.write('\n');
+    this.history.push(message);
 
     try {
       // Each round streams one model response; if it asked for tools, run
@@ -2243,7 +2429,8 @@ class OllamaChat {
   savableMessages() {
     const system = this.getSystemMessage();
     return (system ? this.history.slice(1) : this.history)
-      .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content);
+      .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content)
+      .map(({ role, content }) => ({ role, content }));
   }
 
   sessionSnapshot() {
@@ -2825,6 +3012,27 @@ class OllamaChat {
     }
   }
 
+  // /attach <path>...: queues files for the next message. Dragging a file
+  // into the prompt does the same; this is for when that doesn't work.
+  attach(argText) {
+    if (!argText.trim()) {
+      console.log('\nUsage: /attach <path> [<path> ...]   (images, PDFs, and text files; or drag a file into the prompt)\n');
+      return;
+    }
+    const found = extractAttachments(argText, { anyFile: true });
+    for (const why of found.skipped) console.log(`⚠️  Not attached: ${why}`);
+    for (const file of found.attachments) {
+      if (file.kind === 'pdf' && this.api === 'ollama') {
+        console.log(`⚠️  Not attached: ${file.name}: Ollama can only take images and text, not PDFs`);
+        continue;
+      }
+      this.queuedAttachments.push(file);
+      console.log(`📎 ${file.name} will go with your next message`);
+    }
+    if (found.attachments.length === 0 && found.skipped.length === 0) console.log("Couldn't find a file at that path.");
+    console.log('');
+  }
+
   async list() {
     try {
       if (this.api !== 'ollama') {
@@ -3213,18 +3421,53 @@ class OllamaChat {
       let historyIndex = history.length;
       let draft = ''; // unsent input, kept while browsing history
       let pasting = false;
+      // Files dragged in (their paths are recognized as they arrive) are
+      // taken out of the text and shown as chips on a line above the prompt.
+      const attached = [];
+
+      const chipLine = () => {
+        let text = attached.map((file) => `📎 ${file.name}`).join('  ');
+        const room = (process.stdout.columns || 80) - 1;
+        if (visibleWidth(text) > room) {
+          const kept = [];
+          let used = 1;
+          for (const { segment } of graphemes.segment(text)) {
+            used += graphemeWidth(segment);
+            if (used > room) break;
+            kept.push(segment);
+          }
+          text = kept.join('') + '…';
+        }
+        return `${CHROME_COLOR}${text}${ANSI.reset}\r\n`;
+      };
 
       const render = () => {
         const end = inputPosition(buffer);
         const target = inputPosition(buffer.slice(0, cursor));
+        const chips = attached.length > 0;
         let out = cursorRow > 0 ? `\x1b[${cursorRow}A` : '';
         // Raw mode disables automatic CR-on-LF, so embedded newlines need an explicit \r.
-        out += '\r\x1b[J' + styledPrompt() + buffer.replace(/\n/g, '\r\n');
+        out += '\r\x1b[J' + (chips ? chipLine() : '') + styledPrompt() + buffer.replace(/\n/g, '\r\n');
         if (end.pending) out += ' \r'; // move off the right edge onto the next row
         if (end.row > target.row) out += `\x1b[${end.row - target.row}A`;
         out += '\r' + (target.col > 0 ? `\x1b[${target.col}C` : '');
-        cursorRow = target.row;
+        cursorRow = target.row + (chips ? 1 : 0);
         process.stdout.write(out);
+      };
+
+      // Moves any complete file path in the text into `attached`. Run when a
+      // paste ends (a drag-and-drop arrives like one) and after each space, so
+      // a path typed or dropped without bracketed paste is caught too.
+      // Any kind of file counts when it came in as a paste, since that's what
+      // a drop is; typed text only attaches images.
+      const attachImages = (pasted) => {
+        if (!/[\/]/.test(buffer)) return;
+        const found = extractAttachments(buffer, { complete: false, allowEnd: pasted, anyFile: pasted });
+        if (found.attachments.length === 0) return;
+        const atEnd = cursor >= buffer.length;
+        attached.push(...found.attachments);
+        buffer = found.text;
+        cursor = atEnd ? buffer.length : Math.min(cursor, buffer.length);
       };
 
       // Cursor steps and deletes whole grapheme clusters, so an emoji like ⚠️
@@ -3277,6 +3520,7 @@ class OllamaChat {
         }
         if (key.name === 'paste-end') {
           pasting = false;
+          attachImages(true);
           render();
           return;
         }
@@ -3318,11 +3562,13 @@ class OllamaChat {
           cleanup();
           process.stdout.write('\r\n');
           if (buffer.trim() && buffer !== history[history.length - 1]) history.push(buffer);
+          this.pendingFiles = attached;
           resolve(buffer);
           return;
         } else if (key.name === 'backspace') {
           if (key.meta) remove(wordLeft(cursor), cursor);
           else if (cursor > 0) remove(prev(cursor), cursor);
+          else if (buffer.length === 0) attached.pop(); // nothing left to delete: drop the last image
         } else if (key.name === 'delete' || (key.ctrl && key.name === 'd')) {
           if (cursor < buffer.length) remove(cursor, next(cursor));
         } else if (key.ctrl && key.name === 'w') {
@@ -3362,6 +3608,7 @@ class OllamaChat {
           }
         } else if (str && !key.ctrl && !key.meta && !/[\x00-\x1f\x7f]/.test(str)) {
           insert(str);
+          if (/\s/.test(str)) attachImages(false);
         } else {
           return; // Unhandled key (Tab, Escape, function keys, ...)
         }
@@ -3398,30 +3645,42 @@ class OllamaChat {
     await this.loadModelContext();
 
     while (true) {
+      this.pendingFiles = [];
       const input = await this.readTurnInput();
+      const attached = this.pendingFiles;
+      this.pendingFiles = [];
 
       if (input === null) {
         console.log('\n👋 Goodbye!\n');
         break;
       }
 
-      if (!input.trim()) {
+      if (!input.trim() && attached.length === 0) {
         continue;
       }
 
       this.rewriteInputLine(input);
 
-      // Check if it's a command
+      // Check if it's a command. Anything else starting with '/' is a message
+      // if it holds a path to an image (a drop onto an empty prompt looks like
+      // that), and otherwise an unknown command.
       if (input.startsWith('/')) {
         const shouldContinue = await this.handleCommand(input);
         if (shouldContinue === false) {
           break;
         }
-        continue;
+        if (shouldContinue === true) {
+          this.queuedAttachments.push(...attached); // chips on a command's line wait for the next message
+          continue;
+        }
+        if (extractAttachments(input).attachments.length === 0 && attached.length === 0) {
+          console.log(`Unknown command '${input.trim().split(/\s+/)[0]}'. Type /help for help\n`);
+          continue;
+        }
       }
 
       // Send to Ollama
-      await this.chat(input);
+      await this.chat(input, attached);
     }
 
     if (this.stopOnExit) {
@@ -3648,7 +3907,7 @@ if (invokedDirectly()) main().catch(console.error);
 export {
   charWidth, graphemeWidth, visibleWidth, createInlineStyler, styleLine, createWordWrapper,
   splitTableRow, wrapStyled, renderTable, createMarkdownRenderer, inputPosition,
-  sniffImage, imageSequence, loadImage,
+  sniffImage, imageSequence, loadImage, pickDefaultModel, extractAttachments, classifyFile,
   formatModelfile, parseModelfile, saveLocalSession, readLocalSession, listLocalSessions,
   localSessionExists, isAutosaveName, autosaveName, sessionPath,
   loadEnvFile, envOptions, parseArgs, isOllamaCom, OllamaChat, main,

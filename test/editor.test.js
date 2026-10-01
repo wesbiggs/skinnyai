@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { captureOutput, fakeTTY, FakeStdin, KEYS, setColumns, Terminal } from './helpers/tty.js';
 
@@ -149,5 +150,63 @@ describe('confirm', () => {
     }
     expect(capture.text).toContain('Overwrite? [y/N] yes\n');
     expect(capture.text).toContain('Overwrite? [y/N] no\n');
+  });
+});
+describe('dragged-in images', () => {
+  
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(40)]);
+
+  function image(name) {
+    const dir = fs.mkdtempSync(`${process.env.TMPDIR || '/tmp'}/skinnyai-drop-`);
+    fs.writeFileSync(`${dir}/${name}`, png);
+    return `${dir}/${name}`;
+  }
+
+  it('turns a pasted path into a chip above the prompt, leaving the text', async () => {
+    const chat = newChat();
+    const file = image('my pic.png');
+    const { text, screen } = await edit(chat, 'what is ', KEYS.paste(file.replace(/ /g, '\\ ')), 'this', KEYS.enter);
+    expect(text).toBe('what is this');
+    expect(screen[0]).toBe('📎 my pic.png');
+    expect(screen[1]).toBe('> what is this');
+    expect(chat.pendingFiles.map((i) => i.name)).toEqual(['my pic.png']);
+  });
+
+  it('catches a path that arrives as typed characters once a space follows', async () => {
+    const chat = newChat();
+    const file = image('a.png');
+    const { text, screen } = await edit(chat, `${file} look`, KEYS.enter);
+    expect(text).toBe('look');
+    expect(screen[0]).toBe('📎 a.png');
+    expect(chat.pendingFiles).toHaveLength(1);
+  });
+
+  it('removes the last image with Backspace on an empty line', async () => {
+    const chat = newChat();
+    const { text, screen } = await edit(chat, KEYS.paste(image('a.png')), KEYS.backspace, 'hi', KEYS.enter);
+    expect(text).toBe('hi');
+    expect(chat.pendingFiles).toEqual([]);
+    expect(screen.at(-1)).toBe('> hi');
+  });
+
+  it('takes any file we can send when it is pasted, but only images when typed', async () => {
+    const dir = fs.mkdtempSync(`${process.env.TMPDIR || '/tmp'}/skinnyai-drop-`);
+    fs.writeFileSync(`${dir}/notes.txt`, 'hello');
+    const pasted = newChat();
+    const { text } = await edit(pasted, KEYS.paste(`${dir}/notes.txt`), KEYS.enter);
+    expect(text).toBe('');
+    expect(pasted.pendingFiles.map((f) => [f.kind, f.name])).toEqual([['text', 'notes.txt']]);
+
+    const typed = newChat();
+    const typedResult = await edit(typed, `read ${dir}/notes.txt please`, KEYS.enter);
+    expect(typedResult.text).toBe(`read ${dir}/notes.txt please`);
+    expect(typed.pendingFiles).toEqual([]);
+  });
+
+  it('leaves paths to files we cannot send, and missing files, as text', async () => {
+    const dir = fs.mkdtempSync(`${process.env.TMPDIR || '/tmp'}/skinnyai-drop-`);
+    fs.writeFileSync(`${dir}/blob.bin`, Buffer.from([0, 1, 2, 3, 255, 254]));
+    expect((await edit(newChat(), KEYS.paste(`${dir}/blob.bin`), KEYS.enter)).text).toBe(`${dir}/blob.bin`);
+    expect((await edit(newChat(), KEYS.paste('/no/such/file.txt'), KEYS.enter)).text).toBe('/no/such/file.txt');
   });
 });

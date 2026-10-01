@@ -62,10 +62,10 @@ export async function startMockServer({ replies = {}, models = [], canCreate = f
           }
         }
         res.end(JSON.stringify({ message: { role: 'assistant', content: '' }, done: true, done_reason: 'stop' }) + '\n');
-      } else if (req.url === '/api/show') {
+      } else if (url === '/api/show') {
         if (existing.has(json.model)) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ details: {}, messages: [] }));
+          res.end(JSON.stringify({ details: {}, messages: [], ...(capabilities && { capabilities: capabilities[json.model] ?? [] }) }));
         } else {
           res.writeHead(404, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: `model '${json.model}' not found` }));

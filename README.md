@@ -14,6 +14,9 @@ A terminal-based Node.js chat interface for Ollama and OpenAI-compatible endpoin
 - ✅ `--api openai` mode for OpenAI-compatible servers (vLLM, llama.cpp server, LM Studio, ...) — see [OpenAI-compatible servers](#openai-compatible-servers)
 - ✅ Tool calling, on by default, with built-in `web_search` and `fetch_page` tools (DuckDuckGo, or Ollama's hosted search with an API key)
 - ✅ Ollama cloud models via `--host https://ollama.com` and `OLLAMA_API_KEY` — see [Ollama account](#ollama-account-cloud-models-and-hosted-search) — see [Tool calling and web search](#tool-calling-and-web-search)
+- ✅ Drag a file (image, PDF, or text) into the prompt, or `/attach` it — see [Attaching files](#attaching-files)
+- ✅ `--api anthropic` for Claude — see [Anthropic API](#anthropic-api)
+- ✅ MCP servers from a standard `mcp.json` — see [MCP servers](#mcp-servers)
 - ✅ Session saving to local Modelfiles (works with any server), optional autosave, and `/share` to an Ollama server
 - ✅ Defaults in `~/.skinny/.env`
 - ✅ Minimal dependencies (uses Node.js built-ins)
@@ -152,6 +155,8 @@ This client mirrors the command set of the native `ollama run` interactive termi
 | `/share [name]` | Save your current session as a model on a self-hosted Ollama server |
 | `/clear` | Clear conversation history (keeps the system message, if one is set) |
 | `/list` | List locally available models |
+| `/attach <file>` | Send a file with your next message (see below) |
+| `/mcp` | Show connected MCP servers and their tools |
 | `/model` | Show current model, keep-alive, and host (not in native `ollama`; a bonus command) |
 | `/bye`, `/exit` | Exit |
 | `/?`, `/help` | Help for a command (`/? set`, `/? show`, `/? shortcuts`) |
@@ -359,6 +364,23 @@ Several commands are Ollama-specific and have no OpenAI API equivalent, so they'
 - `/load <name>` — restores a saved session by that name; otherwise it switches the active model name and starts a fresh session.
 - `--keep-alive`/`-x`/`--stop-on-exit` — no equivalent concept; `--stop-on-exit` is a no-op.
 - `/set verbose` stats — only shows token counts (from the `usage` field, if the server returns one), not timing, since OpenAI's API doesn't report duration breakdowns.
+
+## Attaching files
+
+Drag a file from Finder into the terminal. Its path is recognized as it arrives and replaced by a `📎 name` line above the prompt (Backspace on an empty prompt removes the last one). What happens next depends on the file:
+
+| File | Sent as |
+|------|---------|
+| Image (PNG, JPEG, GIF, WebP) | An image, to any API that takes them. Ollama is checked for the `vision` capability first, with a warning (but still sent) if it's missing |
+| PDF | A document block (Anthropic) or a file part (OpenAI). Ollama can't take PDFs, so they're refused there |
+| Text (any UTF-8 file up to 300 KB: code, notes, CSV, ...) | Pasted into your message in a fenced block under `[attached file: name]`, so it works with every API and is kept in saved sessions |
+| Anything else | Refused: these APIs have no way to take it |
+
+Files are capped at 20 MB. Only a *paste* (which is what a drop is) attaches PDFs and text files; a path typed into a message only attaches images, so mentioning `~/.ssh/config` in a question doesn't upload it. When a drop doesn't register in your terminal, `/attach <path>` queues a file for your next message. PDFs and images aren't kept in saved sessions or shared models, only their text.
+
+## Anthropic API
+
+`--api anthropic` talks to Claude through the Messages API (default host `https://api.anthropic.com`). Set `ANTHROPIC_API_KEY` in the environment or `~/.skinny/.env`:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-... ./bin/skinnyai.js claude-sonnet-5-5 --api anthropic

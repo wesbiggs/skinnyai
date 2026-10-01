@@ -115,6 +115,51 @@ describe('/load without a name', () => {
   });
 });
 
+describe('dragging an image into the prompt', () => {
+  it('attaches it for Ollama and strips the path from the message', async () => {
+    const file = writeImage();
+    const { stdout } = await run(['vis', '--host', server.url], `what is this ${file}\n`);
+    const message = requestsTo('/api/chat').at(-1).body.messages.at(-1);
+    expect(message.content).toBe('what is this');
+    expect(message.images).toEqual([png.toString('base64')]);
+    expect(stdout).toContain('Attached pic.png');
+    expect(stdout).not.toContain('vision');
+  });
+
+  it('understands escaped spaces, quotes, and file:// URLs', async () => {
+    const file = writeImage('my pic.png');
+    for (const form of [file.replace(/ /g, '\\ '), `'${file}'`, `"${file}"`, `file://${file.replace(/ /g, '%20')}`]) {
+      server.requests.length = 0;
+      await run(['vis', '--host', server.url], `look ${form}\n`);
+      const message = requestsTo('/api/chat').at(-1).body.messages.at(-1);
+      expect(message, form).toMatchObject({ content: 'look', images: [expect.any(String)] });
+    }
+  });
+
+  it('warns when the model has no vision capability, but still sends it', async () => {
+    const { stdout } = await run(['text', '--host', server.url], `${writeImage()}\n`);
+    expect(stdout).toContain("'text' doesn't list vision support");
+    expect(requestsTo('/api/chat').at(-1).body.messages.at(-1).images).toHaveLength(1);
+  });
+
+  it('leaves paths to non-images and missing files alone', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skinnyai-img-'));
+    fs.writeFileSync(path.join(dir, 'notes.txt'), 'hello');
+    const input = `see ${path.join(dir, 'notes.txt')} and /no/such/pic.png`;
+    await run(['vis', '--host', server.url], `${input}\n`);
+    expect(requestsTo('/api/chat').at(-1).body.messages.at(-1)).toEqual({ role: 'user', content: input });
+  });
+
+  it('sends content parts to OpenAI-style servers', async () => {
+    await run(['m', '--api', 'openai', '--host', server.url], `hi ${writeImage()}\n`);
+    const { content } = requestsTo('/v1/chat/completions').at(-1).body.messages.at(-1);
+    expect(content).toEqual([
+      { type: 'text', text: 'hi' },
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${png.toString('base64')}` } }
+    ]);
+  });
+});
+
 describe('--model default', () => {
   it('picks the newest Opus for Anthropic', async () => {
     const { stdout } = await run(['default', '--api', 'anthropic', '--host', server.url], 'hi\n', { ANTHROPIC_API_KEY: 'k' });
@@ -128,6 +173,17 @@ describe('--model default', () => {
     expect(stderr).toContain("'default' isn't a model name for Ollama");
   });
 
+  it('chooses the newest plain gpt for OpenAI by release date', async () => {
+    const { pickDefaultModel } = await import('../bin/skinnyai.js');
+    const list = [
+      { id: 'gpt-5', created: 100 }, { id: 'gpt-5.1', created: 300 }, { id: 'gpt-5.1-2025-11-13', created: 301 },
+      { id: 'gpt-5.2-mini', created: 400 }, { id: 'gpt-5-codex', created: 500 }, { id: 'o3', created: 600 },
+      { id: 'text-embedding-3-large', created: 700 }, { id: 'gpt-4o', created: 50 }
+    ];
+    expect(pickDefaultModel('openai', list)).toBe('gpt-5.1');
+    expect(pickDefaultModel('openai', [{ id: 'whisper-1' }])).toBeNull();
+    expect(pickDefaultModel('anthropic', [{ id: 'claude-haiku-9', created_at: '2026-01-01T00:00:00Z' }])).toBe('claude-haiku-9');
+  });
 });
 
 describe('OPENAI_API_KEY', () => {
@@ -138,6 +194,61 @@ describe('OPENAI_API_KEY', () => {
     server.requests.length = 0;
     await run(['m', '--host', server.url], 'hi\n', { OPENAI_API_KEY: 'sk-oai' });
     expect(requestsTo('/api/chat').at(0).headers.authorization).toBeUndefined();
+  });
+});
+
+describe('attaching files', () => {
+  const pdf = Buffer.from('%PDF-1.4\n1 0 obj\n<<>>\nendobj\n');
+  function file(name, bytes) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skinnyai-file-'));
+    fs.writeFileSync(path.join(dir, name), bytes);
+    return path.join(dir, name);
+  }
+  const claude = () => ['claude-x', '--api', 'anthropic', '--host', server.url];
+  const env = { ANTHROPIC_API_KEY: 'k' };
+
+  it('pastes a text file into the message, for any API, and saves it with the session', async () => {
+    const notes = file('notes.txt', 'line one\n```js\ncode\n```\n');
+    const { stdout } = await run(['vis', '--host', server.url, '--autosave'], `/attach ${notes}\nsummarize\n`);
+    expect(stdout).toContain('notes.txt will go with your next message');
+    const sent = requestsTo('/api/chat').at(-1).body.messages.at(-1).content;
+    expect(sent).toMatch(/^summarize\n\n\[attached file: notes.txt\]\n````\nline one\n```js\ncode\n```\n````$/);
+    const saved = fs.readdirSync(path.join(home, 'sessions')).map((f) => fs.readFileSync(path.join(home, 'sessions', f), 'utf8')).join('');
+    expect(saved).toContain('line one');
+  });
+
+  it('sends a PDF as a document block to Anthropic and a file part to OpenAI', async () => {
+    const doc = file('paper.pdf', pdf);
+    await run(claude(), `/attach ${doc}\nsummarize\n`, env);
+    expect(requestsTo('/v1/messages').at(0).body.messages[0].content).toEqual([
+      { type: 'document', title: 'paper.pdf', source: { type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') } },
+      { type: 'text', text: 'summarize' }
+    ]);
+    await run(['m', '--api', 'openai', '--host', server.url], `/attach ${doc}\nsummarize\n`);
+    expect(requestsTo('/v1/chat/completions').at(0).body.messages.at(-1).content).toEqual([
+      { type: 'text', text: 'summarize' },
+      { type: 'file', file: { filename: 'paper.pdf', file_data: `data:application/pdf;base64,${pdf.toString('base64')}` } }
+    ]);
+  });
+
+  it('refuses a PDF for Ollama, and files of kinds that cannot be sent', async () => {
+    const doc = file('paper.pdf', pdf);
+    const blob = file('thing.bin', Buffer.from([0, 1, 2, 255]));
+    const { stdout } = await run(['vis', '--host', server.url], `/attach ${doc}\n/attach ${blob}\n`);
+    expect(stdout).toContain('Ollama can only take images and text, not PDFs');
+    expect(stdout).toContain("thing.bin isn't an image, PDF, or text file");
+  });
+
+  it('does not attach a text file just because its path is in a typed message', async () => {
+    const notes = file('notes.txt', 'secret');
+    await run(['vis', '--host', server.url], `what is in ${notes}\n`);
+    expect(requestsTo('/api/chat').at(-1).body.messages.at(-1).content).toBe(`what is in ${notes}`);
+  });
+
+  it('keeps a queued file when a command is typed before the message', async () => {
+    const notes = file('notes.txt', 'abc');
+    await run(['vis', '--host', server.url], `/attach ${notes}\n/model\nhi\n`);
+    expect(requestsTo('/api/chat').at(-1).body.messages.at(-1).content).toContain('[attached file: notes.txt]');
   });
 });
 
@@ -162,6 +273,13 @@ describe('--api anthropic', () => {
     const second = requestsTo('/v1/messages')[1].body.messages;
     expect(second.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
     expect(second[1].content).toEqual([{ type: 'text', text: 'You said: **one**' }]);
+  });
+
+  it('sends attached images as base64 source blocks', async () => {
+    await run(anthropic(), `describe ${writeImage()}\n`, env);
+    const content = requestsTo('/v1/messages').at(0).body.messages[0].content;
+    expect(content[0]).toEqual({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png.toString('base64') } });
+    expect(content[1]).toEqual({ type: 'text', text: 'describe' });
   });
 
   it('lists models with /list', async () => {
