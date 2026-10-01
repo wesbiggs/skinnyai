@@ -15,7 +15,7 @@ let package = Package(
             name: "SkinnyAI",
             dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")],
             path: "macos",
-            exclude: ["Info.plist", "entitlements.plist", "AppIcon.icns"]
+            exclude: ["Info.plist", "entitlements.plist", "AppIcon.icns", "patches"]
         ),
     ]
 )
