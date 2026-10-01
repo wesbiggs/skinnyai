@@ -409,6 +409,37 @@ describe('images in tool results', () => {
   });
 });
 
+describe('/saveimage', () => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+  const ask = (input, env = {}) => { writeMcpConfig({ trust: true }); return run(['m', '--api', 'openai', '--host', server.url], `use draw\n${input}`, env); };
+
+  it('writes the latest image to the path given, adding an extension if it has none', async () => {
+    const out = path.join(home, 'out', 'goose');
+    const { stdout } = await ask(`/saveimage ${out}\n`);
+    expect(stdout).toContain(`Saved image/png, 0 KB to ${out}.png`);
+    expect(fs.readFileSync(`${out}.png`).equals(png)).toBe(true);
+  });
+
+  it('names the file itself in a folder, or in the image folder when given no path', async () => {
+    const folder = path.join(home, 'pics');
+    await ask(`/saveimage ${folder}/\n`);
+    expect(fs.readdirSync(folder)[0]).toMatch(/^skinnyai-\d{8}-\d{6}\.png$/);
+    const fallback = path.join(home, 'default-images');
+    await ask('/saveimage\n', { SKINNY_IMAGE_DIR: fallback });
+    expect(fs.readdirSync(fallback)[0]).toMatch(/^skinnyai-\d{8}-\d{6}\.png$/);
+  });
+
+  it('asks before overwriting, and says so when there is no image', async () => {
+    const file = path.join(home, 'x.png');
+    fs.writeFileSync(file, 'old');
+    const { stdout } = await ask(`/saveimage ${file}\nn\n`);
+    expect(stdout).toContain('already exists. Overwrite it? [y/N] n');
+    expect(fs.readFileSync(file, 'utf8')).toBe('old');
+    const none = await run(['m', '--api', 'openai', '--host', server.url], '/saveimage\n');
+    expect(none.stdout).toContain('No image in this conversation yet');
+  });
+});
+
 describe('MCP servers', () => {
   const claude = () => ['claude-x', '--api', 'anthropic', '--host', server.url];
   const env = { ANTHROPIC_API_KEY: 'sk-test' };

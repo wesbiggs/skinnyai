@@ -139,6 +139,8 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 // PDFs, long tool output) are cut down to a size note.
 
 const DEBUG_LOG = path.join(SKINNY_HOME, 'debug.log');
+// Where /saveimage puts an image when given no path.
+const IMAGE_DIR = process.env.SKINNY_IMAGE_DIR || path.join(os.homedir(), 'Pictures', 'skinnyai');
 let debugEnabled = false;
 
 async function enableDebugLog() {
@@ -2948,6 +2950,7 @@ class OllamaChat {
     console.log('  /model          Show current model, keep-alive, and host');
     console.log('  /list           List locally available models');
     console.log('  /attach <file>  Send a file (image, PDF, or text) with your next message');
+    console.log('  /saveimage [path]  Save the latest image in the conversation to a file');
     console.log('  /mcp            Show connected MCP servers and their tools');
     console.log('  /bye            Exit');
     console.log('  /?, /help       Help for a command');
@@ -3207,6 +3210,54 @@ class OllamaChat {
     }
     if (found.attachments.length === 0 && found.skipped.length === 0) console.log("Couldn't find a file at that path.");
     console.log('');
+  }
+
+  // The images in the conversation, oldest first: data: URLs in replies (what a
+  // model writes as ![alt](data:image/...)) and images in tool results.
+  conversationImages() {
+    const found = [];
+    for (const message of this.history) {
+      if (message.role === 'tool') {
+        for (const part of message.parts || []) if (part.type === 'image') found.push({ mime: part.mime, data: part.data });
+      } else if (message.role === 'assistant' && typeof message.content === 'string') {
+        for (const match of message.content.matchAll(/data:(image\/[\w.+-]+);base64,([A-Za-z0-9+/=]+)/g)) found.push({ mime: match[1], data: match[2] });
+      }
+    }
+    return found;
+  }
+
+  // /saveimage [path]: writes the most recent image in the conversation to a
+  // file. With no path it goes in the image folder under a date-and-time name;
+  // a folder (or a path ending in /) gets that name too.
+  async saveImage(argText) {
+    const images = this.conversationImages();
+    if (images.length === 0) {
+      console.log('\nNo image in this conversation yet (a data: URL in a reply, or an image a tool returned).\n');
+      return;
+    }
+    const image = images.at(-1);
+    const bytes = Buffer.from(image.data, 'base64');
+    const info = sniffImage(bytes);
+    const ext = info ? { png: 'png', jpeg: 'jpg', gif: 'gif', webp: 'webp' }[info.format] : image.mime.split('/')[1].replace(/\+.*/, '');
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '').replace('T', '-');
+    const target = argText.trim().replace(/^(["'])(.*)\1$/, '$2').replace(/\\(.)/g, '$1');
+    let file = path.join(IMAGE_DIR, `skinnyai-${stamp}.${ext}`);
+    if (target) {
+      const expanded = target.startsWith('~/') || target === '~' ? path.join(os.homedir(), target.slice(1)) : path.resolve(target);
+      const isDir = /[\\/]$/.test(target) || await fs.stat(expanded).then((st) => st.isDirectory(), () => false);
+      file = isDir ? path.join(expanded, `skinnyai-${stamp}.${ext}`) : (path.extname(expanded) ? expanded : `${expanded}.${ext}`);
+    }
+    try {
+      if (await fs.stat(file).then(() => true, () => false) && !await this.confirm(`\n'${file}' already exists. Overwrite it?`)) {
+        console.log('Not saved.\n');
+        return;
+      }
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, bytes);
+      console.log(`\n💾 Saved ${image.mime}, ${Math.round(bytes.length / 1024)} KB to ${file}${images.length > 1 ? ` (the latest of ${images.length} images)` : ''}\n`);
+    } catch (error) {
+      console.log(`\n❌ Couldn't save the image: ${error.message}\n`);
+    }
   }
 
   async list() {
@@ -3500,6 +3551,9 @@ class OllamaChat {
         return true;
       case '/mcp':
         this.printMcp();
+        return true;
+      case '/saveimage':
+        await this.saveImage(trimmed.slice(rawCmd.length));
         return true;
       case '/attach':
         this.attach(trimmed.slice(rawCmd.length));
@@ -4044,7 +4098,8 @@ Defaults:
     SKINNY_TOOLS=true              SKINNY_AUTOSAVE=true
     OLLAMA_API_KEY=...
   Also: SKINNY_API, SKINNY_KEEP_ALIVE, SKINNY_DATE, SKINNY_MARKDOWN,
-  SKINNY_IMAGES, SKINNY_HIDE_THINKING, SKINNY_STOP_ON_EXIT, SKINNY_MCP, SKINNY_DEBUG, and
+  SKINNY_IMAGES, SKINNY_HIDE_THINKING, SKINNY_STOP_ON_EXIT, SKINNY_MCP, SKINNY_DEBUG,
+  SKINNY_IMAGE_DIR (where /saveimage writes by default: ~/Pictures/skinnyai), and
   SKINNY_{USER,MODEL}_{NORMAL,ITALIC}_COLOR. OPENAI_API_KEY and
   ANTHROPIC_API_KEY go with --api openai / anthropic. Environment variables override
   the file, and command-line flags override both.

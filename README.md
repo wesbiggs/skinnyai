@@ -155,6 +155,7 @@ This client mirrors the command set of the native `ollama run` interactive termi
 | `/share [name]` | Save your current session as a model on a self-hosted Ollama server |
 | `/clear` | Clear conversation history (keeps the system message, if one is set) |
 | `/list` | List locally available models |
+| `/saveimage [path]` | Save the latest image in the conversation (a `data:` URL in a reply, or an image a tool returned) to a file; no path means `~/Pictures/skinnyai/` (or `SKINNY_IMAGE_DIR`) under a date-and-time name, a folder gets that name too |
 | `/attach <file>` | Send a file with your next message (see below) |
 | `/mcp` | Show connected MCP servers and their tools |
 | `/model` | Show current model, keep-alive, and host (not in native `ollama`; a bonus command) |
