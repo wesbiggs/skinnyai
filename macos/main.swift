@@ -534,7 +534,21 @@ final class ChatWindow: NSObject, NSWindowDelegate, LocalProcessTerminalViewDele
                           backing: .buffered, defer: false)
         super.init()
         window.title = "SkinnyAI"
-        window.contentView = terminal
+        // The terminal view draws right to its edges, so it sits in a container that provides the padding
+        // (in the terminal's own background color, so the margin doesn't look like a frame).
+        let container = NSView(frame: terminal.frame)
+        container.wantsLayer = true
+        container.layer?.backgroundColor = terminal.nativeBackgroundColor.cgColor
+        window.backgroundColor = terminal.nativeBackgroundColor
+        terminal.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(terminal)
+        NSLayoutConstraint.activate([
+            terminal.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            terminal.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            terminal.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
+            terminal.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
+        ])
+        window.contentView = container
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.minSize = NSSize(width: 480, height: 300)
