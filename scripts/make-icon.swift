@@ -1,23 +1,49 @@
 #!/usr/bin/env swift
-// Renders macos/AppIcon.icns: "SKINNY" in a thin weight and "AI" in bold,
-// terminal green on dark grey. Run: swift scripts/make-icon.swift
+// Renders macos/AppIcon.icns: "SKINNY" (white) stacked over "AI" (black, terminal green)
+// on dark grey, each line stretched to the full width so it stays legible at Dock sizes.
+// Run: swift scripts/make-icon.swift
 import AppKit
+import CoreText
 
 let canvas: CGFloat = 1024
 let body = NSRect(x: 100, y: 100, width: 824, height: 824) // macOS icon grid
 let green = NSColor(srgbRed: 0x5f / 255, green: 0xff / 255, blue: 0x5f / 255, alpha: 1) // the default model color (xterm 83)
+
+/// The outline of `string` in `weight`, scaled (not uniformly) to exactly fill `rect`.
+func stretchedText(_ string: String, weight: NSFont.Weight, into rect: NSRect) -> NSBezierPath {
+    let font = NSFont.systemFont(ofSize: 300, weight: weight) as CTFont
+    let line = CTLineCreateWithAttributedString(NSAttributedString(string: string, attributes: [.font: font]))
+    let path = CGMutablePath()
+    for run in CTLineGetGlyphRuns(line) as! [CTRun] {
+        let count = CTRunGetGlyphCount(run)
+        var glyphs = [CGGlyph](repeating: 0, count: count)
+        var positions = [CGPoint](repeating: .zero, count: count)
+        CTRunGetGlyphs(run, CFRange(location: 0, length: 0), &glyphs)
+        CTRunGetPositions(run, CFRange(location: 0, length: 0), &positions)
+        for (glyph, position) in zip(glyphs, positions) {
+            if let outline = CTFontCreatePathForGlyph(font, glyph, nil) {
+                path.addPath(outline, transform: CGAffineTransform(translationX: position.x, y: position.y))
+            }
+        }
+    }
+    let box = path.boundingBoxOfPath
+    var fit = CGAffineTransform(translationX: -box.minX, y: -box.minY)
+        .concatenating(CGAffineTransform(scaleX: rect.width / box.width, y: rect.height / box.height))
+        .concatenating(CGAffineTransform(translationX: rect.minX, y: rect.minY))
+    return NSBezierPath(cgPath: path.copy(using: &fit)!)
+}
 
 func render(size: Int) -> Data {
     let image = NSImage(size: NSSize(width: canvas, height: canvas), flipped: false) { _ in
         NSColor(srgbRed: 0.11, green: 0.11, blue: 0.12, alpha: 1).setFill()
         NSBezierPath(roundedRect: body, xRadius: 185, yRadius: 185).fill()
 
-        let font = { (weight: NSFont.Weight) in NSFont.systemFont(ofSize: 160, weight: weight) }
-        let text = NSMutableAttributedString()
-        text.append(NSAttributedString(string: "SKINNY", attributes: [.font: font(.ultraLight), .foregroundColor: green, .kern: 1.5]))
-        text.append(NSAttributedString(string: "AI", attributes: [.font: font(.black), .foregroundColor: green, .kern: 1.5]))
-        let size = text.size()
-        text.draw(at: NSPoint(x: (canvas - size.width) / 2, y: (canvas - size.height) / 2 + 4))
+        let margin: CGFloat = 70
+        let width = body.width - 2 * margin
+        NSColor.white.setFill()
+        stretchedText("SKINNY", weight: .regular, into: NSRect(x: body.minX + margin, y: 575, width: width, height: 190)).fill()
+        green.setFill()
+        stretchedText("AI", weight: .black, into: NSRect(x: body.minX + margin, y: 255, width: width, height: 290)).fill()
         return true
     }
     let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size, bitsPerSample: 8, samplesPerPixel: 4,
