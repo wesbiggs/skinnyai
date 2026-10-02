@@ -941,8 +941,8 @@ const ANSI = {
     narration: supportsColor ? '\x1b[38;5;136m' : ''
   },
   assistant: {
-    dialogue: supportsColor ? '\x1b[38;5;83m' : '',
-    narration: supportsColor ? '\x1b[38;5;28m' : ''
+    dialogue: supportsColor ? '\x1b[38;5;120m' : '',
+    narration: supportsColor ? '\x1b[38;5;77m' : ''
   }
 };
 
@@ -1004,6 +1004,7 @@ function applyColorOverrides(options) {
 // Inline code, code blocks, and fence/rule/quote chrome get fixed colors of
 // their own, independent of the per-speaker palette.
 const CODE_COLOR = supportsColor ? '\x1b[38;5;117m' : '';
+const CODE_BG = supportsColor ? '\x1b[48;5;236m' : ''; // dark grey behind fenced code, across the whole width
 const CHROME_COLOR = supportsColor ? '\x1b[38;5;244m' : '';
 
 const SGR_PATTERN = /\x1b\[[0-9;]*m/g;
@@ -1054,8 +1055,36 @@ function visibleWidth(text) {
   return width;
 }
 
+// LaTeX commands that have a plain Unicode equivalent, rendered inside $...$
+// (models like gemma emit things like $\to$ for arrows). Anything not listed
+// is left as written.
+const LATEX_SYMBOLS = (() => {
+  const table = {
+    to: '→', rightarrow: '→', leftarrow: '←', gets: '←', leftrightarrow: '↔', uparrow: '↑', downarrow: '↓',
+    Rightarrow: '⇒', Leftarrow: '⇐', Leftrightarrow: '⇔', implies: '⟹', impliedby: '⟸', iff: '⟺',
+    longrightarrow: '⟶', longleftarrow: '⟵', mapsto: '↦', rightleftharpoons: '⇌',
+    times: '×', div: '÷', cdot: '·', pm: '±', mp: '∓', ast: '∗', circ: '∘', bullet: '•', star: '⋆',
+    leq: '≤', le: '≤', geq: '≥', ge: '≥', neq: '≠', ne: '≠', approx: '≈', sim: '∼', simeq: '≃', equiv: '≡',
+    propto: '∝', ll: '≪', gg: '≫', cong: '≅',
+    infty: '∞', partial: '∂', nabla: '∇', degree: '°', prime: '′', ldots: '…', dots: '…', cdots: '⋯',
+    forall: '∀', exists: '∃', in: '∈', notin: '∉', subset: '⊂', supset: '⊃', subseteq: '⊆', supseteq: '⊇',
+    cup: '∪', cap: '∩', emptyset: '∅', varnothing: '∅', land: '∧', lor: '∨', neg: '¬', wedge: '∧', vee: '∨',
+    sum: '∑', prod: '∏', int: '∫', sqrt: '√', angle: '∠', perp: '⊥', parallel: '∥', therefore: '∴', because: '∵',
+    checkmark: '✓', ',': ' ', ';': ' ', ':': ' ', quad: ' ', qquad: '  ', '!': '', ' ': ' ',
+    alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ε', varepsilon: 'ε', zeta: 'ζ', eta: 'η',
+    theta: 'θ', vartheta: 'ϑ', iota: 'ι', kappa: 'κ', lambda: 'λ', mu: 'μ', nu: 'ν', xi: 'ξ', pi: 'π',
+    rho: 'ρ', sigma: 'σ', tau: 'τ', upsilon: 'υ', phi: 'φ', varphi: 'φ', chi: 'χ', psi: 'ψ', omega: 'ω',
+    Gamma: 'Γ', Delta: 'Δ', Theta: 'Θ', Lambda: 'Λ', Xi: 'Ξ', Pi: 'Π', Sigma: 'Σ', Phi: 'Φ', Psi: 'Ψ', Omega: 'Ω',
+    '{': '{', '}': '}', '%': '%', '&': '&', _: '_', $: '$', '#': '#'
+  };
+  return new Map(Object.entries(table));
+})();
+// Commands whose braced argument is just text: \text{km} shows as km.
+const LATEX_TEXT_COMMANDS = new Set(['text', 'textbf', 'textit', 'mathrm', 'mathbf', 'mathit', 'mathsf', 'operatorname', 'mbox']);
+
 // Renders inline markdown within one word (or one whole table cell) at a
-// time: **bold**, *italic* / _italic_, ~~strike~~, `code`, and \-escapes.
+// time: **bold**, *italic* / _italic_, ~~strike~~, `code`, \-escapes, and
+// the symbols in $...$ math (see LATEX_SYMBOLS).
 // Italic also switches to the role's narration color, so RP-style
 // '*narration*' keeps its distinct look. State carries across calls, so a
 // span can cover several words; endLine() drops it, so an unclosed marker
@@ -1069,6 +1098,8 @@ function createInlineStyler(role) {
   let codeRun = 0; // length of the backtick run that opened the current code span
   let lineBold = false; // headings/table headers
   let link = false; // underlined while inside a [link](url)
+  let math = false; // inside $...$
+  let mathBraces = []; // open { in math; true when the brace belongs to \text{...} and is dropped
 
   function sgr() {
     if (!supportsColor) return '';
@@ -1103,7 +1134,50 @@ function createInlineStyler(role) {
         continue;
       }
 
-      if (ch === '\\' && i + 1 < chars.length && /[\\`*_~|#[\]()<>-]/.test(chars[i + 1])) {
+      if (ch === '$') {
+        const prev = chars[i - 1];
+        const next = chars[i + run];
+        // A closing $ needs a non-space before it and no digit after it. An
+        // opening $ is only taken when the span is surely math, since it can't
+        // be put back once dropped: a closing $ later in this same word
+        // ($\\to$, $x$), or a backslash right after it ($\\text{...} ...$). So
+        // "$5" and "costs $USD" stay literal.
+        const closes = (at) => chars[at] === '$' && !isSpace(chars[at - 1]) && !/\d/.test(chars[at + 1] ?? '');
+        const opens = run <= 2 && !isSpace(next) && (next === '\\' || chars.slice(i + run + 1).some((_, k) => closes(i + run + 1 + k)));
+        if (math ? closes(i) : opens) {
+          math = !math;
+          mathBraces = [];
+          i += run - 1;
+          continue;
+        }
+      }
+
+      if (math) {
+        if (ch === '\\' && i + 1 < chars.length) {
+          let end = i + 1;
+          while (end < chars.length && /[A-Za-z]/.test(chars[end])) end++;
+          const name = end > i + 1 ? chars.slice(i + 1, end).join('') : chars[i + 1];
+          if (end === i + 1) end++;
+          if (LATEX_TEXT_COMMANDS.has(name) && chars[end] === '{') {
+            mathBraces.push(true);
+            i = end;
+            continue;
+          }
+          if (LATEX_SYMBOLS.has(name)) {
+            out += LATEX_SYMBOLS.get(name);
+            i = end - 1;
+            continue;
+          }
+        } else if (ch === '{') {
+          mathBraces.push(false);
+        } else if (ch === '}' && mathBraces.pop()) {
+          continue;
+        }
+        out += ch;
+        continue;
+      }
+
+      if (ch === '\\' && i + 1 < chars.length && /[\\`*_~|#[\]()<>$-]/.test(chars[i + 1])) {
         out += chars[++i];
         continue;
       }
@@ -1167,8 +1241,9 @@ function createInlineStyler(role) {
       lineBold = on;
     },
     endLine() {
-      bold = italic = strike = lineBold = link = false;
+      bold = italic = strike = lineBold = link = math = false;
       codeRun = 0;
+      mathBraces = [];
     }
   };
 }
@@ -1783,7 +1858,7 @@ function createMarkdownRenderer(role, startColumn = 0, { markdown = true, images
         mode = line.type;
         return;
       case 'code':
-        wrapper.raw(CODE_COLOR + head);
+        wrapper.raw(CODE_BG + CODE_COLOR + head);
         mode = 'code';
         return;
       case 'rule':
@@ -1894,6 +1969,13 @@ function createMarkdownRenderer(role, startColumn = 0, { markdown = true, images
     wrapper.raw(styler.sgr());
   }
 
+  // A code fence line as a full-width bar on the code background. The ```
+  // markers aren't shown; an opening fence keeps its language name.
+  function fenceBar(line) {
+    const label = inFence ? '' : line.trim().replace(/^`+\s*/, '');
+    return `${CODE_BG}${CHROME_COLOR}${label ? ' ' + label : ''}\x1b[K${ANSI.reset}`;
+  }
+
   function endLine() {
     flushPending();
     inCode = false;
@@ -1901,8 +1983,11 @@ function createMarkdownRenderer(role, startColumn = 0, { markdown = true, images
       tableRows.push(head);
       showTableProgress();
     } else if (mode === 'fence') {
-      emit(CHROME_COLOR + head + '\n');
+      emit(fenceBar(head) + '\n');
       inFence = !inFence;
+    } else if (mode === 'code') {
+      wrapper.raw(`\x1b[K${ANSI.reset}`);
+      wrapper.write('\n');
     } else {
       wrapper.write('\n');
     }
@@ -1956,7 +2041,9 @@ function createMarkdownRenderer(role, startColumn = 0, { markdown = true, images
       if (mode === 'table') {
         tableRows.push(head);
       } else if (mode === 'fence') {
-        emit(CHROME_COLOR + head);
+        emit(fenceBar(head));
+      } else if (mode === 'code') {
+        wrapper.raw(`\x1b[K${ANSI.reset}`);
       }
       flushTable();
       wrapper.end();
@@ -4175,8 +4262,8 @@ Options:
                        OLLAMA_API_KEY environment variable
   --user-italic-color COLOR     Color for *italic*/narration in your messages (default: 136 / dim yellow)
   --user-normal-color COLOR     Color for dialogue in your messages (default: 226 / bright yellow)
-  --model-italic-color COLOR    Color for *italic*/narration in model responses (default: 28 / dim green)
-  --model-normal-color COLOR    Color for dialogue in model responses (default: 83 / bright green)
+  --model-italic-color COLOR    Color for *italic*/narration in model responses (default: 77 / medium green)
+  --model-normal-color COLOR    Color for dialogue in model responses (default: 120 / bright green)
                        COLOR can be a hex code (#RRGGBB), a 256-color index (0-255),
                        or a name (red, green, yellow, blue, magenta, cyan, white, black,
                        or bright- prefixed, e.g. brightgreen; gray/grey aliases brightblack)

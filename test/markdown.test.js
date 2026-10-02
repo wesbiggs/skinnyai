@@ -19,22 +19,27 @@ describe('inline styles', () => {
   it('renders bold, italic, strike, and code with SGR codes and hides the markers', async () => {
     const output = await render(skinnyai, 'Some **bold**, *italic*, ~~gone~~, and `code`.');
     expect(stripAnsi(output)).toBe('Some bold, italic, gone, and code.');
-    expect(output).toMatch(/\x1b\[0;38;5;83;1mbold/);
-    expect(output).toMatch(/\x1b\[0;38;5;28;3mitalic/); // italic uses the narration color
-    expect(output).toMatch(/\x1b\[0;38;5;83;9mgone/);
+    expect(output).toMatch(/\x1b\[0;38;5;120;1mbold/);
+    expect(output).toMatch(/\x1b\[0;38;5;77;3mitalic/); // italic uses the narration color
+    expect(output).toMatch(/\x1b\[0;38;5;120;9mgone/);
     expect(output).toMatch(/\x1b\[0;38;5;117mcode/);
   });
 
   it('keeps a span going across words', async () => {
     const output = await render(skinnyai, '*italic narration spanning words* then plain');
     expect(stripAnsi(output)).toBe('italic narration spanning words then plain');
-    expect(output).toMatch(/3mitalic narration spanning words\x1b\[0;38;5;83m then/);
+    expect(output).toMatch(/3mitalic narration spanning words\x1b\[0;38;5;120m then/);
   });
 
   it('leaves snake_case, a lone asterisk, and escaped markers literal', async () => {
     const output = await render(skinnyai, 'snake_case_name and 5 * 3 = 15 and \\*not italic\\*');
     expect(stripAnsi(output)).toBe('snake_case_name and 5 * 3 = 15 and *not italic*');
     expect(output).not.toMatch(/;3m/);
+  });
+
+  it('turns common LaTeX in $...$ into Unicode and leaves prices, unclosed $, and unknown commands alone', async () => {
+    const output = await render(skinnyai, 'Go $\\to$ there, $\\alpha \\times 2$ $USD $x$, $\\text{km}/\\mathrm{h}$, $\\frac{a}{b}$. $5, \\$7.');
+    expect(stripAnsi(output)).toBe('Go → there, α × 2 $USD x, km/h, \\frac{a}{b}. $5, $7.');
   });
 
   it('treats __dunder__ as bold, like CommonMark', async () => {
@@ -50,7 +55,7 @@ describe('inline styles', () => {
 
   it("doesn't let an unclosed marker bleed into the next line", async () => {
     const output = await render(skinnyai, '*unclosed\nnext line');
-    expect(output).toMatch(/\n\x1b\[0;38;5;83mnext line/);
+    expect(output).toMatch(/\n\x1b\[0;38;5;120mnext line/);
   });
 });
 
@@ -101,11 +106,12 @@ describe('blocks', () => {
     expect(lines).toEqual(['before', '', '─'.repeat(60), '', 'after']);
   });
 
-  it('shows fenced code unwrapped and unstyled, with the fences dimmed', async () => {
+  it('shows fenced code unwrapped on a full-width background, hiding the fences', async () => {
     const code = '```python\ndef hello():\n    print("hi *not italic*")\n```\nDone.';
     const output = await render(skinnyai, code);
-    expect(stripAnsi(output)).toBe(code);
-    expect(output).toMatch(/\x1b\[38;5;117m {4}print\("hi \*not italic\*"\)/);
+    expect(stripAnsi(output)).toBe(' python\ndef hello():\n    print("hi *not italic*")\n\nDone.');
+    expect(output).toMatch(/\x1b\[48;5;236m\x1b\[38;5;117m {4}print\("hi \*not italic\*"\)\x1b\[K\x1b\[0m\n/);
+    expect(output).toMatch(/\x1b\[48;5;236m\x1b\[38;5;244m python\x1b\[K\x1b\[0m\n/);
   });
 
   it('wraps plain text at word boundaries', async () => {
@@ -127,7 +133,7 @@ describe('links', () => {
     const output = await render(skinnyai, 'See [the Node docs](https://nodejs.org/api/). Done.');
     expect(stripAnsi(output)).toBe('See the Node docs. Done.');
     for (const word of ['the', 'Node', 'docs']) {
-      expect(output).toContain(`\x1b]8;;https://nodejs.org/api/\x1b\\\x1b[0;38;5;83;4m${word}\x1b]8;;\x1b\\`);
+      expect(output).toContain(`\x1b]8;;https://nodejs.org/api/\x1b\\\x1b[0;38;5;120;4m${word}\x1b]8;;\x1b\\`);
     }
   });
 

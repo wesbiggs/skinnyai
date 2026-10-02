@@ -26,7 +26,7 @@ describe('graphemeWidth', () => {
   });
 
   it('ignores SGR and hyperlink escape sequences', () => {
-    expect(skinnyai.visibleWidth('\x1b[0;38;5;83;1mbold\x1b[0m \x1b]8;;https://x\x1b\\link\x1b]8;;\x1b\\')).toBe(9);
+    expect(skinnyai.visibleWidth('\x1b[0;38;5;120;1mbold\x1b[0m \x1b]8;;https://x\x1b\\link\x1b]8;;\x1b\\')).toBe(9);
   });
 });
 
@@ -63,7 +63,7 @@ describe('tables', () => {
       '│      │        │                                                                      when narrow │',
       '└──────┴────────┴──────────────────────────────────────────────────────────────────────────────────┘'
     ]);
-    expect(output).toMatch(/\x1b\[0;38;5;83;1mName/);
+    expect(output).toMatch(/\x1b\[0;38;5;120;1mName/);
   });
 
   it('shrinks the widest column to fit the terminal, wrapping its cells', async () => {
@@ -84,7 +84,7 @@ describe('tables', () => {
     const { output } = await screen('|a|b|\n|-|-|\n|**header-ish long bold text that wraps**|x|', 30);
     const lines = output.split('\n');
     const continuation = lines.find((line) => stripAnsi(line).includes('text that wraps'));
-    expect(continuation).toMatch(/\x1b\[0;38;5;83;1mtext that wraps/);
+    expect(continuation).toMatch(/\x1b\[0;38;5;120;1mtext that wraps/);
   });
 
   it('lines up borders in rows with emoji', async () => {
@@ -120,7 +120,7 @@ describe('tables', () => {
       '│           │        │                │ hardware tuning              │                   │',
       '└───────────┴────────┴────────────────┴──────────────────────────────┴───────────────────┘'
     ]);
-    expect(output).toMatch(/\x1b\[0;38;5;83;1mTool/);
+    expect(output).toMatch(/\x1b\[0;38;5;120;1mTool/);
   });
 
   it('shows a progress placeholder while rows arrive, then overwrites it', async () => {

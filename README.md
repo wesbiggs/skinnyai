@@ -265,7 +265,7 @@ Each turn is sent via Ollama's `/api/chat` endpoint with the full message histor
 - **Markdown**: responses (and your own messages) are rendered as they stream, with no third-party library:
   - `**bold**`, `*italic*` / `_italic_`, `~~strikethrough~~`, and `` `inline code` `` use ANSI styles. Underscores inside words (`snake_case`) and a lone `*` surrounded by spaces (`5 * 3`) stay literal, and `\*` escapes a marker.
   - `# Headings` are bold; `- ` / `* ` / `+ ` bullets become `•` (or `◦` when indented); numbered lists (`1.` / `1)`) and bullets get a hanging indent so wrapped lines line up with the item text.
-  - `> quotes` get a `│` bar, `---` becomes a full-width rule, and fenced code blocks are shown in a code color, unwrapped, so they copy cleanly.
+  - `> quotes` get a `│` bar, `---` becomes a full-width rule, and fenced code blocks are shown in a code color on a dark grey bar spanning the window width (the ``` lines become the bar, keeping any language name), unwrapped, so they copy cleanly.
   - `[links](https://...)` become clickable [OSC 8 hyperlinks](https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda) (underlined) in terminals that support them — iTerm2, WezTerm, kitty, GNOME Terminal, Windows Terminal, and others; elsewhere you just see the link text.
   - `![images](https://...)` show as a clickable `🖼️ caption`. With `--images` (or `/set images`), terminals with an inline image protocol — iTerm2 and WezTerm (the protocol `imgcat` uses), kitty and Ghostty (kitty's graphics protocol; PNG only) — also draw the image below the line that mentions it, scaled to fit. It's off by default because it downloads whatever image URL the model writes: a prompt injection (say, in a page `fetch_page` read) could smuggle conversation details out in that URL. Like `fetch_page`, it refuses local/private network addresses (unless the host is listed in `SKINNY_TRUSTED_HOSTS`, e.g. `"SKINNY_TRUSTED_HOSTS": "mfluxible.test"` in a profile's `env`; a comma-separated list, each entry covering its subdomains) and caps the download size. Inside tmux or screen, which don't pass image sequences through, images stay links. A local file works too — `![](/Users/me/pic.png)`, `~/pic.png`, or a `file://` URL (written with `%20` for spaces) — and nothing is fetched or sent for it, so that's how to see images a tool such as an image generator saved on your machine.
   - Tables are drawn with box-drawing borders, honoring `:---:` / `---:` alignment. Columns shrink to fit the terminal, wrapping cell text as needed. Emoji (✅, ⚠️, flags, 👩‍💻) are measured as the two columns terminals draw them in, so they don't push borders out of line. Since column widths depend on every row, a table is drawn once it's complete; until then a `⋯ receiving table (N rows)` placeholder shows progress.
@@ -284,8 +284,8 @@ Override any of the four colors on the command line:
 |------|---------|---------|
 | `--user-normal-color` | `226` (bright yellow) | Your dialogue |
 | `--user-italic-color` | `136` (dim yellow) | Your `*italic*` / narration |
-| `--model-normal-color` | `83` (bright green) | Model dialogue |
-| `--model-italic-color` | `28` (dim green) | Model `*italic*` / narration |
+| `--model-normal-color` | `120` (bright green) | Model dialogue |
+| `--model-italic-color` | `77` (medium green) | Model `*italic*` / narration |
 
 (`--user-emphasis-color` and `--model-emphasis-color` still work as aliases for the italic flags.) Each accepts a hex code (`#RRGGBB`), a 256-color palette index (`0`-`255`), or a basic name (`red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `black`, a `bright`-prefixed variant like `brightgreen`, or `gray`/`grey`):
 
