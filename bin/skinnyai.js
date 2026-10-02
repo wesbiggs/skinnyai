@@ -51,7 +51,7 @@ function loadConfigFile(file) {
   try {
     json = JSON.parse(text);
   } catch (error) {
-    throw new Error(`${file} isn't valid JSON: ${error.message}`);
+    throw new Error(`${file} isn't valid JSON: ${error.message}`, { cause: error });
   }
   if (!json || typeof json.profiles !== 'object' || json.profiles === null || Array.isArray(json.profiles)) {
     throw new Error(`${file} has no "profiles" object`);
@@ -563,7 +563,7 @@ async function fetchPage({ url }) {
   try {
     target = new URL(url);
   } catch (e) {
-    throw new Error(`not a valid URL: ${url}`);
+    throw new Error(`not a valid URL: ${url}`, { cause: e });
   }
   if (target.protocol !== 'http:' && target.protocol !== 'https:') {
     throw new Error(`only http and https URLs can be fetched (got ${target.protocol})`);
@@ -1135,7 +1135,6 @@ function createInlineStyler(role) {
       }
 
       if (ch === '$') {
-        const prev = chars[i - 1];
         const next = chars[i + run];
         // A closing $ needs a non-space before it and no digit after it. An
         // opening $ is only taken when the span is surely math, since it can't
@@ -2146,7 +2145,7 @@ function parseModelfile(text) {
     let args = match[2];
     let role = '';
     if (instruction === 'MESSAGE') {
-      [, role, args] = /^(\S+)\s*(.*)$/.exec(args) || [, '', ''];
+      [, role, args] = /^(\S+)\s*(.*)$/.exec(args) || ['', '', ''];
     }
 
     // A value is either the rest of the line (optionally "quoted") or a
@@ -2411,7 +2410,10 @@ class OllamaChat {
     return messages.map((m) => {
       if (m.role !== 'tool') return this.wireMessage(m);
       if (this.api === 'anthropic') return m;
-      const { images, parts, ...text } = m;
+      const text = { ...m };
+      delete text.images;
+      delete text.parts;
+      const { parts } = m;
       if (!parts) return text;
       const url = (p) => `data:${p.mime};base64,${p.data}`;
       if (this.api === 'openai') {
@@ -3913,7 +3915,7 @@ class OllamaChat {
       // Any kind of file counts when it came in as a paste, since that's what
       // a drop is; typed text only attaches images.
       const attachImages = (pasted) => {
-        if (!/[\/]/.test(buffer)) return;
+        if (!buffer.includes('/')) return;
         const found = extractAttachments(buffer, { complete: false, allowEnd: pasted, anyFile: pasted });
         if (found.attachments.length === 0) return;
         const atEnd = cursor >= buffer.length;

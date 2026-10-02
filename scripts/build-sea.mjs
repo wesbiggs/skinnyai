@@ -22,6 +22,7 @@ await build({
   entryPoints: [path.join(root, 'build/sea-entry.js')],
   outfile: bundle,
   bundle: true,
+  minify: true,
   platform: 'node',
   format: 'cjs',
   target: 'node22',
