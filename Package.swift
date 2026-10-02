@@ -8,14 +8,15 @@ let package = Package(
     name: "SkinnyAI",
     platforms: [.macOS(.v13)],
     dependencies: [
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.2.0"),
+        // git main for the wide-character reflow fix; switch back to `from:` once a release includes it.
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", branch: "main"),
     ],
     targets: [
         .executableTarget(
             name: "SkinnyAI",
             dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")],
             path: "macos",
-            exclude: ["Info.plist", "entitlements.plist", "AppIcon.icns", "patches"]
+            exclude: ["Info.plist", "entitlements.plist", "AppIcon.icns"]
         ),
     ]
 )
