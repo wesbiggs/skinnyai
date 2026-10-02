@@ -1,0 +1,52 @@
+{
+  "profiles": {
+    "Default": {
+      "env": {
+        "SKINNY_API": "ollama",
+        "SKINNY_HOST": "http://localhost:11434",
+        "SKINNY_MODEL": "gemma4:31b",
+        "SKINNY_KEEP_ALIVE": "1h",
+        "SKINNY_TOOLS": true,
+        "SKINNY_MARKDOWN": true,
+        "SKINNY_AUTOSAVE": false
+      },
+      "mcpServers": {
+        "files": {
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/notes"],
+          "disabled": true
+        }
+      }
+    },
+    "Ollama Cloud": {
+      "env": {
+        "SKINNY_HOST": "https://ollama.com",
+        "SKINNY_MODEL": "gpt-oss:120b-cloud",
+        "OLLAMA_API_KEY": "your-ollama-api-key"
+      }
+    },
+    "OpenAI": {
+      "env": {
+        "SKINNY_API": "openai",
+        "SKINNY_HOST": "https://api.openai.com",
+        "SKINNY_MODEL": "default",
+        "OPENAI_API_KEY": "sk-..."
+      }
+    },
+    "Anthropic": {
+      "env": {
+        "SKINNY_API": "anthropic",
+        "SKINNY_HOST": "https://api.anthropic.com",
+        "SKINNY_MODEL": "default",
+        "ANTHROPIC_API_KEY": "sk-ant-..."
+      }
+    },
+    "LM Studio": {
+      "env": {
+        "SKINNY_API": "openai",
+        "SKINNY_HOST": "http://localhost:1234",
+        "SKINNY_MODEL": "your-model-name"
+      }
+    }
+  }
+}

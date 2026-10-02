@@ -1,11 +1,12 @@
 // SkinnyAI.app: a thin native shell around the bundled `skinnyai` binary.
 // It runs chats in its own terminal windows (SwiftTerm), or in Terminal.app /
 // iTerm2 if preferred, and provides a Settings window (Cmd-,) that edits
-// ~/.skinny/.env.
+// ~/.skinny/config.json.
 
 import AppKit
 import SwiftTerm
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Paths
 
@@ -15,82 +16,100 @@ let homeDirectory: URL = {
     }
     return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".skinny")
 }()
-let envFileURL = homeDirectory.appendingPathComponent(".env")
+let configFileURL = homeDirectory.appendingPathComponent("config.json")
 let sessionsURL = homeDirectory.appendingPathComponent("sessions")
 /// The running chat's process id, written by the launcher script (which then execs the chat, keeping the pid).
 let chatPidURL = homeDirectory.appendingPathComponent("app-chat.pid")
 
-// MARK: - .env file
-// Edits keep comments, blank lines, and variables this app doesn't know about.
-// Parsing and quoting mirror loadEnvFile() in bin/skinnyai.js.
+// MARK: - config.json
+// Named profiles, each with an "env" block (the variables the program reads) and optional "mcpServers".
+// Every other profile inherits from Default, as in bin/skinnyai.js (resolveProfile). Anything this app
+// doesn't manage (other variables, MCP servers, other top-level keys) is kept as it was.
 
-struct EnvFile {
-    private(set) var lines: [String]
-    private static let assignment = try! NSRegularExpression(pattern: #"^\s*(?:export\s+)?([A-Za-z_]\w*)\s*=\s*(.*?)\s*$"#)
+struct ConfigFile {
+    static let defaultName = "Default"
+    private(set) var root: [String: Any]
 
-    init(contentsOf url: URL) {
-        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        var parsed = text.components(separatedBy: CharacterSet.newlines).map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\r")) }
-        if parsed.last == "" { parsed.removeLast() }
-        lines = parsed
-    }
-
-    private static func parse(_ line: String) -> (key: String, value: String)? {
-        let range = NSRange(line.startIndex..., in: line)
-        guard let match = assignment.firstMatch(in: line, range: range),
-              let keyRange = Range(match.range(at: 1), in: line),
-              let valueRange = Range(match.range(at: 2), in: line) else { return nil }
-        var value = String(line[valueRange])
-        if value.count >= 2, let first = value.first, first == "\"" || first == "'", value.last == first {
-            let inner = String(value.dropFirst().dropLast())
-            value = first == "\""
-                ? inner.replacingOccurrences(of: "\\n", with: "\n")
-                       .replacingOccurrences(of: "\\\"", with: "\"")
-                       .replacingOccurrences(of: "\\\\", with: "\\")
-                : inner
-        } else if let comment = value.range(of: #"\s+#.*$"#, options: .regularExpression) {
-            value.removeSubrange(comment)
-        }
-        return (String(line[keyRange]), value)
-    }
-
-    func value(_ key: String) -> String? {
-        var found: String?
-        for line in lines { if let (k, v) = Self.parse(line), k == key { found = v } } // last one wins, as in the loader
-        return found
-    }
-
-    private static func encode(_ value: String) -> String {
-        if value.range(of: #"^[\w./:@%+,=~#-]*$"#, options: .regularExpression) != nil { return value }
-        let escaped = value.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: "\\n")
-        return "\"\(escaped)\""
-    }
-
-    /// Sets `key` (replacing its existing line, or appending), or removes it when `value` is nil or empty.
-    mutating func set(_ key: String, _ value: String?) {
-        let indexes = lines.indices.filter { Self.parse(lines[$0])?.key == key }
-        guard let value, !value.isEmpty else {
-            for index in indexes.reversed() { lines.remove(at: index) }
+    init() {
+        if let data = try? Data(contentsOf: configFileURL),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           object["profiles"] is [String: Any] {
+            root = object
             return
         }
-        let line = "\(key)=\(Self.encode(value))"
-        if let first = indexes.first {
-            lines[first] = line
-            for index in indexes.dropFirst().reversed() { lines.remove(at: index) }
-        } else {
-            lines.append(line)
-        }
+        root = ["profiles": [Self.defaultName: ["env": [String: String]()]]]
     }
 
-    func write(to url: URL) throws {
-        let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let text = lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")
-        try text.write(to: url, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path) // it may hold an API key
+    private var profiles: [String: Any] { root["profiles"] as? [String: Any] ?? [:] }
+
+    /// Default first, then the rest alphabetically.
+    var profileNames: [String] {
+        let others = profiles.keys.filter { $0 != Self.defaultName }.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        return [Self.defaultName] + others
     }
+
+    func has(_ name: String) -> Bool { name == Self.defaultName || profiles[name] != nil }
+
+    private static func text(_ value: Any) -> String? {
+        if value is NSNull { return nil }
+        if let number = value as? NSNumber {
+            return CFGetTypeID(number) == CFBooleanGetTypeID() ? (number.boolValue ? "true" : "false") : number.stringValue
+        }
+        return value as? String
+    }
+
+    /// The variables a profile sets itself.
+    func ownEnv(_ name: String) -> [String: String] {
+        let block = (profiles[name] as? [String: Any])?["env"] as? [String: Any] ?? [:]
+        return block.compactMapValues { Self.text($0) }
+    }
+
+    /// What a chat using the profile sees: its variables over Default's.
+    func effectiveEnv(_ name: String) -> [String: String] {
+        name == Self.defaultName ? ownEnv(name) : ownEnv(Self.defaultName).merging(ownEnv(name)) { _, own in own }
+    }
+
+    /// Sets `managed` variables in a profile (creating it): an empty value means "unset". A non-Default
+    /// profile only stores what differs from Default's, and an empty string where Default has a value.
+    mutating func save(profile name: String, values: [String: String], managed: [String]) {
+        var own = (profiles[name] as? [String: Any])?["env"] as? [String: Any] ?? [:]
+        let base = name == Self.defaultName ? [:] : effectiveEnv(Self.defaultName)
+        for key in managed {
+            let value = values[key] ?? ""
+            if value == (base[key] ?? "") { own[key] = nil } else { own[key] = value }
+        }
+        var all = profiles
+        var block = all[name] as? [String: Any] ?? [:]
+        block["env"] = own
+        all[name] = block
+        root["profiles"] = all
+    }
+
+    func write() throws {
+        try FileManager.default.createDirectory(at: homeDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        try (data + Data("\n".utf8)).write(to: configFileURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configFileURL.path) // it may hold API keys
+    }
+}
+
+/// "Ollama, gemma4:31b": the protocol and model a profile connects with.
+func profileSummary(_ name: String) -> String {
+    let env = ConfigFile().effectiveEnv(name)
+    let protocolName: String
+    switch env["SKINNY_API"] ?? "" {
+    case "anthropic": protocolName = "Anthropic"
+    case "openai": protocolName = "OpenAI"
+    default: protocolName = "Ollama"
+    }
+    let model = env["SKINNY_MODEL"] ?? ""
+    return model.isEmpty ? "\(protocolName), no model chosen" : "\(protocolName), \(model)"
+}
+
+/// The profile chats started from this app use, if it still exists.
+func activeProfileName() -> String {
+    let saved = UserDefaults.standard.string(forKey: "profile") ?? ConfigFile.defaultName
+    return ConfigFile().has(saved) ? saved : ConfigFile.defaultName
 }
 
 // MARK: - Settings model
@@ -152,6 +171,8 @@ final class SettingsModel: ObservableObject {
     @Published var fontSize = Double(currentFontSize())
     @Published var terminal = UserDefaults.standard.string(forKey: "chatIn") ?? "builtin"
     @Published var message: String?
+    /// A confirmation shown where the hint usually is, e.g. after "Save to Profile".
+    @Published var savedNote: String?
     @Published var availableModels: [String] = []
     @Published var modelsStatus: String?
     @Published var loadingModels = false
@@ -193,28 +214,46 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    private var env = EnvFile(contentsOf: envFileURL)
+    private var config = ConfigFile()
+    /// The profile being edited (chats use it too once saved).
+    @Published var profile = ConfigFile.defaultName
+    @Published var profileNames = [ConfigFile.defaultName]
 
     init() { load() }
 
     func load() {
+        config = ConfigFile()
+        profileNames = config.profileNames
+        profile = activeProfileName()
+        loadFields()
+    }
+
+    /// Switches the form to another profile's settings (unsaved edits are dropped).
+    func select(profile name: String) {
+        guard config.has(name) else { return }
+        profile = name
+        message = nil
+        loadFields()
+    }
+
+    private func loadFields() {
         loading = true
         defer { loading = false }
+        let env = config.effectiveEnv(profile)
         fontSize = Double(currentFontSize())
-        env = EnvFile(contentsOf: envFileURL)
-        apiKey = env.value("OLLAMA_API_KEY") ?? ""
-        anthropicKey = env.value("ANTHROPIC_API_KEY") ?? ""
-        openaiKey = env.value("OPENAI_API_KEY") ?? ""
-        let savedAPI = env.value("SKINNY_API") ?? ""
-        let savedHost = env.value("SKINNY_HOST")
+        apiKey = env["OLLAMA_API_KEY"] ?? ""
+        anthropicKey = env["ANTHROPIC_API_KEY"] ?? ""
+        openaiKey = env["OPENAI_API_KEY"] ?? ""
+        let savedAPI = env["SKINNY_API"] ?? ""
+        let savedHost = env["SKINNY_HOST"]
         let savedProgramAPI = ["openai", "anthropic"].contains(savedAPI) ? savedAPI : "ollama"
         let effectiveHost = savedHost ?? SettingsModel.programHost(for: savedProgramAPI)
         provider = SettingsModel.provider(api: savedProgramAPI, host: effectiveHost)
         host = effectiveHost
-        model = env.value("SKINNY_MODEL") ?? ""
-        keepAlive = env.value("SKINNY_KEEP_ALIVE") ?? ""
+        model = env["SKINNY_MODEL"] ?? ""
+        keepAlive = env["SKINNY_KEEP_ALIVE"] ?? ""
         for setting in boolSettings {
-            flags[setting.key] = parseBool(env.value(setting.key)) ?? setting.defaultValue
+            flags[setting.key] = parseBool(env[setting.key]) ?? setting.defaultValue
         }
         refreshModels()
     }
@@ -305,36 +344,62 @@ final class SettingsModel: ObservableObject {
         }.resume()
     }
 
-    var isConfigured: Bool { !(EnvFile(contentsOf: envFileURL).value("SKINNY_MODEL") ?? "").isEmpty }
+    var isConfigured: Bool {
+        let file = ConfigFile()
+        let name = file.has(activeProfileName()) ? activeProfileName() : ConfigFile.defaultName
+        return !(file.effectiveEnv(name)["SKINNY_MODEL"] ?? "").isEmpty
+    }
 
+    /// Writes the form into the profile `name` (creating it), and makes it the one chats use.
     /// Returns true when saved.
-    func save() -> Bool {
-        env = EnvFile(contentsOf: envFileURL) // pick up edits made outside the app
-        env.set("OLLAMA_API_KEY", apiKey.trimmingCharacters(in: .whitespaces))
-        env.set("ANTHROPIC_API_KEY", anthropicKey.trimmingCharacters(in: .whitespaces))
-        env.set("OPENAI_API_KEY", openaiKey.trimmingCharacters(in: .whitespaces))
-        // An address the program would use anyway isn't written out.
+    private func store(in name: String) -> Bool {
+        config = ConfigFile() // pick up edits made outside the app
+        let existing = config.effectiveEnv(name)
         let typedHost = host.trimmingCharacters(in: .whitespaces)
-        env.set("SKINNY_HOST", typedHost == SettingsModel.programHost(for: api) ? nil : typedHost)
-        env.set("SKINNY_API", api == "ollama" ? nil : api)
-        env.set("SKINNY_MODEL", model.trimmingCharacters(in: .whitespaces))
-        env.set("SKINNY_KEEP_ALIVE", keepAlive.trimmingCharacters(in: .whitespaces))
+        var values: [String: String] = [
+            "OLLAMA_API_KEY": apiKey.trimmingCharacters(in: .whitespaces),
+            "ANTHROPIC_API_KEY": anthropicKey.trimmingCharacters(in: .whitespaces),
+            "OPENAI_API_KEY": openaiKey.trimmingCharacters(in: .whitespaces),
+            // An address the program would use anyway isn't written out.
+            "SKINNY_HOST": typedHost == SettingsModel.programHost(for: api) ? "" : typedHost,
+            "SKINNY_API": api == "ollama" ? "" : api,
+            "SKINNY_MODEL": model.trimmingCharacters(in: .whitespaces),
+            "SKINNY_KEEP_ALIVE": keepAlive.trimmingCharacters(in: .whitespaces),
+        ]
         for setting in boolSettings {
             let value = flags[setting.key] ?? setting.defaultValue
             // Leave variables alone when the program would already do this without them.
-            if value == setting.defaultValue && env.value(setting.key) == nil { continue }
-            env.set(setting.key, value ? "true" : "false")
+            let skip = value == setting.defaultValue && existing[setting.key] == nil
+            values[setting.key] = skip ? "" : (value ? "true" : "false")
         }
+        config.save(profile: name, values: values, managed: Array(values.keys))
         UserDefaults.standard.set(terminal, forKey: "chatIn")
+        UserDefaults.standard.set(name, forKey: "profile")
         setFontSize(CGFloat(fontSize))
         do {
-            try env.write(to: envFileURL)
+            try config.write()
+            profileNames = config.profileNames
+            profile = name
             message = nil
             return true
         } catch {
             message = "Couldn't save: \(error.localizedDescription)"
             return false
         }
+    }
+
+    /// Saves the form over the selected profile.
+    func save() -> Bool { store(in: profile) }
+
+    /// Saves the form as a new profile and switches to it. Returns false (with a message) if the name won't do.
+    func createProfile(named raw: String) -> Bool {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { return false }
+        if ConfigFile().profileNames.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
+            message = "A profile named \(name) already exists."
+            return false
+        }
+        return store(in: name)
     }
 }
 
@@ -379,6 +444,19 @@ struct SettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             Form {
+                Section("Profile") {
+                    Picker("Profile", selection: Binding(get: { model.profile }, set: { model.select(profile: $0) })) {
+                        ForEach(model.profileNames, id: \.self) { Text($0).tag($0) }
+                    }
+                    HStack {
+                        Button("Save to Profile") { if model.save() { model.message = nil; model.savedNote = "Saved to \(model.profile)." } }
+                            .help("Overwrite this profile with the settings below")
+                        Button("New Profile…") {
+                            if let name = promptForProfileName(), model.createProfile(named: name) { model.savedNote = "Created \(name)." }
+                        }
+                        .help("Save the settings below as a new profile")
+                    }
+                }
                 Section("Connection") {
                     Picker("Provider", selection: $model.provider) {
                         Text("Ollama (Self-Hosted)").tag("ollama-local")
@@ -433,7 +511,7 @@ struct SettingsView: View {
                         Text("Font size: \(Int(model.fontSize)) pt")
                     }
                     HStack {
-                        Button("Open .env in Editor") { NSWorkspace.shared.open(ensureEnvFile()) }
+                        Button("Open config.json in Editor") { NSWorkspace.shared.open(ensureConfigFile()) }
                         Button("Show Saved Chats") {
                             try? FileManager.default.createDirectory(at: sessionsURL, withIntermediateDirectories: true)
                             NSWorkspace.shared.open(sessionsURL)
@@ -452,7 +530,7 @@ struct SettingsView: View {
                 if let message = model.message {
                     Text(message).foregroundStyle(.red).font(.caption)
                 } else {
-                    Text("Changes apply to chats you start afterwards.").font(.caption).foregroundStyle(.secondary)
+                    Text(model.savedNote ?? "Changes apply to chats you start afterwards, using the \(model.profile) profile.").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
@@ -466,11 +544,71 @@ struct SettingsView: View {
     }
 }
 
-func ensureEnvFile() -> URL {
-    if !FileManager.default.fileExists(atPath: envFileURL.path) {
-        try? EnvFile(contentsOf: envFileURL).write(to: envFileURL)
+/// The first window: pick a profile (the last one used is pre-selected), then start a chat, open a saved one,
+/// or adjust settings.
+struct StartView: View {
+    let names: [String]
+    let summaries: [String: String]
+    @State var selected: String
+    var onNewChat: (String) -> Void
+    var onOpenChat: (String) -> Void
+    var onSettings: (String) -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 64, height: 64)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Picker("Profile", selection: $selected) {
+                        ForEach(names, id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
+                    Button("New Chat") { onNewChat(selected) }
+                        .keyboardShortcut(.defaultAction)
+                }
+                Text(summaries[selected] ?? "").font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Settings...") { onSettings(selected) }
+                    Button("Open Chat...") { onOpenChat(selected) }
+                }
+                .padding(.top, 4)
+            }
+        }
+        .padding(24)
+        .frame(width: 440)
     }
-    return envFileURL
+}
+
+func ensureConfigFile() -> URL {
+    if !FileManager.default.fileExists(atPath: configFileURL.path) {
+        try? ConfigFile().write()
+    }
+    return configFileURL
+}
+
+/// Asks for a line of text in a small dialog; nil if cancelled or left empty.
+func promptForText(title: String, detail: String, placeholder: String, initial: String = "", button: String) -> String? {
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = detail
+    let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+    field.placeholderString = placeholder
+    field.stringValue = initial
+    alert.accessoryView = field
+    alert.addButton(withTitle: button)
+    alert.addButton(withTitle: "Cancel")
+    alert.window.initialFirstResponder = field
+    guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+    let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    return text.isEmpty ? nil : text
+}
+
+/// Asks for the name of a new profile; nil if cancelled.
+func promptForProfileName() -> String? {
+    promptForText(title: "New profile", detail: "The current settings are saved under this name.", placeholder: "e.g. Work", button: "Create")
 }
 
 // MARK: - Launching chats
@@ -545,9 +683,11 @@ final class ChatWindow: NSObject, NSWindowDelegate, LocalProcessTerminalViewDele
     let window: NSWindow
     private let terminal: ChatTerminalView
     private var finished = false
+    /// The name the chat is saved under, as announced by the program in the window title.
+    var savedName: String?
     var onClose: ((ChatWindow) -> Void)?
 
-    init(binary: String, cascadeFrom previous: NSWindow?) {
+    init(binary: String, arguments: [String] = [], cascadeFrom previous: NSWindow?) {
         terminal = ChatTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 620))
         terminal.registerForDraggedTypes([.fileURL])
         terminal.font = NSFont.monospacedSystemFont(ofSize: currentFontSize(), weight: .regular)
@@ -581,13 +721,19 @@ final class ChatWindow: NSObject, NSWindowDelegate, LocalProcessTerminalViewDele
         environment["TERM"] = "xterm-256color"
         environment["COLORTERM"] = "truecolor"
         environment["TERM_PROGRAM"] = "SkinnyAI" // skinnyai draws inline images for this terminal
-        terminal.startProcess(executable: binary, args: [],
+        terminal.startProcess(executable: binary, args: arguments,
                               environment: environment.map { "\($0.key)=\($0.value)" },
                               currentDirectory: FileManager.default.homeDirectoryForCurrentUser.path)
     }
 
     func applyFontSize() {
         terminal.font = NSFont.monospacedSystemFont(ofSize: currentFontSize(), weight: .regular)
+    }
+
+    /// Types a line into the chat, as if the user had entered it.
+    func submit(_ line: String) {
+        terminal.send(txt: line.replacingOccurrences(of: "\n", with: " ") + "\r")
+        window.makeFirstResponder(terminal)
     }
 
     func show() {
@@ -606,15 +752,24 @@ final class ChatWindow: NSObject, NSWindowDelegate, LocalProcessTerminalViewDele
         if exitCode == 0 || exitCode == nil { window.close() } else { window.title = "SkinnyAI (exited with code \(exitCode ?? -1))" }
     }
 
-    func setTerminalTitle(source: LocalProcessTerminalView, title: String) { window.title = title.isEmpty ? "SkinnyAI" : title }
+    func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
+        window.title = title.isEmpty ? "SkinnyAI" : title
+        // skinnyai titles the window "SkinnyAI: <name>" once the chat has a saved-session name. A name it
+        // gave itself (autosave) doesn't count: Save should still ask.
+        let prefix = "SkinnyAI: "
+        let name = title.hasPrefix(prefix) ? String(title.dropFirst(prefix.count)) : nil
+        let isAutosaveName = name?.range(of: #"^chat-\d{4}-\d{2}-\d{2}-\d{6}(-\d+)?$"#, options: .regularExpression) != nil
+        savedName = isAutosaveName ? nil : name
+    }
     func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 }
 
 var chatWindows: [ChatWindow] = []
 
-func openChatWindow(binary: URL) {
-    let chat = ChatWindow(binary: binary.path, cascadeFrom: chatWindows.last?.window)
+func openChatWindow(binary: URL, arguments: [String] = [], savedName: String? = nil) {
+    let chat = ChatWindow(binary: binary.path, arguments: arguments, cascadeFrom: chatWindows.last?.window)
+    chat.savedName = savedName
     chat.onClose = { closed in chatWindows.removeAll { $0 === closed } }
     chatWindows.append(chat)
     NSApp.activate(ignoringOtherApps: true)
@@ -623,7 +778,10 @@ func openChatWindow(binary: URL) {
 
 /// Opens a new terminal window running skinnyai. A .command file does this
 /// without the Automation permission prompt that scripting the terminal would need.
-func startChat() {
+func startChat(session: String? = nil) {
+    // Chats use the profile picked in Settings (Default needs no flag).
+    let profile = activeProfileName()
+    let profileArgs = (profile == ConfigFile.defaultName ? [] : ["--profile", profile]) + (session.map { [$0] } ?? [])
     guard let binary = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("skinnyai-cli"),
           FileManager.default.isExecutableFile(atPath: binary.path) else {
         alert("The skinnyai program is missing from this app.")
@@ -631,7 +789,7 @@ func startChat() {
     }
     let preference = UserDefaults.standard.string(forKey: "chatIn") ?? "builtin"
     if preference == "builtin" {
-        openChatWindow(binary: URL(fileURLWithPath: binary.path))
+        openChatWindow(binary: URL(fileURLWithPath: binary.path), arguments: profileArgs, savedName: session)
         return
     }
     guard let app = terminalApp(preference: preference) else {
@@ -643,7 +801,7 @@ func startChat() {
     // The exec below keeps this shell's pid, so the app can tell whether this chat is still open.
     body += "mkdir -p \(shellQuote(homeDirectory.path)) && echo $$ > \(shellQuote(chatPidURL.path))\n"
     if let custom = ProcessInfo.processInfo.environment["SKINNY_HOME"], !custom.isEmpty { body += "export SKINNY_HOME=\(shellQuote(custom))\n" }
-    body += "exec \(shellQuote(binary.path))\n"
+    body += "exec \(([shellQuote(binary.path)] + profileArgs.map(shellQuote)).joined(separator: " "))\n"
     do {
         try body.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
@@ -693,6 +851,7 @@ func alert(_ text: String) {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
+    private var startWindow: NSWindow?
     private let settings = SettingsModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -711,7 +870,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         NSApp.activate(ignoringOtherApps: true)
-        openChat()
+        showStart()
+    }
+
+    /// The start screen, with the last-used profile selected.
+    private func showStart() {
+        if let existing = startWindow, existing.isVisible { existing.makeKeyAndOrderFront(nil); return }
+        let names = ConfigFile().profileNames
+        let view = StartView(
+            names: names,
+            summaries: Dictionary(uniqueKeysWithValues: names.map { ($0, profileSummary($0)) }),
+            selected: activeProfileName(),
+            onNewChat: { [weak self] name in
+                UserDefaults.standard.set(name, forKey: "profile")
+                self?.startWindow?.close()
+                self?.openChat()
+            },
+            onOpenChat: { [weak self] name in
+                UserDefaults.standard.set(name, forKey: "profile")
+                self?.openSavedChat(nil)
+            },
+            onSettings: { [weak self] name in
+                UserDefaults.standard.set(name, forKey: "profile")
+                self?.startWindow?.close()
+                self?.showSettings()
+            }
+        )
+        let window = NSWindow(contentViewController: NSHostingController(rootView: view))
+        window.title = "SkinnyAI"
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        window.center()
+        startWindow = window
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 
     /// Switches to the chat that's already open, or starts one.
@@ -723,14 +915,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Clicking the Dock icon again goes back to the open chat rather than starting another.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if settingsWindow?.isVisible == true { settingsWindow?.makeKeyAndOrderFront(nil) } else { openChat() }
+        if settingsWindow?.isVisible == true { settingsWindow?.makeKeyAndOrderFront(nil) }
+        else if chatIsRunning() { focusChat() }
+        else { showStart() }
         return false
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
-    @objc func newChat(_ sender: Any?) {
-        if settings.isConfigured { startChat() } else { showSettings() }
+    /// Lets the user pick a saved chat (from ~/.skinny/sessions) and resumes it.
+    @objc func openSavedChat(_ sender: Any?) {
+        guard settings.isConfigured else { showSettings(); return }
+        try? FileManager.default.createDirectory(at: sessionsURL, withIntermediateDirectories: true)
+        let panel = NSOpenPanel()
+        panel.title = "Open Chat"
+        panel.directoryURL = sessionsURL
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "Modelfile") ?? .data]
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard url.deletingLastPathComponent().standardizedFileURL == sessionsURL.standardizedFileURL else {
+            alert("Choose a chat saved in \(sessionsURL.path).")
+            return
+        }
+        startWindow?.close()
+        startChat(session: url.deletingPathExtension().lastPathComponent)
+    }
+
+    @objc func newChat(_ sender: Any?) { showStart() }
+
+    private var frontChat: ChatWindow? { chatWindows.first { $0.window === NSApp.keyWindow } }
+
+    /// Saves the front chat under its name, asking for one first if it has none.
+    @objc func saveChat(_ sender: Any?) {
+        guard let chat = frontChat else { return }
+        if chat.savedName != nil { chat.submit("/save") } else { saveChatAs(sender) }
+    }
+
+    /// Asks for a name and saves the front chat under it, like `/save <name>`.
+    @objc func saveChatAs(_ sender: Any?) {
+        guard let chat = frontChat,
+              let name = promptForText(title: "Save Chat", detail: "Name for the saved chat (resume it later with Open Chat…).",
+                                       placeholder: "e.g. trip-planning", initial: chat.savedName ?? "", button: "Save") else { return }
+        chat.submit("/save \(name)")
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(saveChat(_:)) || item.action == #selector(saveChatAs(_:)) { return frontChat != nil }
+        return true
     }
 
     @objc func showSettings(_ sender: Any? = nil) {
@@ -797,6 +1030,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let file = submenu("File")
         add("New Chat", file, #selector(newChat(_:)), "n", target: self)
+        add("Open Chat…", file, #selector(openSavedChat(_:)), "o", target: self)
+        file.addItem(.separator())
+        add("Save", file, #selector(saveChat(_:)), "s", target: self)
+        add("Save As…", file, #selector(saveChatAs(_:)), "S", target: self)
 
         let edit = submenu("Edit")
         add("Undo", edit, Selector(("undo:")), "z")

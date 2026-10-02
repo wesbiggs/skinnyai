@@ -24,9 +24,9 @@ describe.skipIf(!fs.existsSync(binary))('standalone binary', () => {
     });
   }
 
-  it('chats using defaults from $SKINNY_HOME/.env', async () => {
+  it('chats using defaults from $SKINNY_HOME/config.json', async () => {
     const home = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'skinnyai-sea-'));
-    fs.writeFileSync(path.join(home, '.env'), `SKINNY_MODEL=m\nSKINNY_API=openai\nSKINNY_HOST=${server.url}\n`);
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ profiles: { Default: { env: { SKINNY_MODEL: 'm', SKINNY_API: 'openai', SKINNY_HOST: server.url } } } }));
     const { stdout, code } = await run([], 'hello\n', { SKINNY_HOME: home });
     expect(code).toBe(0);
     expect(stdout).toContain('You said: **hello**');

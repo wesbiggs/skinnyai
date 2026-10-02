@@ -16,9 +16,9 @@ A terminal-based Node.js chat interface for Ollama and OpenAI-compatible endpoin
 - ✅ Ollama cloud models via `--host https://ollama.com` and `OLLAMA_API_KEY` — see [Ollama account](#ollama-account-cloud-models-and-hosted-search) — see [Tool calling and web search](#tool-calling-and-web-search)
 - ✅ Drag a file (image, PDF, or text) into the prompt, or `/attach` it — see [Attaching files](#attaching-files)
 - ✅ `--api anthropic` for Claude — see [Anthropic API](#anthropic-api)
-- ✅ MCP servers from a standard `mcp.json` — see [MCP servers](#mcp-servers)
+- ✅ MCP servers in the standard `mcpServers` format — see [MCP servers](#mcp-servers)
 - ✅ Session saving to local Modelfiles (works with any server), optional autosave, and `/share` to an Ollama server
-- ✅ Defaults in `~/.skinny/.env`
+- ✅ Defaults and named profiles in `~/.skinny/config.json` — see [Default settings](#default-settings-and-profiles-configjson)
 - ✅ Minimal dependencies (uses Node.js built-ins)
 
 ## Prerequisites
@@ -88,19 +88,24 @@ node bin/skinnyai.js \
   --host http://localhost:11434
 ```
 
-### Default settings (`.env`)
+### Default settings and profiles (`config.json`)
 
-Put defaults in `~/.skinny/.env` (or `$SKINNY_HOME/.env`) as `KEY=value` lines, so you don't have to repeat flags. Every flag has a variable:
+Put defaults in `~/.skinny/config.json` (or `$SKINNY_HOME/config.json`) so you don't have to repeat flags. The file holds named **profiles**; each has an `env` block of settings and, optionally, `mcpServers` (see [MCP servers](#mcp-servers)). [`config.json.example`](config.json.example) is a starter with profiles for each supported API — copy it to `~/.skinny/config.json` and edit:
 
-```bash
-# ~/.skinny/.env
-SKINNY_MODEL=gemma4:31b
-SKINNY_HOST=https://ollama.com
-OLLAMA_API_KEY=...
-SKINNY_TOOLS=true
-SKINNY_AUTOSAVE=true
-SKINNY_MODEL_NORMAL_COLOR=#ff8800
+```json
+{
+  "profiles": {
+    "Default": {
+      "env": { "SKINNY_MODEL": "gemma4:31b", "SKINNY_TOOLS": true, "SKINNY_AUTOSAVE": true }
+    },
+    "My Profile": {
+      "env": { "SKINNY_HOST": "https://ollama.com", "SKINNY_MODEL": "gpt-oss:120b-cloud", "OLLAMA_API_KEY": "..." }
+    }
+  }
+}
 ```
+
+The `Default` profile is the one used unless you pick another with `--profile "My Profile"` or `SKINNY_PROFILE="My Profile"` (names are matched ignoring case). Other profiles **inherit from Default**: they only need the settings that differ, and their `mcpServers` are added to Default's (a same-named server replaces it; `"disabled": true` turns one off). `/show settings` shows the active profile. Each variable maps to a flag:
 
 | Variable | Flag |
 |----------|------|
@@ -117,7 +122,7 @@ SKINNY_MODEL_NORMAL_COLOR=#ff8800
 | `SKINNY_STOP_ON_EXIT` | `--stop-on-exit` / `--no-stop-on-exit` |
 | `SKINNY_USER_NORMAL_COLOR`, `SKINNY_USER_ITALIC_COLOR`, `SKINNY_MODEL_NORMAL_COLOR`, `SKINNY_MODEL_ITALIC_COLOR` | the `--*-color` flags |
 
-On/off values accept `true`/`false`, `yes`/`no`, `on`/`off`, or `1`/`0`. Values can be quoted, lines can start with `export`, and `#` starts a comment (at the start of a line, or after a space). Variables already set in your environment take precedence over the file, and command-line flags take precedence over both — that's what the `--no-…` forms are for. `/show settings` shows which file was loaded.
+On/off values can be JSON `true`/`false` or the strings `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`. Variables already set in your environment take precedence over the file, and command-line flags take precedence over both — that's what the `--no-…` forms are for. `NODE_EXTRA_CA_CERTS` also works in a profile's `env` (a path to a PEM file, for a server behind a private CA such as Caddy's local one): skinnyai adds it to the trusted certificates when it starts, and MCP servers it launches inherit the variable. The file may hold API keys, so keep it readable only by you (`chmod 600`).
 
 ## Keep-Alive Duration Formats
 
@@ -243,7 +248,7 @@ It's on by default whenever tools are on (which they are by default). `--date` o
 - If the name belongs to a different saved session, `/save` asks before overwriting it (`[y/N]`; anything but `y` keeps the existing file).
 - `/load <name>` or `skinnyai.js <name>` resumes a saved session: it switches to the session's `FROM` model and restores its system message, parameters, and conversation. `/list` shows saved sessions below the server's models. A saved session takes precedence over a server model with the same name.
 
-The file uses Ollama's Modelfile format — `FROM`, `PARAMETER`, `SYSTEM`, and `MESSAGE` lines — so it's readable, and can be turned into a model with `ollama create <name> -f <file>`. Tool calls and their raw results aren't saved (the format has no place for them), but the answers the model gave from them are.
+The file uses Ollama's Modelfile format — `FROM`, `PARAMETER`, `SYSTEM`, and `MESSAGE` lines — so it's readable (the host, API, and other session settings are recorded as `#` comments, which Ollama ignores, and `/load` restores), and can be turned into a model with `ollama create <name> -f <file>`. Tool calls and their raw results aren't saved (the format has no place for them), but the answers the model gave from them are.
 
 `/share` is what `/save` does in `ollama run`: it creates a model on the Ollama server (via `/api/create`) from the current model, system message, parameters, and conversation, so `ollama run <name>` resumes the session from anywhere that uses the server. It defaults to the session's current name, the same way `/save` does, and asks before replacing a model that already exists on the server. Only a self-hosted Ollama server supports this; with ollama.com or `--api openai`, `/share` explains that and points you to `/save`.
 
@@ -262,7 +267,7 @@ Each turn is sent via Ollama's `/api/chat` endpoint with the full message histor
   - `# Headings` are bold; `- ` / `* ` / `+ ` bullets become `•` (or `◦` when indented); numbered lists (`1.` / `1)`) and bullets get a hanging indent so wrapped lines line up with the item text.
   - `> quotes` get a `│` bar, `---` becomes a full-width rule, and fenced code blocks are shown in a code color, unwrapped, so they copy cleanly.
   - `[links](https://...)` become clickable [OSC 8 hyperlinks](https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda) (underlined) in terminals that support them — iTerm2, WezTerm, kitty, GNOME Terminal, Windows Terminal, and others; elsewhere you just see the link text.
-  - `![images](https://...)` show as a clickable `🖼️ caption`. With `--images` (or `/set images`), terminals with an inline image protocol — iTerm2 and WezTerm (the protocol `imgcat` uses), kitty and Ghostty (kitty's graphics protocol; PNG only) — also draw the image below the line that mentions it, scaled to fit. It's off by default because it downloads whatever image URL the model writes: a prompt injection (say, in a page `fetch_page` read) could smuggle conversation details out in that URL. Like `fetch_page`, it refuses local/private network addresses and caps the download size. Inside tmux or screen, which don't pass image sequences through, images stay links. A local file works too — `![](/Users/me/pic.png)`, `~/pic.png`, or a `file://` URL (written with `%20` for spaces) — and nothing is fetched or sent for it, so that's how to see images a tool such as an image generator saved on your machine.
+  - `![images](https://...)` show as a clickable `🖼️ caption`. With `--images` (or `/set images`), terminals with an inline image protocol — iTerm2 and WezTerm (the protocol `imgcat` uses), kitty and Ghostty (kitty's graphics protocol; PNG only) — also draw the image below the line that mentions it, scaled to fit. It's off by default because it downloads whatever image URL the model writes: a prompt injection (say, in a page `fetch_page` read) could smuggle conversation details out in that URL. Like `fetch_page`, it refuses local/private network addresses (unless the host is listed in `SKINNY_TRUSTED_HOSTS`, e.g. `"SKINNY_TRUSTED_HOSTS": "mfluxible.test"` in a profile's `env`; a comma-separated list, each entry covering its subdomains) and caps the download size. Inside tmux or screen, which don't pass image sequences through, images stay links. A local file works too — `![](/Users/me/pic.png)`, `~/pic.png`, or a `file://` URL (written with `%20` for spaces) — and nothing is fetched or sent for it, so that's how to see images a tool such as an image generator saved on your machine.
   - Tables are drawn with box-drawing borders, honoring `:---:` / `---:` alignment. Columns shrink to fit the terminal, wrapping cell text as needed. Emoji (✅, ⚠️, flags, 👩‍💻) are measured as the two columns terminals draw them in, so they don't push borders out of line. Since column widths depend on every row, a table is drawn once it's complete; until then a `⋯ receiving table (N rows)` placeholder shows progress.
   - `/set nomarkdown` (or `--no-markdown`) shows responses as raw text instead; `/set markdown` turns rendering back on. When output is redirected to a file or pipe, text is always written raw, so it stays valid markdown.
 - **RP-style narration**: `*single asterisks*` are italic *and* switch to a dimmer narration color, so role-play narration stays visually distinct from dialogue. Each speaker gets its own color so turns are easy to tell apart at a glance: your messages are yellow (bright for dialogue, dim for `*narration*`), and the assistant's are green (same bright/dim split). Markup is stripped from the display; the raw text is still what's stored in history and sent to the model.
@@ -390,7 +395,7 @@ Files are capped at 20 MB. Only a *paste* (which is what a drop is) attaches PDF
 
 ## Anthropic API
 
-`--api anthropic` talks to Claude through the Messages API (default host `https://api.anthropic.com`). Set `ANTHROPIC_API_KEY` in the environment or `~/.skinny/.env`:
+`--api anthropic` talks to Claude through the Messages API (default host `https://api.anthropic.com`). Set `ANTHROPIC_API_KEY` in the environment or a profile in `~/.skinny/config.json`:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-... ./bin/skinnyai.js claude-sonnet-5-5 --api anthropic
@@ -400,21 +405,25 @@ Streaming, history, images, `/set system`, tools (web search and MCP), and `/lis
 
 ## MCP servers
 
-skinnyai reads `~/.skinny/mcp.json` (or the file named by `SKINNY_MCP_CONFIG`) in the format Claude Desktop, Claude Code, and Cursor share, and offers each server's tools to the model — with any `--api`, alongside the built-in web tools:
+skinnyai reads each server from the `mcpServers` block of the active profile in `~/.skinny/config.json`. The entries use the format Claude Desktop, Claude Code, and Cursor share, and skinnyai offers each server's tools to the model — with any `--api`, alongside the built-in web tools:
 
 ```json
 {
-  "mcpServers": {
-    "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/notes"] },
-    "docs":  { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" }, "trust": true }
+  "profiles": {
+    "Default": {
+      "mcpServers": {
+        "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/notes"] },
+        "docs":  { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" }, "trust": true }
+      }
+    }
   }
 }
 ```
 
 - `command`/`args`/`env`/`cwd` start a local server over stdio; `url`/`headers` connect to a remote one over streamable HTTP. `${VAR}` expands from the environment. `"disabled": true` skips an entry.
-- Tools appear as `server__tool`. Each call asks `Allow this tool call? [y/N/a(lways)]` first, because a web page the model read could try to steer it. Answering `a` trusts that one tool from then on by adding it to its server's `"trust": ["tool", …]` list in `mcp.json` (the file is rewritten, pretty-printed); `"trust": true` trusts every tool on a server.
+- Tools appear as `server__tool`. Each call asks `Allow this tool call? [y/N/a(lways)]` first, because a web page the model read could try to steer it. Answering `a` trusts that one tool from then on by adding it to its server's `"trust": ["tool", …]` list in the config file (the file is rewritten, pretty-printed); `"trust": true` trusts every tool on a server.
 - A tool can return images (MCP `image` content), and they're relayed to the model as returned: as image blocks inside the tool result for Anthropic, for OpenAI-style servers as the tool message's content array with each image an `image_url` part (a `data:` URL), in order, and for Ollama (whose tool messages are plain text) as `data:` URLs in the text. skinnyai doesn't draw them itself; a model that answers with `![alt](data:image/png;base64,…)` (or a file path) gets the image drawn when images are on (`/set images`). A large image is a lot of text for a real model to take in, and it stays in the conversation, so it's re-sent with every later turn.
-- `/mcp` lists what's connected. A server that fails to start is reported and skipped. `--no-mcp` (or `SKINNY_MCP=false`) ignores the file. Only tools are supported — not resources, prompts, sampling, or the legacy SSE transport.
+- `/mcp` lists what's connected. A server that fails to start is reported and skipped. `--no-mcp` (or `SKINNY_MCP=false`) starts none. Only tools are supported — not resources, prompts, sampling, or the legacy SSE transport.
 
 ## How It Works
 
@@ -458,7 +467,7 @@ npm install
 npm test            # or: npm run test:watch
 ```
 
-They cover markdown rendering (checked against a small terminal emulator, so wrapping and table borders are tested as they'd appear on screen), emoji widths, inline images, the line editor (driven with simulated keystrokes), the Modelfile format, `.env` and flag handling, and `/save`, `/load`, `/share`, and autosave. `test/cli.test.js` runs `bin/skinnyai.js` end to end against a mock server that speaks both the Ollama and OpenAI APIs. Tests use a temporary `SKINNY_HOME`, so they never read or write your real `~/.skinny`.
+They cover markdown rendering (checked against a small terminal emulator, so wrapping and table borders are tested as they'd appear on screen), emoji widths, inline images, the line editor (driven with simulated keystrokes), the Modelfile format, `config.json` profiles and flag handling, and `/save`, `/load`, `/share`, and autosave. `test/cli.test.js` runs `bin/skinnyai.js` end to end against a mock server that speaks both the Ollama and OpenAI APIs. Tests use a temporary `SKINNY_HOME`, so they never read or write your real `~/.skinny`.
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the suite on Node 22 and 24 for every push to `main` and every pull request. No real terminal is needed: the tests fake one, including the iTerm2 and kitty image support, so everything runs headless on Linux.
 
@@ -468,7 +477,7 @@ The whole tool is the single file `bin/skinnyai.js`, with no runtime dependencie
 
 ## macOS app
 
-`npm run build:app` builds `dist/SkinnyAI.app`: a small native shell around a standalone `skinnyai` binary (Node is embedded, so nothing needs installing). Opening it starts a chat in its own terminal window (built on [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm), with inline images and Shift+Enter); ⌘N opens another, and clicking the Dock icon brings the open chat forward. **Option+=** and **Option+-** make the text bigger or smaller (**Option+0** resets it; also under the View menu), and Settings has a font size too. **Settings… → Open chats in** can send chats to Terminal or iTerm instead. **SkinnyAI → Settings…** (⌘,) edits `~/.skinny/.env`: API key, server, model, and the on/off options. It keeps comments and any variables it doesn't know about, and writes the file readable only by you. On first launch, with no model set, Settings opens automatically (choosing an API fills in its usual server address; web search and markdown are on by default). The Model field is a drop-down of what the server offers, refreshed when you change the server, API, or key. Clicking the Dock icon while a chat is open brings its terminal forward instead of starting another; **File → New Chat** (⌘N) always starts one.
+`npm run build:app` builds `dist/SkinnyAI.app`: a small native shell around a standalone `skinnyai` binary (Node is embedded, so nothing needs installing). Opening it starts a chat in its own terminal window (built on [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm), with inline images and Shift+Enter); ⌘N opens another, and clicking the Dock icon brings the open chat forward. **Option+=** and **Option+-** make the text bigger or smaller (**Option+0** resets it; also under the View menu), and Settings has a font size too. **Settings… → Open chats in** can send chats to Terminal or iTerm instead. **SkinnyAI → Settings…** (⌘,) edits `~/.skinny/config.json`: a **Profile** box at the top picks the profile (chats you start use it), saves the settings below into it, or creates a new one; under it are the API key, server, model, and the on/off options. It keeps any variables and MCP servers it doesn't know about, and writes the file readable only by you. On first launch, with no model set, Settings opens automatically (choosing an API fills in its usual server address; web search and markdown are on by default). The Model field is a drop-down of what the server offers, refreshed when you change the server, API, or key. Clicking the Dock icon while a chat is open brings its terminal forward instead of starting another; **File → New Chat** (⌘N) always starts one.
 
 Building it needs Xcode with its Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`); the Swift part is built with SwiftPM (`Package.swift`).
 

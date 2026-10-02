@@ -36,6 +36,16 @@ describe('Modelfile format', () => {
     expect(lines).toContain('MESSAGE user """He said ""\\"hi""\\" then "bye""""');
   });
 
+  it('records the host and other settings as comments that parse ignores', () => {
+    const withSettings = { ...session, settings: { api: 'openai', host: 'http://box:8080', think: undefined, markdown: true } };
+    const text = skinnyai.formatModelfile(withSettings);
+    expect(text).toContain('# api: openai\n# host: http://box:8080\n# markdown: true\nFROM ');
+    expect(text).not.toContain('think');
+    const back = skinnyai.parseModelfile(text);
+    expect(back.settings).toEqual({ api: 'openai', host: 'http://box:8080', markdown: 'true' });
+    expect(back.messages).toEqual(session.messages);
+  });
+
   it('reads back exactly what it wrote, including awkward quoting', () => {
     const back = skinnyai.parseModelfile(skinnyai.formatModelfile(session));
     expect(back.from).toBe(session.from);
@@ -56,19 +66,15 @@ describe('Modelfile format', () => {
     expect(back).toEqual({
       from: 'llama3.2',
       system: 'You are a pirate.',
+      settings: {},
       parameters: [],
       messages: [{ role: 'user', content: 'Ahoy' }, { role: 'assistant', content: 'Arr.' }]
     });
   });
 });
 
-describe('.env defaults', () => {
+describe('environment defaults', () => {
   const touched = [];
-  const writeEnv = (text) => {
-    const file = path.join(process.env.SKINNY_HOME, `test-${touched.length}.env`);
-    fs.writeFileSync(file, text);
-    return file;
-  };
   const setEnv = (name, value) => {
     touched.push(name);
     process.env[name] = value;
@@ -78,36 +84,6 @@ describe('.env defaults', () => {
     for (const name of Object.keys(process.env)) if (name.startsWith('SKINNY_') && name !== 'SKINNY_HOME') delete process.env[name];
     delete process.env.OLLAMA_API_KEY;
     vi.restoreAllMocks();
-  });
-
-  it('parses KEY=value lines: export, quotes, comments, and bare # colors', () => {
-    const file = writeEnv([
-      '# comment',
-      'SKINNY_MODEL=envmodel',
-      'export SKINNY_HOST="http://127.0.0.1:1234"',
-      "SKINNY_API='openai'",
-      'SKINNY_AUTOSAVE=yes   # trailing comment',
-      'SKINNY_MODEL_NORMAL_COLOR=#ff8800',
-      'OLLAMA_API_KEY="abc\\"def"',
-      'not a setting'
-    ].join('\n'));
-    expect(skinnyai.loadEnvFile(file)).toBe(true);
-    expect(process.env.SKINNY_MODEL).toBe('envmodel');
-    expect(process.env.SKINNY_HOST).toBe('http://127.0.0.1:1234');
-    expect(process.env.SKINNY_API).toBe('openai');
-    expect(process.env.SKINNY_AUTOSAVE).toBe('yes');
-    expect(process.env.SKINNY_MODEL_NORMAL_COLOR).toBe('#ff8800');
-    expect(process.env.OLLAMA_API_KEY).toBe('abc"def');
-  });
-
-  it("doesn't override variables already in the environment", () => {
-    setEnv('SKINNY_TOOLS', 'false');
-    skinnyai.loadEnvFile(writeEnv('SKINNY_TOOLS=true\n'));
-    expect(process.env.SKINNY_TOOLS).toBe('false');
-  });
-
-  it('returns false for a missing file', () => {
-    expect(skinnyai.loadEnvFile(path.join(process.env.SKINNY_HOME, 'nope.env'))).toBe(false);
   });
 
   it('turns SKINNY_* variables into options', () => {
@@ -132,6 +108,46 @@ describe('.env defaults', () => {
   });
 });
 
+describe('config.json', () => {
+  const write = (config) => {
+    const file = path.join(process.env.SKINNY_HOME, `config-${Math.random()}.json`);
+    fs.writeFileSync(file, JSON.stringify(config));
+    return file;
+  };
+
+  it('returns null when there is no file, and rejects a malformed one', () => {
+    expect(skinnyai.loadConfigFile(path.join(process.env.SKINNY_HOME, 'nope.json'))).toBeNull();
+    expect(() => skinnyai.loadConfigFile(write({ nope: 1 }))).toThrow('no "profiles" object');
+  });
+
+  it('layers a profile over Default, stringifying values', () => {
+    const config = skinnyai.loadConfigFile(write({
+      profiles: {
+        Default: { env: { A: 'a', B: true, C: 3 }, mcpServers: { x: { command: 'x' }, y: { command: 'y' } } },
+        Work: { env: { A: 'w', D: null }, mcpServers: { y: { disabled: true } } }
+      }
+    }));
+    expect(skinnyai.resolveProfile(config)).toMatchObject({ name: 'Default', env: { A: 'a', B: 'true', C: '3' } });
+    expect(skinnyai.resolveProfile(config, 'work')).toEqual({
+      name: 'Work', env: { A: 'w', B: 'true', C: '3' }, mcpServers: { x: { command: 'x' }, y: { disabled: true } }
+    });
+    expect(() => skinnyai.resolveProfile(config, 'Nope')).toThrow("no profile named 'Nope'");
+  });
+
+  it('reads --profile and SKINNY_PROFILE', () => {
+    expect(skinnyai.requestedProfile(['m', '--profile', 'A B'], {})).toBe('A B');
+    expect(skinnyai.requestedProfile(['--profile=Z'], { SKINNY_PROFILE: 'E' })).toBe('Z');
+    expect(skinnyai.requestedProfile([], { SKINNY_PROFILE: 'E' })).toBe('E');
+    expect(skinnyai.requestedProfile([], {})).toBeUndefined();
+  });
+
+  it('ships a config.json.example whose profiles all resolve', () => {
+    const config = skinnyai.loadConfigFile(new URL('../config.json.example', import.meta.url).pathname);
+    expect(Object.keys(config.profiles)).toContain('Default');
+    for (const name of Object.keys(config.profiles)) expect(skinnyai.resolveProfile(config, name).env.SKINNY_MODEL).toBeTruthy();
+  });
+});
+
 describe('command-line arguments', () => {
   const parse = (...args) => {
     const argv = process.argv;
@@ -145,6 +161,11 @@ describe('command-line arguments', () => {
 
   afterEach(() => {
     for (const name of Object.keys(process.env)) if (name.startsWith('SKINNY_') && name !== 'SKINNY_HOME') delete process.env[name];
+  });
+
+  it('skips --profile and its value instead of taking it for the model', () => {
+    expect(parse('--profile', 'My Profile', 'llama3.2').model).toBe('llama3.2');
+    expect(parse('--profile=X', '--model', 'q').model).toBe('q');
   });
 
   it('reads the model from the first positional argument or --model', () => {

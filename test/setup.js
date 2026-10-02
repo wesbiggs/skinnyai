@@ -1,5 +1,5 @@
 // Runs before each test file: keeps the tests away from the real
-// ~/.skinny (its .env and saved sessions) and from any real API key.
+// ~/.skinny (its config.json and saved sessions) and from any real API key.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

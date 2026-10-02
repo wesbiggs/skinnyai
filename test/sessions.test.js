@@ -44,6 +44,18 @@ function fixTime() {
   vi.setSystemTime(new Date(2026, 8, 30, 15, 49, 7));
 }
 
+describe('window title in the SkinnyAI app', () => {
+  it('announces the session name through the terminal title', async () => {
+    vi.stubEnv('TERM_PROGRAM', 'SkinnyAI');
+    const chat = withHistory(openaiChat(), 'q', 'a');
+    await chat.save('trip');
+    expect(capture.text).toContain('\x1b]2;SkinnyAI: trip\x07');
+    chat.sessionName = null;
+    expect(capture.text).toContain('\x1b]2;SkinnyAI\x07');
+    vi.unstubAllEnvs();
+  });
+});
+
 describe('/save', () => {
   it('saves under a new date-and-time name, then keeps using it', async () => {
     fixTime();
@@ -60,10 +72,28 @@ describe('/save', () => {
     chat.setParameter('temperature', ['0.2']);
     chat.history.push({ role: 'user', content: 'q' }, { role: 'assistant', content: 'a' });
     await chat.save('notes');
-    expect(readSession('notes')).toEqual({
+    const saved = readSession('notes');
+    expect(saved.settings).toMatchObject({ api: 'openai', host: expect.stringMatching(/^http:\/\//), tools: 'true' });
+    delete saved.settings;
+    expect(saved).toEqual({
       from: 'some-model', system: 'Be terse.', parameters: [['temperature', '0.2']],
       messages: [{ role: 'user', content: 'q' }, { role: 'assistant', content: 'a' }]
     });
+  });
+
+  it('/load restores the saved host and settings', async () => {
+    const saver = openaiChat({ markdown: false });
+    saver.think = 'high';
+    saver.format = 'json';
+    saver.history.push({ role: 'user', content: 'q' });
+    await saver.save('cfg');
+    const chat = new skinnyai.OllamaChat('other', { host: 'http://example.invalid:1' });
+    await chat.load('cfg');
+    expect(chat.api).toBe('openai');
+    expect(chat.host).toBe(server.url);
+    expect(chat.markdown).toBe(false);
+    expect(chat.think).toBe('high');
+    expect(chat.format).toBe('json');
   });
 
   it('leaves out tool calls and tool results', async () => {

@@ -122,7 +122,22 @@ describe('images in markdown', () => {
 
   it('refuses local and private addresses', async () => {
     const output = await render(skinnyai, '![local](http://127.0.0.1/x.png)', { images: true });
-    expect(stripAnsi(output)).toContain("(couldn't show image: refusing to fetch 127.0.0.1: it resolves to a local or private network address)");
+    expect(stripAnsi(output)).toContain("(couldn't show image: refusing to fetch 127.0.0.1: it resolves to a local or private network address (add it to SKINNY_TRUSTED_HOSTS to allow it))");
+  });
+
+  it('lets SKINNY_TRUSTED_HOSTS through, subdomains included', async () => {
+    process.env.SKINNY_TRUSTED_HOSTS = 'other.test, 127.0.0.1';
+    try {
+      const output = await render(skinnyai, '![local](http://127.0.0.1:9/x.png)', { images: true });
+      expect(stripAnsi(output)).not.toContain('refusing to fetch'); // it tried, and failed to connect
+      process.env.SKINNY_TRUSTED_HOSTS = '*.localhost';
+      const sub = await render(skinnyai, '![local](http://a.localhost:9/x.png)', { images: true });
+      expect(stripAnsi(sub)).not.toContain('refusing to fetch');
+      const other = await render(skinnyai, '![local](http://127.0.0.2:9/x.png)', { images: true });
+      expect(stripAnsi(other)).toContain('refusing to fetch');
+    } finally {
+      delete process.env.SKINNY_TRUSTED_HOSTS;
+    }
   });
 
   it('reports images it cannot decode instead of failing the response', async () => {

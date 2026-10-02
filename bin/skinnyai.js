@@ -5,6 +5,7 @@ import http from 'node:http';
 import https from 'node:https';
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import tls from 'node:tls';
 import fs from 'node:fs/promises';
 import { appendFileSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -22,37 +23,108 @@ const ANTHROPIC_VERSION = '2023-06-01';
 const API_NAMES = ['ollama', 'openai', 'anthropic'];
 const API_LABELS = { ollama: 'ollama', openai: 'openai-compatible', anthropic: 'anthropic' };
 
-// Saved sessions and the .env defaults file live here.
+// Saved sessions and the config.json defaults file live here.
 const SKINNY_HOME = process.env.SKINNY_HOME || path.join(os.homedir(), '.skinny');
 
-// Default settings can be kept in $SKINNY_HOME/.env as KEY=value lines (see
-// ENV_SETTINGS and the README). Variables already in the environment win
-// over the file, and command-line flags win over both. It's loaded before
-// anything reads process.env, so OLLAMA_API_KEY can live there too.
-const ENV_FILE = path.join(SKINNY_HOME, '.env');
+// Default settings live in $SKINNY_HOME/config.json, in named profiles (see
+// loadConfigFile, config.json.example, and the README). Each profile has an
+// "env" block of the variables listed in ENV_SETTINGS (plus API keys) and an
+// optional "mcpServers" block. The "Default" profile is the base: the one
+// used unless --profile NAME or SKINNY_PROFILE says otherwise, and other
+// profiles inherit from it, overriding what they set. Variables already in
+// the environment win over the file, and command-line flags win over both.
+// It's loaded before anything reads process.env, so OLLAMA_API_KEY can live
+// there too.
+const CONFIG_FILE = path.join(SKINNY_HOME, 'config.json');
+const DEFAULT_PROFILE = 'Default';
 
-function loadEnvFile(file) {
+// Reads config.json: null if there is none; throws if it can't be used.
+function loadConfigFile(file) {
   let text;
   try {
     text = readFileSync(file, 'utf8');
   } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${file} isn't valid JSON: ${error.message}`);
+  }
+  if (!json || typeof json.profiles !== 'object' || json.profiles === null || Array.isArray(json.profiles)) {
+    throw new Error(`${file} has no "profiles" object`);
+  }
+  return json;
+}
+
+// The settings of one profile on top of the Default profile's: { name, env,
+// mcpServers }. env values become strings, as environment variables are.
+// Throws if the named profile doesn't exist.
+function resolveProfile(config, requested = DEFAULT_PROFILE) {
+  const profiles = config.profiles;
+  const name = profiles[requested] ? requested : Object.keys(profiles).find((n) => n.toLowerCase() === requested.toLowerCase());
+  if (!name && requested !== DEFAULT_PROFILE) {
+    throw new Error(`no profile named '${requested}' (profiles: ${Object.keys(profiles).join(', ') || 'none'})`);
+  }
+  const env = {};
+  const mcpServers = {};
+  for (const profile of [profiles[DEFAULT_PROFILE], name && name !== DEFAULT_PROFILE ? profiles[name] : null]) {
+    for (const [key, value] of Object.entries(profile?.env ?? {})) {
+      if (value !== null && value !== undefined) env[key] = String(value);
+    }
+    Object.assign(mcpServers, profile?.mcpServers ?? profile?.servers);
+  }
+  return { name: name || DEFAULT_PROFILE, env, mcpServers };
+}
+
+// --profile NAME / --profile=NAME on the command line, else SKINNY_PROFILE.
+// (parseArgs skips the same words; this runs first because the profile
+// decides the defaults parseArgs starts from.)
+function requestedProfile(args, env) {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--profile') return args[i + 1] ?? '';
+    if (args[i].startsWith('--profile=')) return args[i].slice('--profile='.length);
+  }
+  return env.SKINNY_PROFILE || undefined;
+}
+
+let EXTRA_CA_FILE = null; // the profile's NODE_EXTRA_CA_CERTS, once added
+
+function addExtraCaCertificates(file) {
+  try {
+    tls.setDefaultCACertificates([...tls.getCACertificates('default'), readFileSync(file, 'utf8')]);
+    return true;
+  } catch (error) {
+    console.error(`⚠️  Couldn't use NODE_EXTRA_CA_CERTS ${file}: ${error.message}\n`);
     return false;
   }
-  for (const line of text.split(/\r?\n/)) {
-    const match = /^\s*(?:export\s+)?([A-Za-z_]\w*)\s*=\s*(.*?)\s*$/.exec(line);
-    if (!match) continue;
-    let value = match[2];
-    const quoted = /^(["'])(.*)\1$/.exec(value);
-    if (quoted) {
-      value = quoted[1] === '"' ? quoted[2].replace(/\\n/g, '\n').replace(/\\(["\\])/g, '$1') : quoted[2];
-    } else {
-      value = value.replace(/\s+#.*$/, ''); // trailing comment; a bare #ff8800 color stays
-    }
-    if (process.env[match[1]] === undefined) process.env[match[1]] = value;
-  }
-  return true;
 }
-const ENV_FILE_LOADED = loadEnvFile(ENV_FILE);
+
+function startupError(message) {
+  console.error(`❌ Error: ${message}\n`);
+  process.exit(1);
+}
+
+let CONFIG = null;
+let PROFILE = { name: DEFAULT_PROFILE, env: {}, mcpServers: {} };
+const PROFILE_REQUEST = requestedProfile(process.argv.slice(2), process.env);
+try {
+  CONFIG = loadConfigFile(CONFIG_FILE);
+  if (CONFIG) {
+    PROFILE = resolveProfile(CONFIG, PROFILE_REQUEST ?? DEFAULT_PROFILE);
+    const extraCerts = process.env.NODE_EXTRA_CA_CERTS === undefined ? PROFILE.env.NODE_EXTRA_CA_CERTS : undefined;
+    for (const [key, value] of Object.entries(PROFILE.env)) if (process.env[key] === undefined) process.env[key] = value;
+    // Node reads NODE_EXTRA_CA_CERTS only as it starts, so a profile's value
+    // is added to the trusted certificates here instead.
+    if (extraCerts) EXTRA_CA_FILE = addExtraCaCertificates(extraCerts) ? extraCerts : null;
+  } else if (PROFILE_REQUEST !== undefined && PROFILE_REQUEST.toLowerCase() !== DEFAULT_PROFILE.toLowerCase()) {
+    startupError(`--profile '${PROFILE_REQUEST}': there is no ${CONFIG_FILE}`);
+  }
+} catch (error) {
+  startupError(error.message);
+}
 
 // ollama.com (cloud models, web search/fetch) needs an API key. It's only
 // ever sent to ollama.com over https, never to other --host servers.
@@ -370,14 +442,24 @@ function isPrivateAddress(ip) {
   return PRIVATE_ADDRESSES.check(ip, net.isIPv6(ip) ? 'ipv6' : 'ipv4');
 }
 
+// Hosts you trust to resolve to a private address (SKINNY_TRUSTED_HOSTS, a
+// comma-separated list, e.g. a local image server behind a reverse proxy).
+// An entry covers that host and its subdomains; "*." in front is optional.
+function isTrustedHost(host) {
+  return (process.env.SKINNY_TRUSTED_HOSTS || '').split(',')
+    .map((entry) => entry.trim().toLowerCase().replace(/^\*\./, ''))
+    .some((entry) => entry && (host === entry || host.endsWith(`.${entry}`)));
+}
+
 async function assertPublicUrl(url) {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error(`only http and https URLs can be fetched (got ${url.protocol})`);
   }
   const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (isTrustedHost(host.toLowerCase())) return;
   const addresses = net.isIP(host) ? [{ address: host }] : await dns.lookup(host, { all: true });
   if (addresses.some(({ address }) => isPrivateAddress(address))) {
-    throw new Error(`refusing to fetch ${url.hostname}: it resolves to a local or private network address`);
+    throw new Error(`refusing to fetch ${url.hostname}: it resolves to a local or private network address (add it to SKINNY_TRUSTED_HOSTS to allow it)`);
   }
 }
 
@@ -559,7 +641,7 @@ const TOOLS = {
   }
 };
 
-// --- MCP servers (tools from $SKINNY_HOME/mcp.json) ---
+// --- MCP servers (the active profile's mcpServers in $SKINNY_HOME/config.json) ---
 //
 // The config uses the format shared by Claude Desktop, Claude Code, Cursor,
 // and others:
@@ -572,7 +654,6 @@ const TOOLS = {
 // true (or a list of tool names) lets those tools run without asking first;
 // answering "a" (always) at the prompt adds a tool to that list.
 
-const MCP_CONFIG_FILE = process.env.SKINNY_MCP_CONFIG || path.join(SKINNY_HOME, 'mcp.json');
 const MCP_PROTOCOL_VERSION = '2025-06-18';
 const MCP_TIMEOUT_MS = 30000;
 const MCP_CALL_TIMEOUT_MS = 120000;
@@ -580,25 +661,9 @@ const MCP_MAX_RESULT_CHARS = 20000;
 
 const expandVars = (value) => (typeof value === 'string' ? value.replace(/\$\{(\w+)\}/g, (_, name) => process.env[name] ?? '') : value);
 
-// Returns [{ name, ...config }] for each enabled server; throws on an
-// unreadable or malformed file. A missing file just means no servers.
-function loadMcpConfig(file = MCP_CONFIG_FILE) {
-  let text;
-  try {
-    text = readFileSync(file, 'utf8');
-  } catch (error) {
-    if (error.code === 'ENOENT') return [];
-    throw error;
-  }
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch (error) {
-    throw new Error(`${file} isn't valid JSON: ${error.message}`);
-  }
-  const servers = json.mcpServers ?? json.servers;
-  if (!servers || typeof servers !== 'object') throw new Error(`${file} has no "mcpServers" object`);
-  return Object.entries(servers)
+// Returns [{ name, ...config }] for each enabled server in the active profile.
+function loadMcpConfig() {
+  return Object.entries(PROFILE.mcpServers)
     .filter(([, config]) => config && !config.disabled)
     .map(([name, config]) => ({ ...config, name }));
 }
@@ -780,11 +845,13 @@ class McpServer {
     if (this.trust === true) return true;
     this.trust = [...(Array.isArray(this.trust) ? this.trust : []), toolName];
     try {
-      const json = JSON.parse(readFileSync(MCP_CONFIG_FILE, 'utf8'));
-      const entry = (json.mcpServers ?? json.servers)?.[this.name];
+      const json = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
+      // The server is in the active profile, or inherited from Default.
+      const entry = [json.profiles?.[PROFILE.name], json.profiles?.[DEFAULT_PROFILE]]
+        .map((p) => (p?.mcpServers ?? p?.servers)?.[this.name]).find(Boolean);
       if (!entry) return false;
       entry.trust = this.trust;
-      writeFileSync(MCP_CONFIG_FILE, `${JSON.stringify(json, null, 2)}\n`);
+      writeFileSync(CONFIG_FILE, `${JSON.stringify(json, null, 2)}\n`);
       return true;
     } catch (error) {
       return false;
@@ -1953,8 +2020,17 @@ function quoteModelfile(text) {
   return `"""${text.replace(/"""/g, '""\\"')}"""`;
 }
 
-function formatModelfile({ from, system, parameters, messages }) {
-  const lines = [`# Saved by skinnyai on ${new Date().toISOString()}`, `FROM ${from}`];
+// The `# name: value` comments formatModelfile writes, read back by /load.
+const SAVED_SETTINGS = ['api', 'host', 'format', 'think', 'show thinking', 'tools', 'date', 'markdown', 'images', 'keep-alive'];
+
+function formatModelfile({ from, system, parameters, messages, settings = {} }) {
+  const lines = [`# Saved by skinnyai on ${new Date().toISOString()}`];
+  // Session settings that have no Modelfile instruction go in comments,
+  // which Ollama and parseModelfile ignore.
+  for (const [name, value] of Object.entries(settings)) {
+    if (value !== undefined && value !== '') lines.push(`# ${name}: ${String(value).replace(/\s+/g, ' ')}`);
+  }
+  lines.push(`FROM ${from}`);
   for (const [name, value] of Object.entries(parameters)) {
     for (const v of Array.isArray(value) ? value : [value]) {
       lines.push(`PARAMETER ${name} ${typeof v === 'string' && /\s|"/.test(v) ? JSON.stringify(v) : v}`);
@@ -1969,9 +2045,14 @@ function formatModelfile({ from, system, parameters, messages }) {
 // single-line values), returning { from, system, parameters: [[name, value]],
 // messages }. Other instructions (TEMPLATE, LICENSE, ...) are skipped.
 function parseModelfile(text) {
-  const session = { from: '', system: '', parameters: [], messages: [] };
+  const session = { from: '', system: '', parameters: [], messages: [], settings: {} };
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
+    const setting = /^#\s*([a-z][a-z-]*(?: [a-z]+)?):\s*(.*?)\s*$/.exec(lines[i]);
+    if (setting && SAVED_SETTINGS.includes(setting[1])) {
+      session.settings[setting[1]] = setting[2];
+      continue;
+    }
     const match = /^\s*([A-Za-z]+)\s+(.*)$/.exec(lines[i]);
     if (!match || lines[i].trimStart().startsWith('#')) continue;
     const instruction = match[1].toUpperCase();
@@ -2121,7 +2202,19 @@ class OllamaChat {
     // The local session file this conversation is saved in, once it has one:
     // set by autosave, a local /save, or loading a local session; cleared
     // when a new conversation starts (/clear, loading a model).
-    this.sessionName = null;
+    this._sessionName = null;
+  }
+
+  get sessionName() { return this._sessionName; }
+
+  // Inside the SkinnyAI app, the window title carries the session name ("SkinnyAI: name") so the app's
+  // Save menu item knows whether the chat already has one.
+  set sessionName(name) {
+    if (name === this._sessionName) return;
+    this._sessionName = name;
+    if (process.env.TERM_PROGRAM === 'SkinnyAI' && process.stdout.isTTY) {
+      process.stdout.write(`\x1b]2;${name ? `SkinnyAI: ${name}` : 'SkinnyAI'}\x07`);
+    }
   }
 
   // keep_alive and unloading only mean something on a self-hosted Ollama:
@@ -2159,7 +2252,7 @@ class OllamaChat {
     if (supportsColor) process.stdout.write('🔌 Starting MCP servers...\n');
     this.mcp = await startMcpServers(configs);
     debugLog('mcp-servers', {
-      config: MCP_CONFIG_FILE,
+      config: CONFIG_FILE,
       started: this.mcp.servers.map((server) => ({ server: server.name, tools: server.tools.map((tool) => tool.name) })),
       failed: this.mcp.failures
     });
@@ -2171,8 +2264,8 @@ class OllamaChat {
   printMcp() {
     const mcp = this.mcp;
     if (!mcp) {
-      console.log(`\nNo MCP servers are running. Add them to ${MCP_CONFIG_FILE}:`);
-      console.log('  { "mcpServers": { "name": { "command": "npx", "args": ["-y", "some-mcp-server"] } } }\n');
+      console.log(`\nNo MCP servers are running. Add them to the "${PROFILE.name}" profile in ${CONFIG_FILE}:`);
+      console.log('  "mcpServers": { "name": { "command": "npx", "args": ["-y", "some-mcp-server"] } }\n');
       return;
     }
     console.log('');
@@ -2368,16 +2461,32 @@ class OllamaChat {
     return true;
   }
 
+  // Restores the settings /save recorded in comments. Unknown or malformed
+  // values are ignored; the host and API are only restored by /load.
+  applySavedSettings(saved, connection) {
+    const bool = (v) => (v === 'true' ? true : v === 'false' ? false : undefined);
+    if (connection && API_NAMES.includes(saved.api)) this.api = saved.api;
+    if (connection && /^https?:\/\//.test(saved.host || '')) this.host = saved.host;
+    if (saved['keep-alive']) this.keepAlive = saved['keep-alive'];
+    if (bool(saved['show thinking']) !== undefined) this.showThinking = bool(saved['show thinking']);
+    if (bool(saved.tools) !== undefined) this.toolsEnabled = bool(saved.tools);
+    if (bool(saved.markdown) !== undefined) this.markdown = bool(saved.markdown);
+    if (bool(saved.images) !== undefined) this.images = bool(saved.images) && IMAGE_PROTOCOL !== null;
+    this.injectDate = bool(saved.date);
+    this.format = saved.format === 'json' ? 'json' : '';
+    const think = saved.think;
+    this.think = bool(think) !== undefined ? bool(think) : ['low', 'medium', 'high', 'max'].includes(think) ? think : undefined;
+  }
+
   // Switches to a session saved on this machine (see saveLocalSession): its
   // FROM model, system message, parameters, and conversation.
-  async applyLocalSession(name, session) {
+  async applyLocalSession(name, session, { connection = true } = {}) {
+    this.applySavedSettings(session.settings || {}, connection);
     this.model = session.from || this.model;
     this.history = session.system ? [{ role: 'system', content: session.system }] : [];
     this.history.push(...session.messages);
     this.options = {};
     for (const [param, value] of session.parameters) this.setParameter(param, [value]);
-    this.format = '';
-    this.think = undefined;
     this.sessionName = name; // autosave keeps updating the same file
     await this.printRestoredHistory(this.history, `📜 Restored saved session '${name}' (model: ${this.model}):`);
   }
@@ -2389,7 +2498,8 @@ class OllamaChat {
     try {
       const session = await readLocalSession(this.model);
       if (session) {
-        await this.applyLocalSession(this.model, session);
+        // The command line already chose the server, so it wins at startup.
+        await this.applyLocalSession(this.model, session, { connection: false });
       } else if (this.api === 'ollama') {
         await this.fetchAndApplyModelContext(this.model);
       }
@@ -2591,7 +2701,19 @@ class OllamaChat {
   }
 
   sessionSnapshot() {
-    return { from: this.model, system: this.getSystemMessage(), parameters: this.options, messages: this.savableMessages() };
+    const settings = {
+      api: this.api,
+      host: this.host,
+      format: this.format || undefined,
+      think: this.think,
+      'show thinking': this.showThinking,
+      tools: this.toolsEnabled,
+      date: this.injectDate,
+      markdown: this.markdown,
+      images: this.images
+    };
+    if (this.managesModelLifetime) settings['keep-alive'] = this.keepAlive;
+    return { from: this.model, system: this.getSystemMessage(), parameters: this.options, messages: this.savableMessages(), settings };
   }
 
   // With autosave on, writes the conversation to its local session file
@@ -2634,7 +2756,7 @@ class OllamaChat {
         declined = answer === 'n';
         if (answer === 'a') {
           const saved = tool.trustAlways();
-          console.log(`${CHROME_COLOR}   ${saved ? `Saved: this tool is now trusted in ${MCP_CONFIG_FILE}` : `Couldn't update ${MCP_CONFIG_FILE}; trusted for this session only`}${ANSI.reset}`);
+          console.log(`${CHROME_COLOR}   ${saved ? `Saved: this tool is now trusted in ${CONFIG_FILE}` : `Couldn't update ${CONFIG_FILE}; trusted for this session only`}${ANSI.reset}`);
         }
       }
       const outcome = args === null
@@ -3028,7 +3150,9 @@ class OllamaChat {
       ...(this.debug ? [['debug log', DEBUG_LOG]] : []),
       ['autosave', this.autosave ? `on (${this.sessionName ? `'${this.sessionName}'` : 'named after the next reply'})` : 'off'],
       ...(this.managesModelLifetime ? [['stop on exit', onOff(this.stopOnExit)]] : []),
-      ['defaults file', ENV_FILE_LOADED ? ENV_FILE : `none (${ENV_FILE})`]
+      ...(EXTRA_CA_FILE ? [['extra CA certs', EXTRA_CA_FILE]] : []),
+      ['profile', CONFIG ? PROFILE.name : 'none (no config.json)'],
+      ['defaults file', CONFIG ? CONFIG_FILE : `none (${CONFIG_FILE})`]
     ];
     console.log('\nSession settings:');
     for (const [name, value] of rows) console.log(`  ${name.padEnd(16)} ${value}`);
@@ -3938,7 +4062,7 @@ class OllamaChat {
   }
 }
 
-// Settings the .env file (or the environment) can default, by variable
+// Settings a profile (or the environment) can default, by variable
 // name: [option key, type]. Each matches a command-line flag.
 const ENV_SETTINGS = {
   SKINNY_MODEL: ['model', 'string'],
@@ -3972,7 +4096,7 @@ function envOptions() {
     } else if (/^(0|false|no|off)$/i.test(value)) {
       options[key] = false;
     } else {
-      console.error(`❌ Error: ${name} must be true or false (got '${value}')${ENV_FILE_LOADED ? ` - check ${ENV_FILE}` : ''}\n`);
+      console.error(`❌ Error: ${name} must be true or false (got '${value}')${CONFIG ? ` - check ${CONFIG_FILE}` : ''}\n`);
       process.exit(1);
     }
   }
@@ -3980,7 +4104,7 @@ function envOptions() {
 }
 
 // Boolean flags, each with a --no- (or opposite) form so a flag can
-// override a .env default either way.
+// override a profile default either way.
 const BOOLEAN_FLAGS = {
   '--tools': ['tools', true], '--no-tools': ['tools', false],
   '--date': ['date', true], '--no-date': ['date', false],
@@ -3993,7 +4117,7 @@ const BOOLEAN_FLAGS = {
   '-x': ['stopOnExit', true], '--stop-on-exit': ['stopOnExit', true], '--no-stop-on-exit': ['stopOnExit', false]
 };
 
-// Parse command line arguments, on top of the .env/environment defaults.
+// Parse command line arguments, on top of the profile/environment defaults.
 function parseArgs() {
   const args = process.argv.slice(2);
   const { model: defaultModel, ...options } = envOptions();
@@ -4019,6 +4143,10 @@ function parseArgs() {
       options[key] = value;
     } else if (args[i] === '--api') {
       options.api = args[++i];
+    } else if (args[i] === '--profile') {
+      i++; // already applied when the module loaded
+    } else if (args[i].startsWith('--profile=')) {
+      // likewise
     } else if (args[i] === '--help') {
       printUsage();
       process.exit(0);
@@ -4071,7 +4199,7 @@ Options:
                        \`/set notools\`). They need a
                        tool-capable model (e.g. llama3.1, qwen3). With
                        OLLAMA_API_KEY set, uses Ollama's hosted search/fetch.
-  --no-mcp             Don't start the MCP servers in ${MCP_CONFIG_FILE}
+  --no-mcp             Don't start the MCP servers in ${CONFIG_FILE}
                        (standard "mcpServers" format; their tools ask before
                        each call unless a server sets "trust": true. See /mcp.)
   --debug              Log every chat request (with the tools offered), response
@@ -4086,20 +4214,26 @@ Options:
                        features (/save, /show info/license/modelfile/
                        parameters/template, keep-alive, --stop-on-exit)
                        aren't supported there and are disabled/no-ops.
+  --profile NAME      Use the named profile from ${CONFIG_FILE}
+                       (default: "Default"; also SKINNY_PROFILE)
   --help              Show this message
 
   Every on/off flag has an opposite (--no-tools, --no-images, --no-autosave,
   --markdown, --show-thinking, --no-stop-on-exit), to override a default.
 
 Defaults:
-  Settings can be defaulted in ${ENV_FILE}
-  (or $SKINNY_HOME/.env) as KEY=value lines, e.g.:
-    SKINNY_MODEL=gemma4:31b        SKINNY_HOST=https://ollama.com
-    SKINNY_TOOLS=true              SKINNY_AUTOSAVE=true
-    OLLAMA_API_KEY=...
-  Also: SKINNY_API, SKINNY_KEEP_ALIVE, SKINNY_DATE, SKINNY_MARKDOWN,
-  SKINNY_IMAGES, SKINNY_HIDE_THINKING, SKINNY_STOP_ON_EXIT, SKINNY_MCP, SKINNY_DEBUG,
-  SKINNY_IMAGE_DIR (where /saveimage writes by default: ~/Pictures/skinnyai), and
+  Settings can be defaulted in ${CONFIG_FILE}, in named profiles
+  (see config.json.example): each profile's "env" block holds, e.g.:
+    "SKINNY_MODEL": "gemma4:31b",  "SKINNY_HOST": "https://ollama.com",
+    "SKINNY_TOOLS": true,          "SKINNY_AUTOSAVE": true,
+    "OLLAMA_API_KEY": "..."
+  and an optional "mcpServers" block. The "Default" profile is used unless
+  you pick another with --profile NAME or SKINNY_PROFILE=NAME; other
+  profiles inherit from Default. Also: SKINNY_API, SKINNY_KEEP_ALIVE,
+  SKINNY_DATE, SKINNY_MARKDOWN, SKINNY_IMAGES, SKINNY_HIDE_THINKING,
+  SKINNY_STOP_ON_EXIT, SKINNY_MCP, SKINNY_DEBUG,
+  SKINNY_TRUSTED_HOSTS (hosts, comma-separated, that images and fetch_page may
+  reach even though they resolve to a private address), SKINNY_IMAGE_DIR (where /saveimage writes by default: ~/Pictures/skinnyai), and
   SKINNY_{USER,MODEL}_{NORMAL,ITALIC}_COLOR. OPENAI_API_KEY and
   ANTHROPIC_API_KEY go with --api openai / anthropic. Environment variables override
   the file, and command-line flags override both.
@@ -4129,7 +4263,7 @@ async function main() {
     process.exit(1);
   }
   if (options.api === 'anthropic' && !ANTHROPIC_API_KEY) {
-    console.error(`❌ Error: --api anthropic needs ANTHROPIC_API_KEY (set it in the environment or ${ENV_FILE})\n`);
+    console.error(`❌ Error: --api anthropic needs ANTHROPIC_API_KEY (set it in the environment or ${CONFIG_FILE})\n`);
     process.exit(1);
   }
 
@@ -4163,6 +4297,6 @@ export {
   drawBox, VERSION, sniffImage, imageSequence, loadImage, pickDefaultModel, extractAttachments, classifyFile,
   formatModelfile, parseModelfile, saveLocalSession, readLocalSession, listLocalSessions,
   localSessionExists, isAutosaveName, autosaveName, sessionPath,
-  loadEnvFile, envOptions, parseArgs, isOllamaCom, OllamaChat, main,
-  PROMPT, SESSION_DIR, ENV_FILE
+  loadConfigFile, resolveProfile, requestedProfile, envOptions, parseArgs, isOllamaCom, OllamaChat, main,
+  PROMPT, SESSION_DIR, CONFIG_FILE
 };

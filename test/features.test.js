@@ -56,8 +56,14 @@ function writeImage(name = 'pic.png') {
 }
 
 function writeMcpConfig(extra = {}) {
-  const config = { mcpServers: { fake: { command: process.execPath, args: [MCP_SERVER], env: { FAKE_PREFIX: '>' }, ...extra } } };
-  fs.writeFileSync(path.join(home, 'mcp.json'), JSON.stringify(config));
+  const mcpServers = { fake: { command: process.execPath, args: [MCP_SERVER], env: { FAKE_PREFIX: '>' }, ...extra } };
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ profiles: { Default: { mcpServers } } }));
+}
+
+function writeProfileMcpConfig() {
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
+    profiles: { Default: { mcpServers: { fake: { command: process.execPath, args: [MCP_SERVER], env: { FAKE_PREFIX: '>' } } } }, Other: { env: {} } }
+  }));
 }
 
 describe('web tools', () => {
@@ -484,14 +490,23 @@ describe('MCP servers', () => {
     expect(stdout).not.toContain('echo: >hi');
   });
 
-  it('"always" trusts just that tool and saves it to mcp.json', async () => {
+  it('reads servers from a config.json profile and saves "always" there', async () => {
+    writeProfileMcpConfig();
+    const first = await run([...claude(), '--profile', 'Other'], 'use echo\na\n', env);
+    expect(first.stdout).toContain('Tool said: echo: >hi'); // inherited from Default
+    const saved = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
+    expect(saved.profiles.Default.mcpServers.fake.trust).toEqual(['echo']);
+    expect(saved.profiles.Other).toEqual({ env: {} });
+  });
+
+  it('"always" trusts just that tool and saves it to config.json', async () => {
     writeMcpConfig();
     const first = await run(claude(), 'use echo\na\n', env);
     expect(first.stdout).toContain('Tool said: echo: >hi');
     expect(first.stdout).toContain('this tool is now trusted');
-    const saved = JSON.parse(fs.readFileSync(path.join(home, 'mcp.json'), 'utf8'));
-    expect(saved.mcpServers.fake.trust).toEqual(['echo']);
-    expect(saved.mcpServers.fake.command).toBe(process.execPath); // the rest is kept
+    const saved = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
+    expect(saved.profiles.Default.mcpServers.fake.trust).toEqual(['echo']);
+    expect(saved.profiles.Default.mcpServers.fake.command).toBe(process.execPath); // the rest is kept
 
     // Next run: echo goes through, but another tool on the same server still asks.
     const second = await run(claude(), '/mcp\nuse echo\nuse fail\nn\n', env);

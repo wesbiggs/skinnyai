@@ -90,16 +90,13 @@ describe('saved sessions', () => {
   });
 });
 
-describe('defaults from .env', () => {
+describe('defaults from config.json', () => {
   beforeEach(() => {
-    fs.writeFileSync(path.join(home, '.env'), [
-      '# skinnyai defaults',
-      'SKINNY_MODEL=envmodel',
-      'SKINNY_API=openai',
-      `export SKINNY_HOST="${server.url}"`,
-      'SKINNY_AUTOSAVE=yes   # comment',
-      'SKINNY_TOOLS=true'
-    ].join('\n'));
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
+      profiles: { Default: { env: {
+        SKINNY_MODEL: 'envmodel', SKINNY_API: 'openai', SKINNY_HOST: server.url, SKINNY_AUTOSAVE: 'yes', SKINNY_TOOLS: true
+      } } }
+    }));
   });
 
   it('uses the file for anything not given on the command line', async () => {
@@ -107,7 +104,7 @@ describe('defaults from .env', () => {
     expect(chatRequests()[0].body.model).toBe('envmodel');
     expect(stdout).toMatch(/tools +on/);
     expect(stdout).toMatch(/autosave +on \('chat-/);
-    expect(stdout).toContain(`defaults file    ${path.join(home, '.env')}`);
+    expect(stdout).toContain(`defaults file    ${path.join(home, 'config.json')}`);
     expect(fs.readdirSync(path.join(home, 'sessions'))).toHaveLength(1);
   });
 
@@ -119,10 +116,52 @@ describe('defaults from .env', () => {
   });
 
   it('fails clearly on a bad on/off value', async () => {
-    fs.appendFileSync(path.join(home, '.env'), '\nSKINNY_IMAGES=maybe\n');
+    const config = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
+    config.profiles.Default.env.SKINNY_IMAGES = 'maybe';
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(config));
     const { stderr, code } = await run([]);
     expect(code).toBe(1);
     expect(stderr).toContain("SKINNY_IMAGES must be true or false (got 'maybe')");
+  });
+});
+
+describe('config.json profiles', () => {
+  beforeEach(() => {
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
+      profiles: {
+        Default: { env: { SKINNY_MODEL: 'defmodel', SKINNY_API: 'openai', SKINNY_HOST: server.url, SKINNY_TOOLS: false, SKINNY_MARKDOWN: true } },
+        'My Profile': { env: { SKINNY_MODEL: 'other', SKINNY_MARKDOWN: false } }
+      }
+    }));
+  });
+
+  it('uses the Default profile unless told otherwise', async () => {
+    const { stdout } = await run([], 'hello\n/show settings\n', { env: { SKINNY_TOOLS: null } });
+    expect(chatRequests()[0].body.model).toBe('defmodel');
+    expect(stdout).toMatch(/profile +Default/);
+    expect(stdout).toContain(`defaults file    ${path.join(home, 'config.json')}`);
+  });
+
+  it('selects a profile with --profile or SKINNY_PROFILE, inheriting from Default', async () => {
+    const first = await run(['--profile', 'My Profile'], 'hi\n/show settings\n', { env: { SKINNY_TOOLS: null } });
+    expect(chatRequests()[0].body.model).toBe('other');
+    expect(first.stdout).toMatch(/profile +My Profile/);
+    expect(first.stdout).toMatch(/markdown +off/);
+    expect(first.stdout).toMatch(/tools +off/); // from Default
+    server.requests.length = 0;
+    await run([], 'hi\n', { env: { SKINNY_PROFILE: 'my profile', SKINNY_TOOLS: null } });
+    expect(chatRequests()[0].body.model).toBe('other');
+  });
+
+  it('lets the command line override the profile', async () => {
+    await run(['--profile', 'My Profile', 'climodel'], 'hi\n', { env: { SKINNY_TOOLS: null } });
+    expect(chatRequests()[0].body.model).toBe('climodel');
+  });
+
+  it('fails clearly for an unknown profile', async () => {
+    const { stderr, code } = await run(['--profile', 'Nope']);
+    expect(code).toBe(1);
+    expect(stderr).toContain("no profile named 'Nope' (profiles: Default, My Profile)");
   });
 });
 
