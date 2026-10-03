@@ -8,7 +8,7 @@ let capture;
 
 beforeAll(async () => {
   fakeTTY({ columns: 70 });
-  skinnyai = await import('../bin/skinnyai.js');
+  skinnyai = await import('../src/skinnyai.js');
 });
 
 beforeEach(() => {

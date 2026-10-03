@@ -26,3 +26,8 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm test
+      - run: npm run build
+      - name: Test the built CLI
+        run: npx vitest run test/cli.test.js
+        env:
+          SKINNYAI_SCRIPT: ${{ github.workspace }}/bin/skinnyai.js

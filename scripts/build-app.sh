@@ -26,17 +26,6 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
 swift package resolve
-# SwiftTerm 1.20 drops a character when re-joining wrapped lines after the window is widened,
-# once the first lines on screen hold wide (emoji) characters; see the patch for details.
-patch="$root/macos/patches/swiftterm-reflow-wide.patch"
-checkout=".build/checkouts/SwiftTerm"
-if git -C "$checkout" apply --reverse --check "$patch" 2>/dev/null; then
-  :  # already applied
-elif git -C "$checkout" apply --check "$patch" 2>/dev/null; then
-  git -C "$checkout" apply "$patch"
-else
-  echo "warning: macos/patches/swiftterm-reflow-wide.patch doesn't apply to this SwiftTerm; it may be fixed upstream" >&2
-fi
 swift build -c release --arch "$(uname -m)"
 bin="$(swift build -c release --arch "$(uname -m)" --show-bin-path)"
 cp "$bin/SkinnyAI" "$app/Contents/MacOS/SkinnyAI"

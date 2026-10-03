@@ -13,8 +13,10 @@
     "node": ">=22"
   },
   "scripts": {
-    "ollama": "node bin/skinnyai.js",
-    "openai": "node bin/skinnyai.js --api openai",
+    "ollama": "node src/skinnyai.js",
+    "openai": "node src/skinnyai.js --api openai",
+    "build": "node scripts/build-cli.mjs",
+    "prepack": "npm run build",
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",

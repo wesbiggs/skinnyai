@@ -23,7 +23,7 @@ let chatPidURL = homeDirectory.appendingPathComponent("app-chat.pid")
 
 // MARK: - config.json
 // Named profiles, each with an "env" block (the variables the program reads) and optional "mcpServers".
-// Every other profile inherits from Default, as in bin/skinnyai.js (resolveProfile). Anything this app
+// Every other profile inherits from Default, as in src/skinnyai.js (resolveProfile). Anything this app
 // doesn't manage (other variables, MCP servers, other top-level keys) is kept as it was.
 
 struct ConfigFile {

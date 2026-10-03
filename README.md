@@ -33,8 +33,10 @@ curl http://localhost:11434/api/tags
 
 ## Setup
 
-### 1. Make the script executable
+### 1. Get the script
+Download `skinnyai.js` from the latest [release](../../releases/latest) (one minified file, about 90 KB), or build it from a checkout:
 ```bash
+npm install && npm run build   # writes bin/skinnyai.js
 chmod +x bin/skinnyai.js
 ```
 
@@ -467,13 +469,13 @@ npm install
 npm test            # or: npm run test:watch
 ```
 
-They cover markdown rendering (checked against a small terminal emulator, so wrapping and table borders are tested as they'd appear on screen), emoji widths, inline images, the line editor (driven with simulated keystrokes), the Modelfile format, `config.json` profiles and flag handling, and `/save`, `/load`, `/share`, and autosave. `test/cli.test.js` runs `bin/skinnyai.js` end to end against a mock server that speaks both the Ollama and OpenAI APIs. Tests use a temporary `SKINNY_HOME`, so they never read or write your real `~/.skinny`.
+They cover markdown rendering (checked against a small terminal emulator, so wrapping and table borders are tested as they'd appear on screen), emoji widths, inline images, the line editor (driven with simulated keystrokes), the Modelfile format, `config.json` profiles and flag handling, and `/save`, `/load`, `/share`, and autosave. `test/cli.test.js` runs `src/skinnyai.js` end to end against a mock server that speaks both the Ollama and OpenAI APIs. Tests use a temporary `SKINNY_HOME`, so they never read or write your real `~/.skinny`.
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the suite on Node 22 and 24 for every push to `main` and every pull request. No real terminal is needed: the tests fake one, including the iTerm2 and kitty image support, so everything runs headless on Linux.
 
 ## Source
 
-The whole tool is the single file `bin/skinnyai.js`, with no runtime dependencies beyond Node.js itself — copy it wherever you work (esbuild and postject are only used to build the standalone binary). Tests live in `test/`.
+The source is the modules in `src/` (entry `src/skinnyai.js`); `npm run build` minifies it into the single file `bin/skinnyai.js` (not checked in), which has no runtime dependencies beyond Node.js itself — copy it wherever you work (esbuild and postject are only build tools). Tests live in `test/`.
 
 ## macOS app
 

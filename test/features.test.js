@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { startMockServer } from './helpers/mock-server.js';
 
-const SCRIPT = fileURLToPath(new URL('../bin/skinnyai.js', import.meta.url));
+const SCRIPT = fileURLToPath(new URL('../src/skinnyai.js', import.meta.url));
 const MCP_SERVER = fileURLToPath(new URL('./helpers/mcp-server.js', import.meta.url));
 let server;
 let home;
@@ -82,7 +82,7 @@ describe('web tools', () => {
 
 describe('welcome box', () => {
   it('names the program and version, boxes the details, and shows MCP under Tools', async () => {
-    const { VERSION } = await import('../bin/skinnyai.js');
+    const { VERSION } = await import('../src/skinnyai.js');
     expect(VERSION).toBe(JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
     writeMcpConfig();
     const { stdout } = await run(['m', '--api', 'openai', '--host', server.url, '--tools'], '', { SKINNY_TOOLS: 'true' });
@@ -97,7 +97,7 @@ describe('welcome box', () => {
   });
 
   it('draws a border that lines up around wide characters', async () => {
-    const { drawBox, visibleWidth } = await import('../bin/skinnyai.js');
+    const { drawBox, visibleWidth } = await import('../src/skinnyai.js');
     const rows = drawBox(['🚀 title', 'plain', '', '日本語']).split('\n');
     expect(new Set(rows.map(visibleWidth)).size).toBe(1);
     expect(rows[1].startsWith('│ 🚀 title')).toBe(true);
@@ -119,7 +119,7 @@ describe('welcome screen', () => {
 
 describe('keep-alive and unload', () => {
   it('are left out for ollama.com', async () => {
-    const { OllamaChat } = await import('../bin/skinnyai.js');
+    const { OllamaChat } = await import('../src/skinnyai.js');
     const cloud = new OllamaChat('m', { host: 'https://ollama.com', stopOnExit: true });
     expect(cloud.buildOllamaChatBody()).not.toHaveProperty('keep_alive');
     expect(cloud.managesModelLifetime).toBe(false);
@@ -205,7 +205,7 @@ describe('--model default', () => {
   });
 
   it('chooses the newest plain gpt for OpenAI by release date', async () => {
-    const { pickDefaultModel } = await import('../bin/skinnyai.js');
+    const { pickDefaultModel } = await import('../src/skinnyai.js');
     const list = [
       { id: 'gpt-5', created: 100 }, { id: 'gpt-5.1', created: 300 }, { id: 'gpt-5.1-2025-11-13', created: 301 },
       { id: 'gpt-5.2-mini', created: 400 }, { id: 'gpt-5-codex', created: 500 }, { id: 'o3', created: 600 },
@@ -386,7 +386,7 @@ describe('images in tool results', () => {
   ];
 
   it('are relayed in order as image_url parts for OpenAI-style servers', async () => {
-    const { OllamaChat } = await import('../bin/skinnyai.js');
+    const { OllamaChat } = await import('../src/skinnyai.js');
     const chat = new OllamaChat('m', { api: 'openai', host: server.url });
     chat.history = structuredClone(history);
     const sent = chat.requestMessages('');
@@ -400,7 +400,7 @@ describe('images in tool results', () => {
   });
 
   it('are data: URLs in the text for Ollama, whose tool messages are plain text', async () => {
-    const { OllamaChat } = await import('../bin/skinnyai.js');
+    const { OllamaChat } = await import('../src/skinnyai.js');
     const chat = new OllamaChat('m', { host: server.url });
     chat.history = structuredClone(history);
     expect(chat.requestMessages('')[2].content).toBe('data:image/png;base64,AAAA\nsaved to /tmp/p.png');

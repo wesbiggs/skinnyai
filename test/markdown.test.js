@@ -5,7 +5,7 @@ let skinnyai;
 
 beforeAll(async () => {
   fakeTTY({ columns: 60 });
-  skinnyai = await import('../bin/skinnyai.js');
+  skinnyai = await import('../src/skinnyai.js');
 });
 
 // What a 60-column terminal shows after `markdown` is rendered.

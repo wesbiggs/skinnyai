@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { startMockServer } from './helpers/mock-server.js';
 
-const SCRIPT = fileURLToPath(new URL('../bin/skinnyai.js', import.meta.url));
+// SKINNYAI_SCRIPT points the same tests at the built bin/skinnyai.js (CI does).
+const SCRIPT = process.env.SKINNYAI_SCRIPT || fileURLToPath(new URL('../src/skinnyai.js', import.meta.url));
 let server;
 let home;
 
