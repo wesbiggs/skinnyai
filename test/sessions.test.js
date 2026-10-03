@@ -9,7 +9,7 @@ let capture;
 
 beforeAll(async () => {
   fakeTTY({ columns: 80 });
-  skinnyai = await import('../bin/skinnyai.js');
+  skinnyai = await import('../src/skinnyai.js');
   server = await startMockServer();
 });
 

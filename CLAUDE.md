@@ -4,9 +4,10 @@ A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic
 
 ## Layout
 
-- `bin/skinnyai.js`: the entire CLI (one large file): line editor, markdown renderer, API clients, tools, MCP, sessions, config/profiles.
+- `src/skinnyai.js`: the entire CLI (one large file): line editor, markdown renderer, API clients, tools, MCP, sessions, config/profiles. Tests and `npm run ollama` run it directly.
+- `bin/skinnyai.js`: generated (gitignored) by `npm run build` (`scripts/build-cli.mjs`, esbuild bundle + minify, ~90 KB); it's the npm `bin` (built on `prepack`) and the release's smallest artifact. Set `SKINNYAI_SCRIPT` to run `test/cli.test.js` against it.
 - `macos/main.swift`: the whole app (AppKit + SwiftUI + SwiftTerm): start window, Settings, built-in chat windows. `Package.swift` builds it.
-- `scripts/`: `build-sea.mjs` (single-executable CLI, bundled into the app as `skinnyai-cli`), `build-app.sh` (builds, signs, bundles the app), `make-icon.swift` (regenerates the icon).
+- `scripts/`: `build-cli.mjs` (minified single file), `build-sea.mjs` (single-executable CLI, bundled into the app as `skinnyai-cli`), `build-app.sh` (builds, signs, bundles the app), `make-icon.swift` (regenerates the icon).
 - `test/`: vitest. Tests use a temporary `SKINNY_HOME` and a mock server speaking the Ollama, OpenAI, and Anthropic APIs; they never touch the real `~/.skinny`.
 
 ## Commands

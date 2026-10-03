@@ -1,6 +1,7 @@
 .claude
 node_modules
 dist
+bin
 build/sea
 build/skinnyai
 build/AppIcon.iconset

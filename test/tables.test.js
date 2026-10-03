@@ -5,7 +5,7 @@ let skinnyai;
 
 beforeAll(async () => {
   fakeTTY({ columns: 100 });
-  skinnyai = await import('../bin/skinnyai.js');
+  skinnyai = await import('../src/skinnyai.js');
 });
 
 async function screen(markdown, columns = 100) {
