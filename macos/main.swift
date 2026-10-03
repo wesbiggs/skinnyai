@@ -143,6 +143,7 @@ func parseBool(_ text: String?) -> Bool? {
     }
 }
 
+@MainActor
 final class SettingsModel: ObservableObject {
     @Published var apiKey = ""
     @Published var anthropicKey = ""
@@ -636,6 +637,7 @@ func currentFontSize() -> CGFloat {
 }
 
 /// Remembers the size and applies it to every open chat window.
+@MainActor
 func setFontSize(_ size: CGFloat) {
     let clamped = min(40, max(8, size.rounded()))
     UserDefaults.standard.set(Double(clamped), forKey: "fontSize")
@@ -668,17 +670,14 @@ final class ChatTerminalView: LocalProcessTerminalView {
                 ch.unicodeScalars.allSatisfy({ !special.contains($0) }) ? [ch] : ["\\", ch]
             })
         }.joined(separator: " ") + " "
-        if getTerminal().bracketedPasteMode {
-            send(txt: "\u{1b}[200~" + text + "\u{1b}[201~")
-        } else {
-            send(txt: text)
-        }
+        pasteText(text)
         window?.makeFirstResponder(self)
         return true
     }
 }
 
 /// One chat: a terminal view running the bundled skinnyai binary.
+@MainActor
 final class ChatWindow: NSObject, NSWindowDelegate, LocalProcessTerminalViewDelegate {
     let window: NSWindow
     private let terminal: ChatTerminalView
@@ -765,8 +764,9 @@ final class ChatWindow: NSObject, NSWindowDelegate, LocalProcessTerminalViewDele
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 }
 
-var chatWindows: [ChatWindow] = []
+@MainActor var chatWindows: [ChatWindow] = []
 
+@MainActor
 func openChatWindow(binary: URL, arguments: [String] = [], savedName: String? = nil) {
     let chat = ChatWindow(binary: binary.path, arguments: arguments, cascadeFrom: chatWindows.last?.window)
     chat.savedName = savedName
@@ -778,6 +778,7 @@ func openChatWindow(binary: URL, arguments: [String] = [], savedName: String? = 
 
 /// Opens a new terminal window running skinnyai. A .command file does this
 /// without the Automation permission prompt that scripting the terminal would need.
+@MainActor
 func startChat(session: String? = nil) {
     // Chats use the profile picked in Settings (Default needs no flag).
     let profile = activeProfileName()
@@ -816,6 +817,7 @@ func startChat(session: String? = nil) {
 }
 
 /// Whether a chat started by this app is still running.
+@MainActor
 func chatIsRunning() -> Bool {
     if !chatWindows.isEmpty { return true }
     guard let text = try? String(contentsOf: chatPidURL, encoding: .utf8),
@@ -829,6 +831,7 @@ func chatIsRunning() -> Bool {
 
 /// Brings the terminal app holding the running chat to the front (no automation permission needed,
 /// so it can't pick the exact window: the terminal shows whichever window it had in front).
+@MainActor
 func focusChat() {
     if let chat = chatWindows.last {
         NSApp.activate(ignoringOtherApps: true)
@@ -849,6 +852,7 @@ func alert(_ text: String) {
 
 // MARK: - App
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var startWindow: NSWindow?
@@ -1062,7 +1066,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 let application = NSApplication.shared
-let delegate = AppDelegate()
+let delegate = MainActor.assumeIsolated { AppDelegate() }
 application.delegate = delegate
 application.setActivationPolicy(.regular)
 application.run()
