@@ -475,7 +475,7 @@ GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the
 
 ## Source
 
-The source is `src/skinnyai.js`; `npm run build` minifies it into the single file `bin/skinnyai.js` (not checked in), which has no runtime dependencies beyond Node.js itself — copy it wherever you work (esbuild and postject are only build tools). Tests live in `test/`.
+The source is the modules in `src/` (entry `src/skinnyai.js`); `npm run build` minifies it into the single file `bin/skinnyai.js` (not checked in), which has no runtime dependencies beyond Node.js itself — copy it wherever you work (esbuild and postject are only build tools). Tests live in `test/`.
 
 ## macOS app
 
