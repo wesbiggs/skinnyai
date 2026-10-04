@@ -22,12 +22,14 @@ let sessionsURL = homeDirectory.appendingPathComponent("sessions")
 let chatPidURL = homeDirectory.appendingPathComponent("app-chat.pid")
 
 // MARK: - config.json
-// Named profiles, each with an "env" block (the variables the program reads) and optional "mcpServers".
-// Every other profile inherits from Default, as in src/skinnyai.js (resolveProfile). Anything this app
-// doesn't manage (other variables, MCP servers, other top-level keys) is kept as it was.
+// A top-level "defaultProfile" naming the profile used unless another is picked, and named profiles, each with an
+// "env" block (the variables the program reads) and optional "mcpServers". A top-level "shared" block (same
+// shape) is what every profile starts from, as in src/config.js (resolveProfile). "startupEnv" (settings
+// applied once as the program starts) isn't managed here and is kept as it was.
+// Anything this app doesn't manage (other variables, MCP servers, other top-level keys) is kept as it was.
 
 struct ConfigFile {
-    static let defaultName = "Default"
+    static let freshName = "Main"
     private(set) var root: [String: Any]
 
     init() {
@@ -37,18 +39,27 @@ struct ConfigFile {
             root = object
             return
         }
-        root = ["profiles": [Self.defaultName: ["env": [String: String]()]]]
+        root = ["defaultProfile": Self.freshName, "profiles": [Self.freshName: ["env": [String: String]()]]]
     }
 
     private var profiles: [String: Any] { root["profiles"] as? [String: Any] ?? [:] }
 
-    /// Default first, then the rest alphabetically.
-    var profileNames: [String] {
-        let others = profiles.keys.filter { $0 != Self.defaultName }.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-        return [Self.defaultName] + others
+    /// The profile used unless another is picked: the file's "defaultProfile", else the first one.
+    var defaultProfile: String {
+        if let named = root["defaultProfile"] as? String, let match = profileNames.first(where: { $0.caseInsensitiveCompare(named) == .orderedSame }) {
+            return match
+        }
+        return profileNames.first ?? Self.freshName
     }
 
-    func has(_ name: String) -> Bool { name == Self.defaultName || profiles[name] != nil }
+    mutating func setDefault(_ name: String) { root["defaultProfile"] = name }
+
+    /// Alphabetical.
+    var profileNames: [String] {
+        profiles.keys.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    func has(_ name: String) -> Bool { profiles[name] != nil }
 
     private static func text(_ value: Any) -> String? {
         if value is NSNull { return nil }
@@ -64,16 +75,21 @@ struct ConfigFile {
         return block.compactMapValues { Self.text($0) }
     }
 
-    /// What a chat using the profile sees: its variables over Default's.
-    func effectiveEnv(_ name: String) -> [String: String] {
-        name == Self.defaultName ? ownEnv(name) : ownEnv(Self.defaultName).merging(ownEnv(name)) { _, own in own }
+    /// The variables every profile starts from.
+    var sharedEnv: [String: String] {
+        ((root["shared"] as? [String: Any])?["env"] as? [String: Any] ?? [:]).compactMapValues { Self.text($0) }
     }
 
-    /// Sets `managed` variables in a profile (creating it): an empty value means "unset". A non-Default
-    /// profile only stores what differs from Default's, and an empty string where Default has a value.
+    /// What a chat using the profile sees: its variables over the shared ones.
+    func effectiveEnv(_ name: String) -> [String: String] {
+        sharedEnv.merging(ownEnv(name)) { _, own in own }
+    }
+
+    /// Sets `managed` variables in a profile (creating it): an empty value means "unset". A profile only
+    /// stores what differs from the shared variables, and an empty string where they have a value.
     mutating func save(profile name: String, values: [String: String], managed: [String]) {
         var own = (profiles[name] as? [String: Any])?["env"] as? [String: Any] ?? [:]
-        let base = name == Self.defaultName ? [:] : effectiveEnv(Self.defaultName)
+        let base = sharedEnv
         for key in managed {
             let value = values[key] ?? ""
             if value == (base[key] ?? "") { own[key] = nil } else { own[key] = value }
@@ -108,8 +124,9 @@ func profileSummary(_ name: String) -> String {
 
 /// The profile chats started from this app use, if it still exists.
 func activeProfileName() -> String {
-    let saved = UserDefaults.standard.string(forKey: "profile") ?? ConfigFile.defaultName
-    return ConfigFile().has(saved) ? saved : ConfigFile.defaultName
+    let config = ConfigFile()
+    let saved = UserDefaults.standard.string(forKey: "profile") ?? ""
+    return config.has(saved) ? saved : config.defaultProfile
 }
 
 // MARK: - Settings model
@@ -143,6 +160,7 @@ func parseBool(_ text: String?) -> Bool? {
     }
 }
 
+@MainActor
 final class SettingsModel: ObservableObject {
     @Published var apiKey = ""
     @Published var anthropicKey = ""
@@ -170,6 +188,8 @@ final class SettingsModel: ObservableObject {
     @Published var flags: [String: Bool] = [:]
     @Published var fontSize = Double(currentFontSize())
     @Published var terminal = UserDefaults.standard.string(forKey: "chatIn") ?? "builtin"
+    /// App-wide, not per profile: at launch, go straight to a chat with the default profile.
+    @Published var skipStart = UserDefaults.standard.bool(forKey: "skipStart")
     @Published var message: String?
     /// A confirmation shown where the hint usually is, e.g. after "Save to Profile".
     @Published var savedNote: String?
@@ -216,14 +236,17 @@ final class SettingsModel: ObservableObject {
 
     private var config = ConfigFile()
     /// The profile being edited (chats use it too once saved).
-    @Published var profile = ConfigFile.defaultName
-    @Published var profileNames = [ConfigFile.defaultName]
+    @Published var profile = ConfigFile().defaultProfile
+    @Published var profileNames = ConfigFile().profileNames
+    /// The profile the program uses when a chat doesn't name one (the file's "defaultProfile").
+    @Published var defaultProfile = ConfigFile().defaultProfile
 
     init() { load() }
 
     func load() {
         config = ConfigFile()
         profileNames = config.profileNames
+        defaultProfile = config.defaultProfile
         profile = activeProfileName()
         loadFields()
     }
@@ -346,8 +369,7 @@ final class SettingsModel: ObservableObject {
 
     var isConfigured: Bool {
         let file = ConfigFile()
-        let name = file.has(activeProfileName()) ? activeProfileName() : ConfigFile.defaultName
-        return !(file.effectiveEnv(name)["SKINNY_MODEL"] ?? "").isEmpty
+        return !(file.effectiveEnv(activeProfileName())["SKINNY_MODEL"] ?? "").isEmpty
     }
 
     /// Writes the form into the profile `name` (creating it), and makes it the one chats use.
@@ -374,17 +396,32 @@ final class SettingsModel: ObservableObject {
         }
         config.save(profile: name, values: values, managed: Array(values.keys))
         UserDefaults.standard.set(terminal, forKey: "chatIn")
+        UserDefaults.standard.set(skipStart, forKey: "skipStart")
         UserDefaults.standard.set(name, forKey: "profile")
         setFontSize(CGFloat(fontSize))
         do {
             try config.write()
             profileNames = config.profileNames
+            defaultProfile = config.defaultProfile
             profile = name
             message = nil
             return true
         } catch {
             message = "Couldn't save: \(error.localizedDescription)"
             return false
+        }
+    }
+
+    /// Makes the selected profile the file's default (what `skinnyai` uses with no --profile).
+    func makeDefault() {
+        config = ConfigFile()
+        config.setDefault(profile)
+        do {
+            try config.write()
+            defaultProfile = profile
+            message = nil
+        } catch {
+            message = "Couldn't save: \(error.localizedDescription)"
         }
     }
 
@@ -446,7 +483,7 @@ struct SettingsView: View {
             Form {
                 Section("Profile") {
                     Picker("Profile", selection: Binding(get: { model.profile }, set: { model.select(profile: $0) })) {
-                        ForEach(model.profileNames, id: \.self) { Text($0).tag($0) }
+                        ForEach(model.profileNames, id: \.self) { Text($0 == model.defaultProfile ? "\($0) (default)" : $0).tag($0) }
                     }
                     HStack {
                         Button("Save to Profile") { if model.save() { model.message = nil; model.savedNote = "Saved to \(model.profile)." } }
@@ -455,6 +492,9 @@ struct SettingsView: View {
                             if let name = promptForProfileName(), model.createProfile(named: name) { model.savedNote = "Created \(name)." }
                         }
                         .help("Save the settings below as a new profile")
+                        Button("Make Default") { model.makeDefault(); model.savedNote = "\(model.profile) is now the default profile." }
+                            .disabled(model.profile == model.defaultProfile)
+                            .help("Use this profile when you run skinnyai in a terminal without --profile")
                     }
                 }
                 Section("Connection") {
@@ -506,6 +546,12 @@ struct SettingsView: View {
                         Text("Automatic (iTerm if installed)").tag("auto")
                         Text("Terminal").tag("terminal")
                         Text("iTerm").tag("iterm")
+                    }
+                    Toggle(isOn: $model.skipStart) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Skip profile selection at start")
+                            Text("Open a chat with the default profile when the app launches.").font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                     Stepper(value: $model.fontSize, in: 8...40, step: 1) {
                         Text("Font size: \(Int(model.fontSize)) pt")
@@ -636,6 +682,7 @@ func currentFontSize() -> CGFloat {
 }
 
 /// Remembers the size and applies it to every open chat window.
+@MainActor
 func setFontSize(_ size: CGFloat) {
     let clamped = min(40, max(8, size.rounded()))
     UserDefaults.standard.set(Double(clamped), forKey: "fontSize")
@@ -668,17 +715,14 @@ final class ChatTerminalView: LocalProcessTerminalView {
                 ch.unicodeScalars.allSatisfy({ !special.contains($0) }) ? [ch] : ["\\", ch]
             })
         }.joined(separator: " ") + " "
-        if getTerminal().bracketedPasteMode {
-            send(txt: "\u{1b}[200~" + text + "\u{1b}[201~")
-        } else {
-            send(txt: text)
-        }
+        pasteText(text)
         window?.makeFirstResponder(self)
         return true
     }
 }
 
 /// One chat: a terminal view running the bundled skinnyai binary.
+@MainActor
 final class ChatWindow: NSObject, NSWindowDelegate, LocalProcessTerminalViewDelegate {
     let window: NSWindow
     private let terminal: ChatTerminalView
@@ -765,8 +809,9 @@ final class ChatWindow: NSObject, NSWindowDelegate, LocalProcessTerminalViewDele
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 }
 
-var chatWindows: [ChatWindow] = []
+@MainActor var chatWindows: [ChatWindow] = []
 
+@MainActor
 func openChatWindow(binary: URL, arguments: [String] = [], savedName: String? = nil) {
     let chat = ChatWindow(binary: binary.path, arguments: arguments, cascadeFrom: chatWindows.last?.window)
     chat.savedName = savedName
@@ -778,10 +823,11 @@ func openChatWindow(binary: URL, arguments: [String] = [], savedName: String? = 
 
 /// Opens a new terminal window running skinnyai. A .command file does this
 /// without the Automation permission prompt that scripting the terminal would need.
+@MainActor
 func startChat(session: String? = nil) {
-    // Chats use the profile picked in Settings (Default needs no flag).
+    // Chats use the profile picked in Settings.
     let profile = activeProfileName()
-    let profileArgs = (profile == ConfigFile.defaultName ? [] : ["--profile", profile]) + (session.map { [$0] } ?? [])
+    let profileArgs = ["--profile", profile] + (session.map { [$0] } ?? [])
     guard let binary = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("skinnyai-cli"),
           FileManager.default.isExecutableFile(atPath: binary.path) else {
         alert("The skinnyai program is missing from this app.")
@@ -816,6 +862,7 @@ func startChat(session: String? = nil) {
 }
 
 /// Whether a chat started by this app is still running.
+@MainActor
 func chatIsRunning() -> Bool {
     if !chatWindows.isEmpty { return true }
     guard let text = try? String(contentsOf: chatPidURL, encoding: .utf8),
@@ -829,6 +876,7 @@ func chatIsRunning() -> Bool {
 
 /// Brings the terminal app holding the running chat to the front (no automation permission needed,
 /// so it can't pick the exact window: the terminal shows whichever window it had in front).
+@MainActor
 func focusChat() {
     if let chat = chatWindows.last {
         NSApp.activate(ignoringOtherApps: true)
@@ -849,6 +897,7 @@ func alert(_ text: String) {
 
 // MARK: - App
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var startWindow: NSWindow?
@@ -870,7 +919,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         NSApp.activate(ignoringOtherApps: true)
-        showStart()
+        showStartOrDefaultChat()
+    }
+
+    /// With "Skip profile selection at start" on, opens a chat with the default profile (or Settings, if that
+    /// isn't set up); otherwise shows the start screen. File > New Chat always shows the start screen.
+    private func showStartOrDefaultChat() {
+        guard UserDefaults.standard.bool(forKey: "skipStart") else { showStart(); return }
+        UserDefaults.standard.set(ConfigFile().defaultProfile, forKey: "profile")
+        openChat()
     }
 
     /// The start screen, with the last-used profile selected.
@@ -906,10 +963,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
-    /// Switches to the chat that's already open, or starts one.
+    /// Starts a chat: built-in windows can be as many as wanted; a terminal chat is single, so an
+    /// already-running one is brought to the front instead.
     private func openChat() {
+        let builtin = (UserDefaults.standard.string(forKey: "chatIn") ?? "builtin") == "builtin"
         if !settings.isConfigured { showSettings() }
-        else if chatIsRunning() { focusChat() }
+        else if !builtin && chatIsRunning() { focusChat() }
         else { startChat() }
     }
 
@@ -917,7 +976,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if settingsWindow?.isVisible == true { settingsWindow?.makeKeyAndOrderFront(nil) }
         else if chatIsRunning() { focusChat() }
-        else { showStart() }
+        else { showStartOrDefaultChat() }
         return false
     }
 
@@ -1062,7 +1121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 let application = NSApplication.shared
-let delegate = AppDelegate()
+let delegate = MainActor.assumeIsolated { AppDelegate() }
 application.delegate = delegate
 application.setActivationPolicy(.regular)
 application.run()

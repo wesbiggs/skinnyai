@@ -96,8 +96,9 @@ Put defaults in `~/.skinny/config.json` (or `$SKINNY_HOME/config.json`) so you d
 
 ```json
 {
+  "defaultProfile": "Local",
   "profiles": {
-    "Default": {
+    "Local": {
       "env": { "SKINNY_MODEL": "gemma4:31b", "SKINNY_TOOLS": true, "SKINNY_AUTOSAVE": true }
     },
     "My Profile": {
@@ -107,7 +108,23 @@ Put defaults in `~/.skinny/config.json` (or `$SKINNY_HOME/config.json`) so you d
 }
 ```
 
-The `Default` profile is the one used unless you pick another with `--profile "My Profile"` or `SKINNY_PROFILE="My Profile"` (names are matched ignoring case). Other profiles **inherit from Default**: they only need the settings that differ, and their `mcpServers` are added to Default's (a same-named server replaces it; `"disabled": true` turns one off). `/show settings` shows the active profile. Each variable maps to a flag:
+The top-level `"defaultProfile"` names the profile used unless you pick another with `--profile "My Profile"` or `SKINNY_PROFILE="My Profile"` (names are matched ignoring case), or switch during a chat with `/set profile "My Profile"` (`/set profile` alone lists them). Without a `"defaultProfile"`, the first profile is used.
+
+Two more top-level blocks keep profiles short:
+
+- **`shared`** has the same shape as a profile (`env`, `mcpServers`) and is what every profile starts from; a profile only needs what differs. Put things like `SKINNY_TOOLS`, `SKINNY_MARKDOWN`, and `SKINNY_AUTOSAVE` there. A same-named MCP server in a profile replaces the shared one (`"disabled": true` turns one off).
+- **`startupEnv`** is a flat block of settings that apply once, as skinnyai starts, and that `/set profile` never changes: `NODE_EXTRA_CA_CERTS` (a path to a PEM file, for a server behind a private CA such as Caddy's local one; skinnyai adds it to the trusted certificates, and MCP servers it launches inherit the variable), `SKINNY_TRUSTED_HOSTS`, `SKINNY_IMAGE_DIR`, and the four `SKINNY_*_COLOR` variables.
+
+```json
+{
+  "defaultProfile": "Local",
+  "startupEnv": { "NODE_EXTRA_CA_CERTS": "/Users/me/caddy-root.pem", "SKINNY_MODEL_NORMAL_COLOR": "120" },
+  "shared": { "env": { "SKINNY_TOOLS": true, "SKINNY_AUTOSAVE": true } },
+  "profiles": { "Local": { "env": { "SKINNY_MODEL": "gemma4:31b" } } }
+}
+```
+
+Precedence, highest first: the command line, your shell's environment, the profile, `shared`. `/show settings` shows the active profile. Each variable maps to a flag:
 
 | Variable | Flag |
 |----------|------|
@@ -124,7 +141,7 @@ The `Default` profile is the one used unless you pick another with `--profile "M
 | `SKINNY_STOP_ON_EXIT` | `--stop-on-exit` / `--no-stop-on-exit` |
 | `SKINNY_USER_NORMAL_COLOR`, `SKINNY_USER_ITALIC_COLOR`, `SKINNY_MODEL_NORMAL_COLOR`, `SKINNY_MODEL_ITALIC_COLOR` | the `--*-color` flags |
 
-On/off values can be JSON `true`/`false` or the strings `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`. Variables already set in your environment take precedence over the file, and command-line flags take precedence over both — that's what the `--no-…` forms are for. `NODE_EXTRA_CA_CERTS` also works in a profile's `env` (a path to a PEM file, for a server behind a private CA such as Caddy's local one): skinnyai adds it to the trusted certificates when it starts, and MCP servers it launches inherit the variable. The file may hold API keys, so keep it readable only by you (`chmod 600`).
+On/off values can be JSON `true`/`false` or the strings `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`. Variables already set in your environment take precedence over the file, and command-line flags take precedence over both — that's what the `--no-…` forms are for. Settings that only make sense at launch (`NODE_EXTRA_CA_CERTS`, colors, `SKINNY_TRUSTED_HOSTS`, `SKINNY_IMAGE_DIR`) go in `startupEnv`, above. The file may hold API keys, so keep it readable only by you (`chmod 600`).
 
 ## Keep-Alive Duration Formats
 
@@ -177,6 +194,7 @@ This client mirrors the command set of the native `ollama run` interactive termi
 | `/set parameter <name> <value...>` | Override a model parameter, e.g. `/set parameter temperature 0.9` |
 | `/set format json` / `/set noformat` | Force JSON-formatted responses, or disable |
 | `/set verbose` / `/set quiet` | Show/hide token-count and timing stats after each response |
+| `/set profile [name]` | List the profiles in `config.json`, or switch to one: its server, model, and settings replace the current ones, MCP servers restart, and a new conversation starts (the system message stays). Command-line flags applied only to the launch |
 | `/set think [level]` / `/set nothink` | Enable/disable extended thinking, for models that support it |
 | `/set showthinking` / `/set hidethinking` | Show/hide a thinking model's reasoning as it streams |
 | `/set tools` / `/set notools` | Let the model call tools (`web_search`, `fetch_page`), or disable |
@@ -269,7 +287,7 @@ Each turn is sent via Ollama's `/api/chat` endpoint with the full message histor
   - `# Headings` are bold; `- ` / `* ` / `+ ` bullets become `•` (or `◦` when indented); numbered lists (`1.` / `1)`) and bullets get a hanging indent so wrapped lines line up with the item text.
   - `> quotes` get a `│` bar, `---` becomes a full-width rule, and fenced code blocks are shown in a code color on a dark grey bar spanning the window width (the ``` lines become the bar, keeping any language name), unwrapped, so they copy cleanly.
   - `[links](https://...)` become clickable [OSC 8 hyperlinks](https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda) (underlined) in terminals that support them — iTerm2, WezTerm, kitty, GNOME Terminal, Windows Terminal, and others; elsewhere you just see the link text.
-  - `![images](https://...)` show as a clickable `🖼️ caption`. With `--images` (or `/set images`), terminals with an inline image protocol — iTerm2 and WezTerm (the protocol `imgcat` uses), kitty and Ghostty (kitty's graphics protocol; PNG only) — also draw the image below the line that mentions it, scaled to fit. It's off by default because it downloads whatever image URL the model writes: a prompt injection (say, in a page `fetch_page` read) could smuggle conversation details out in that URL. Like `fetch_page`, it refuses local/private network addresses (unless the host is listed in `SKINNY_TRUSTED_HOSTS`, e.g. `"SKINNY_TRUSTED_HOSTS": "mfluxible.test"` in a profile's `env`; a comma-separated list, each entry covering its subdomains) and caps the download size. Inside tmux or screen, which don't pass image sequences through, images stay links. A local file works too — `![](/Users/me/pic.png)`, `~/pic.png`, or a `file://` URL (written with `%20` for spaces) — and nothing is fetched or sent for it, so that's how to see images a tool such as an image generator saved on your machine.
+  - `![images](https://...)` show as a clickable `🖼️ caption`. With `--images` (or `/set images`), terminals with an inline image protocol — iTerm2 and WezTerm (the protocol `imgcat` uses), kitty and Ghostty (kitty's graphics protocol; PNG only) — also draw the image below the line that mentions it, scaled to fit. It's off by default because it downloads whatever image URL the model writes: a prompt injection (say, in a page `fetch_page` read) could smuggle conversation details out in that URL. Like `fetch_page`, it refuses local/private network addresses (unless the host is listed in `SKINNY_TRUSTED_HOSTS`, e.g. `"SKINNY_TRUSTED_HOSTS": "mfluxible.test"` in the config's `startupEnv`; a comma-separated list, each entry covering its subdomains) and caps the download size. Inside tmux or screen, which don't pass image sequences through, images stay links. A local file works too — `![](/Users/me/pic.png)`, `~/pic.png`, or a `file://` URL (written with `%20` for spaces) — and nothing is fetched or sent for it, so that's how to see images a tool such as an image generator saved on your machine.
   - Tables are drawn with box-drawing borders, honoring `:---:` / `---:` alignment. Columns shrink to fit the terminal, wrapping cell text as needed. Emoji (✅, ⚠️, flags, 👩‍💻) are measured as the two columns terminals draw them in, so they don't push borders out of line. Since column widths depend on every row, a table is drawn once it's complete; until then a `⋯ receiving table (N rows)` placeholder shows progress.
   - `/set nomarkdown` (or `--no-markdown`) shows responses as raw text instead; `/set markdown` turns rendering back on. When output is redirected to a file or pipe, text is always written raw, so it stays valid markdown.
 - **RP-style narration**: `*single asterisks*` are italic *and* switch to a dimmer narration color, so role-play narration stays visually distinct from dialogue. Each speaker gets its own color so turns are easy to tell apart at a glance: your messages are yellow (bright for dialogue, dim for `*narration*`), and the assistant's are green (same bright/dim split). Markup is stripped from the display; the raw text is still what's stored in history and sent to the model.
@@ -411,8 +429,9 @@ skinnyai reads each server from the `mcpServers` block of the active profile in 
 
 ```json
 {
+  "defaultProfile": "Main",
   "profiles": {
-    "Default": {
+    "Main": {
       "mcpServers": {
         "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/notes"] },
         "docs":  { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" }, "trust": true }
@@ -479,7 +498,7 @@ The source is the modules in `src/` (entry `src/skinnyai.js`); `npm run build` m
 
 ## macOS app
 
-`npm run build:app` builds `dist/SkinnyAI.app`: a small native shell around a standalone `skinnyai` binary (Node is embedded, so nothing needs installing). Opening it starts a chat in its own terminal window (built on [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm), with inline images and Shift+Enter); ⌘N opens another, and clicking the Dock icon brings the open chat forward. **Option+=** and **Option+-** make the text bigger or smaller (**Option+0** resets it; also under the View menu), and Settings has a font size too. **Settings… → Open chats in** can send chats to Terminal or iTerm instead. **SkinnyAI → Settings…** (⌘,) edits `~/.skinny/config.json`: a **Profile** box at the top picks the profile (chats you start use it), saves the settings below into it, or creates a new one; under it are the API key, server, model, and the on/off options. It keeps any variables and MCP servers it doesn't know about, and writes the file readable only by you. On first launch, with no model set, Settings opens automatically (choosing an API fills in its usual server address; web search and markdown are on by default). The Model field is a drop-down of what the server offers, refreshed when you change the server, API, or key. Clicking the Dock icon while a chat is open brings its terminal forward instead of starting another; **File → New Chat** (⌘N) always starts one.
+`npm run build:app` builds `dist/SkinnyAI.app`: a small native shell around a standalone `skinnyai` binary (Node is embedded, so nothing needs installing). Opening it starts a chat in its own terminal window (built on [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm), with inline images and Shift+Enter); ⌘N opens another, and clicking the Dock icon brings the open chat forward. **Option+=** and **Option+-** make the text bigger or smaller (**Option+0** resets it; also under the View menu), and Settings has a font size too. **Settings… → Open chats in** can send chats to Terminal or iTerm instead, and **Skip profile selection at start** (off by default) opens a chat with the default profile at launch instead of showing the start window (**File → New Chat** still does). **Make Default** in the Profile section sets which profile that is. **SkinnyAI → Settings…** (⌘,) edits `~/.skinny/config.json`: a **Profile** box at the top picks the profile (chats you start use it), saves the settings below into it, or creates a new one; under it are the API key, server, model, and the on/off options. It keeps any variables and MCP servers it doesn't know about, and writes the file readable only by you. On first launch, with no model set, Settings opens automatically (choosing an API fills in its usual server address; web search and markdown are on by default). The Model field is a drop-down of what the server offers, refreshed when you change the server, API, or key. Clicking the Dock icon while a chat is open brings its terminal forward instead of starting another; **File → New Chat** (⌘N) always starts one.
 
 Building it needs Xcode with its Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`); the Swift part is built with SwiftPM (`Package.swift`).
 

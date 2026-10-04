@@ -1,14 +1,23 @@
 {
+  "defaultProfile": "Ollama",
+  "startupEnv": {
+    "SKINNY_MODEL_NORMAL_COLOR": "120",
+    "SKINNY_USER_NORMAL_COLOR": "226"
+  },
+  "shared": {
+    "env": {
+      "SKINNY_TOOLS": true,
+      "SKINNY_MARKDOWN": true,
+      "SKINNY_AUTOSAVE": false
+    }
+  },
   "profiles": {
-    "Default": {
+    "Ollama": {
       "env": {
         "SKINNY_API": "ollama",
         "SKINNY_HOST": "http://localhost:11434",
         "SKINNY_MODEL": "gemma4:31b",
-        "SKINNY_KEEP_ALIVE": "1h",
-        "SKINNY_TOOLS": true,
-        "SKINNY_MARKDOWN": true,
-        "SKINNY_AUTOSAVE": false
+        "SKINNY_KEEP_ALIVE": "1h"
       },
       "mcpServers": {
         "files": {

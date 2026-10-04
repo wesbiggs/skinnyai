@@ -62,7 +62,8 @@ function writeMcpConfig(extra = {}) {
 
 function writeProfileMcpConfig() {
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
-    profiles: { Default: { mcpServers: { fake: { command: process.execPath, args: [MCP_SERVER], env: { FAKE_PREFIX: '>' } } } }, Other: { env: {} } }
+    defaultProfile: 'Default',
+    profiles: { Default: { env: {} }, Other: { mcpServers: { fake: { command: process.execPath, args: [MCP_SERVER], env: { FAKE_PREFIX: '>' } } } } }
   }));
 }
 
@@ -493,10 +494,43 @@ describe('MCP servers', () => {
   it('reads servers from a config.json profile and saves "always" there', async () => {
     writeProfileMcpConfig();
     const first = await run([...claude(), '--profile', 'Other'], 'use echo\na\n', env);
-    expect(first.stdout).toContain('Tool said: echo: >hi'); // inherited from Default
+    expect(first.stdout).toContain('Tool said: echo: >hi');
     const saved = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
-    expect(saved.profiles.Default.mcpServers.fake.trust).toEqual(['echo']);
-    expect(saved.profiles.Other).toEqual({ env: {} });
+    expect(saved.profiles.Other.mcpServers.fake.trust).toEqual(['echo']);
+    expect(saved.profiles.Default).toEqual({ env: {} });
+  });
+
+  it('starts servers from "shared" in every profile, and saves "always" there', async () => {
+    const fake = { command: process.execPath, args: [MCP_SERVER], env: { FAKE_PREFIX: '>' } };
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
+      defaultProfile: 'One',
+      shared: { mcpServers: { fake } },
+      profiles: { One: { env: {} }, Two: { env: {} } }
+    }));
+    const first = await run([...claude(), '--profile', 'Two'], 'use echo\na\n', env);
+    expect(first.stdout).toContain('Tool said: echo: >hi');
+    const saved = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
+    expect(saved.shared.mcpServers.fake.trust).toEqual(['echo']);
+    expect(saved.profiles).toEqual({ One: { env: {} }, Two: { env: {} } });
+
+    // The other profile gets the same server, and its trust.
+    const second = await run(claude(), '/mcp\nuse echo\n', env);
+    expect(second.stdout).toContain('(trusted tools: echo)');
+    expect(second.stdout).toContain('Tool said: echo: >hi');
+    expect(second.stdout).not.toContain('Allow this tool call');
+  });
+
+  it('lets a profile replace or disable a shared server', async () => {
+    const fake = { command: process.execPath, args: [MCP_SERVER], env: { FAKE_PREFIX: '>' }, trust: true };
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
+      defaultProfile: 'On',
+      shared: { mcpServers: { fake } },
+      profiles: { On: { env: {} }, Off: { env: {}, mcpServers: { fake: { disabled: true } } } }
+    }));
+    const on = await run(claude(), 'use echo\n', env);
+    expect(on.stdout).toContain('Tool said: echo: >hi');
+    const off = await run([...claude(), '--profile', 'Off'], '/mcp\n', env);
+    expect(off.stdout).not.toContain('fake');
   });
 
   it('"always" trusts just that tool and saves it to config.json', async () => {

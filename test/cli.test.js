@@ -129,26 +129,27 @@ describe('defaults from config.json', () => {
 describe('config.json profiles', () => {
   beforeEach(() => {
     fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
+      defaultProfile: 'Default',
       profiles: {
         Default: { env: { SKINNY_MODEL: 'defmodel', SKINNY_API: 'openai', SKINNY_HOST: server.url, SKINNY_TOOLS: false, SKINNY_MARKDOWN: true } },
-        'My Profile': { env: { SKINNY_MODEL: 'other', SKINNY_MARKDOWN: false } }
+        'My Profile': { env: { SKINNY_MODEL: 'other', SKINNY_API: 'openai', SKINNY_HOST: server.url, SKINNY_MARKDOWN: false } }
       }
     }));
   });
 
-  it('uses the Default profile unless told otherwise', async () => {
+  it('uses the default profile unless told otherwise', async () => {
     const { stdout } = await run([], 'hello\n/show settings\n', { env: { SKINNY_TOOLS: null } });
     expect(chatRequests()[0].body.model).toBe('defmodel');
     expect(stdout).toMatch(/profile +Default/);
     expect(stdout).toContain(`defaults file    ${path.join(home, 'config.json')}`);
   });
 
-  it('selects a profile with --profile or SKINNY_PROFILE, inheriting from Default', async () => {
+  it('selects a profile with --profile or SKINNY_PROFILE, without inheriting from the default', async () => {
     const first = await run(['--profile', 'My Profile'], 'hi\n/show settings\n', { env: { SKINNY_TOOLS: null } });
     expect(chatRequests()[0].body.model).toBe('other');
     expect(first.stdout).toMatch(/profile +My Profile/);
     expect(first.stdout).toMatch(/markdown +off/);
-    expect(first.stdout).toMatch(/tools +off/); // from Default
+    expect(first.stdout).toMatch(/tools +on/); // not inherited from Default
     server.requests.length = 0;
     await run([], 'hi\n', { env: { SKINNY_PROFILE: 'my profile', SKINNY_TOOLS: null } });
     expect(chatRequests()[0].body.model).toBe('other');
@@ -163,6 +164,61 @@ describe('config.json profiles', () => {
     const { stderr, code } = await run(['--profile', 'Nope']);
     expect(code).toBe(1);
     expect(stderr).toContain("no profile named 'Nope' (profiles: Default, My Profile)");
+  });
+});
+
+describe('/set profile', () => {
+  beforeEach(() => {
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
+      defaultProfile: 'Alpha',
+      profiles: {
+        Alpha: { env: { SKINNY_MODEL: 'amodel', SKINNY_API: 'openai', SKINNY_HOST: server.url, SKINNY_MARKDOWN: false } },
+        Beta: { env: { SKINNY_MODEL: 'bmodel', SKINNY_API: 'openai', SKINNY_HOST: server.url } },
+        Broken: { env: { SKINNY_API: 'openai' } }
+      }
+    }));
+  });
+
+  it('starts in the default profile and lists profiles', async () => {
+    const { stdout } = await run([], '/set profile\n/show settings\n');
+    expect(stdout).toMatch(/Alpha \(active, default\)\n {2}Beta\n {2}Broken/);
+    expect(stdout).toMatch(/profile +Alpha/);
+  });
+
+  it('switches profile with a fresh conversation and its own settings', async () => {
+    const { stdout } = await run([], 'first\n/set profile beta\nsecond\n/show settings\n');
+    const requests = chatRequests();
+    expect(requests.map((r) => r.body.model)).toEqual(['amodel', 'bmodel']);
+    expect(requests[1].body.messages.map((m) => m.content)).toEqual(['second']);
+    expect(stdout).toContain("Switched to profile 'Beta'");
+    expect(stdout).toMatch(/profile +Beta/);
+  });
+
+  it('stays put when the profile is missing or unusable', async () => {
+    const { stdout } = await run([], '/set profile Nope\n/set profile Broken\nhi\n');
+    expect(stdout).toContain("no profile named 'Nope'");
+    expect(stdout).toContain("Couldn't switch to profile 'Broken': it sets no SKINNY_MODEL");
+    expect(chatRequests()[0].body.model).toBe('amodel');
+  });
+});
+
+describe('shared and startupEnv', () => {
+  it('shares settings across profiles, lets profiles override, and applies startupEnv once', async () => {
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
+      defaultProfile: 'Alpha',
+      startupEnv: { SKINNY_IMAGE_DIR: '/tmp/startup-images' },
+      shared: { env: { SKINNY_API: 'openai', SKINNY_HOST: server.url, SKINNY_MARKDOWN: false, SKINNY_AUTOSAVE: true } },
+      profiles: {
+        Alpha: { env: { SKINNY_MODEL: 'amodel' } },
+        Beta: { env: { SKINNY_MODEL: 'bmodel', SKINNY_MARKDOWN: true } }
+      }
+    }));
+    const { stdout } = await run([], '/show settings\n/set profile Beta\nhi\n/show settings\n', { env: { SKINNY_AUTOSAVE: null } });
+    const [alpha, beta] = stdout.split('Switched to profile');
+    expect(alpha).toMatch(/markdown +off/);
+    expect(beta).toMatch(/markdown +on/);
+    expect(beta).toMatch(/autosave +on/); // from shared
+    expect(chatRequests()[0].body.model).toBe('bmodel');
   });
 });
 

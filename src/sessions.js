@@ -24,7 +24,7 @@ export function quoteModelfile(text) {
 }
 
 // The `# name: value` comments formatModelfile writes, read back by /load.
-export const SAVED_SETTINGS = ['api', 'host', 'format', 'think', 'show thinking', 'tools', 'date', 'markdown', 'images', 'keep-alive'];
+export const SAVED_SETTINGS = ['api', 'host', 'format', 'think', 'show thinking', 'tools', 'date', 'markdown', 'images', 'verbose', 'keep-alive', 'stop on exit'];
 
 export function formatModelfile({ from, system, parameters, messages, settings = {} }) {
   const lines = [`# Saved by skinnyai on ${new Date().toISOString()}`];
@@ -51,7 +51,7 @@ export function parseModelfile(text) {
   const session = { from: '', system: '', parameters: [], messages: [], settings: {} };
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
-    const setting = /^#\s*([a-z][a-z-]*(?: [a-z]+)?):\s*(.*?)\s*$/.exec(lines[i]);
+    const setting = /^#\s*([a-z][a-z-]*(?: [a-z]+)*):\s*(.*?)\s*$/.exec(lines[i]);
     if (setting && SAVED_SETTINGS.includes(setting[1])) {
       session.settings[setting[1]] = setting[2];
       continue;

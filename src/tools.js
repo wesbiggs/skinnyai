@@ -1,7 +1,7 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import './config.js';
-import { OLLAMA_API_KEY, ollamaAuthHeaders } from './http.js';
+import { ollamaApiKey, ollamaAuthHeaders } from './http.js';
 import { ANSI } from './style.js';
 
 // --- Tools (enabled with --tools or /set tools) ---
@@ -98,7 +98,7 @@ export async function ddgHtmlSearch(query, df = '') {
 // recency values just mean "any time" rather than an error.
 export const RECENCY_FILTERS = { day: 'd', today: 'd', week: 'w', month: 'm', year: 'y' };
 
-// Ollama's hosted search (used when OLLAMA_API_KEY is set) returns each
+// Ollama's hosted search (used when ollamaApiKey() is set) returns each
 // result's page text, not just a snippet, so small models get real content
 // without having to chain a fetch_page call. That text runs 3-11K characters
 // per result, so each is cut down to keep five of them within context.
@@ -158,7 +158,7 @@ export function noteFallback(what, error) {
 
 export async function webSearch({ query, recency }) {
   if (!query || typeof query !== 'string') throw new Error("missing 'query' argument");
-  if (OLLAMA_API_KEY) {
+  if (ollamaApiKey()) {
     try {
       return (await ollamaWebSearch(query)) || `No results found for "${query}".`;
     } catch (error) {
@@ -334,7 +334,7 @@ export async function fetchPage({ url }) {
 
   // Ollama's fetch runs on its servers, so it can't reach this machine or
   // its network; the private-address check below only matters locally.
-  if (OLLAMA_API_KEY) {
+  if (ollamaApiKey()) {
     try {
       const page = await ollamaApi('web_fetch', { url: target.href });
       return formatPage(page.title, target.href, tidyText(page.content || ''));
@@ -367,7 +367,9 @@ export function formatToday() {
 
 export const TOOLS = {
   web_search: {
-    description: `Search the web. Use this for current events, recent facts, or anything you are unsure about. Returns result titles, URLs, and ${OLLAMA_API_KEY ? 'the start of each result page' : 'snippets'}.`,
+    get description() {
+      return `Search the web. Use this for current events, recent facts, or anything you are unsure about. Returns result titles, URLs, and ${ollamaApiKey() ? 'the start of each result page' : 'snippets'}.`;
+    },
     // Ollama's hosted search has no date filter, so recency is only offered
     // with DuckDuckGo.
     parameters: () => ({
@@ -376,9 +378,9 @@ export const TOOLS = {
         query: {
           type: 'string',
           description: "The search query, naming the topic (e.g. 'world news headlines')" +
-            (OLLAMA_API_KEY ? '' : ". Use recency for time limits instead of words like 'today'.")
+            (ollamaApiKey() ? '' : ". Use recency for time limits instead of words like 'today'.")
         },
-        ...(!OLLAMA_API_KEY && { recency: {
+        ...(!ollamaApiKey() && { recency: {
           type: 'string',
           enum: ['day', 'week', 'month', 'year'],
           description: 'Only return results from the past day, week, month, or year. Use for news and other time-sensitive queries.'
@@ -387,7 +389,7 @@ export const TOOLS = {
       required: ['query']
     }),
     mentionsDate: true,
-    describe: (args) => `searching: "${args.query}"${RECENCY_FILTERS[args.recency] && !OLLAMA_API_KEY ? ` (past ${args.recency})` : ''}`,
+    describe: (args) => `searching: "${args.query}"${RECENCY_FILTERS[args.recency] && !ollamaApiKey() ? ` (past ${args.recency})` : ''}`,
     run: webSearch
   },
   fetch_page: {

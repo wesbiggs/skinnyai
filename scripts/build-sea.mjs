@@ -38,7 +38,11 @@ execFileSync(process.execPath, ['--experimental-sea-config', config], { stdio: '
 fs.copyFileSync(process.execPath, out);
 fs.chmodSync(out, 0o755);
 const darwin = process.platform === 'darwin';
-if (darwin) execFileSync('codesign', ['--remove-signature', out], { stdio: 'inherit' });
+if (darwin) {
+  execFileSync('codesign', ['--remove-signature', out], { stdio: 'inherit' });
+  // Drop local symbols (~25 MB); global ones stay, so it still runs.
+  execFileSync('strip', ['-x', out], { stdio: 'inherit' });
+}
 const postject = path.join(root, 'node_modules', '.bin', 'postject');
 execFileSync(postject, [
   out, 'NODE_SEA_BLOB', blob,

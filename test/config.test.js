@@ -120,18 +120,45 @@ describe('config.json', () => {
     expect(() => skinnyai.loadConfigFile(write({ nope: 1 }))).toThrow('no "profiles" object');
   });
 
-  it('layers a profile over Default, stringifying values', () => {
+  it('resolves a profile, stringifying values', () => {
     const config = skinnyai.loadConfigFile(write({
       profiles: {
-        Default: { env: { A: 'a', B: true, C: 3 }, mcpServers: { x: { command: 'x' }, y: { command: 'y' } } },
-        Work: { env: { A: 'w', D: null }, mcpServers: { y: { disabled: true } } }
+        Main: { env: { A: 'a', B: true, C: 3, D: null }, mcpServers: { x: { command: 'x' } } },
+        Work: { env: { A: 'w' } }
       }
     }));
-    expect(skinnyai.resolveProfile(config)).toMatchObject({ name: 'Default', env: { A: 'a', B: 'true', C: '3' } });
-    expect(skinnyai.resolveProfile(config, 'work')).toEqual({
-      name: 'Work', env: { A: 'w', B: 'true', C: '3' }, mcpServers: { x: { command: 'x' }, y: { disabled: true } }
-    });
+    expect(skinnyai.resolveProfile(config)).toEqual({ name: 'Main', env: { A: 'a', B: 'true', C: '3' }, mcpServers: { x: { command: 'x' } } });
+    expect(skinnyai.resolveProfile(config, 'work')).toEqual({ name: 'Work', env: { A: 'w' }, mcpServers: {} });
     expect(() => skinnyai.resolveProfile(config, 'Nope')).toThrow("no profile named 'Nope'");
+  });
+
+  it('uses the top-level "defaultProfile", with profiles standing alone', () => {
+    const config = skinnyai.loadConfigFile(write({
+      defaultProfile: 'work',
+      profiles: {
+        Default: { env: { A: 'a', B: 'b' } },
+        Work: { env: { A: 'w' }, mcpServers: { x: { command: 'x' } } }
+      }
+    }));
+    expect(skinnyai.resolveProfile(config)).toEqual({ name: 'Work', env: { A: 'w' }, mcpServers: { x: { command: 'x' } } });
+    expect(skinnyai.resolveProfile(config, 'Default').env).toEqual({ A: 'a', B: 'b' });
+    expect(() => skinnyai.resolveProfile({ ...config, defaultProfile: 'Gone' })).toThrow('"defaultProfile" is \'Gone\'');
+  });
+
+  it('puts the "shared" block under every profile', () => {
+    const config = skinnyai.loadConfigFile(write({
+      shared: { env: { A: 'a', B: 'b' }, mcpServers: { x: { command: 'x' }, y: { command: 'y' } } },
+      profiles: { Work: { env: { A: 'w' }, mcpServers: { y: { disabled: true } } }, Bare: {} }
+    }));
+    expect(skinnyai.resolveProfile(config, 'Work')).toEqual({
+      name: 'Work', env: { A: 'w', B: 'b' }, mcpServers: { x: { command: 'x' }, y: { disabled: true } }
+    });
+    expect(skinnyai.resolveProfile(config, 'Bare').env).toEqual({ A: 'a', B: 'b' });
+  });
+
+  it('falls back to the first profile when there is no defaultProfile', () => {
+    const config = skinnyai.loadConfigFile(write({ profiles: { One: { env: { A: '1' } }, Two: { env: {} } } }));
+    expect(skinnyai.resolveProfile(config).name).toBe('One');
   });
 
   it('reads --profile and SKINNY_PROFILE', () => {
@@ -143,7 +170,7 @@ describe('config.json', () => {
 
   it('ships a config.json.example whose profiles all resolve', () => {
     const config = skinnyai.loadConfigFile(new URL('../config.json.example', import.meta.url).pathname);
-    expect(Object.keys(config.profiles)).toContain('Default');
+    expect(Object.keys(config.profiles)).toContain(config.defaultProfile);
     for (const name of Object.keys(config.profiles)) expect(skinnyai.resolveProfile(config, name).env.SKINNY_MODEL).toBeTruthy();
   });
 });
