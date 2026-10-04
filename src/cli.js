@@ -155,7 +155,8 @@ Options:
                        parameters/template, keep-alive, --stop-on-exit)
                        aren't supported there and are disabled/no-ops.
   --profile NAME      Use the named profile from ${CONFIG_FILE}
-                       (default: "Default"; also SKINNY_PROFILE)
+                       (default: the "defaultProfile" named in the file; also SKINNY_PROFILE;
+                       /set profile switches during a chat)
   --help              Show this message
 
   Every on/off flag has an opposite (--no-tools, --no-images, --no-autosave,
@@ -167,9 +168,11 @@ Defaults:
     "SKINNY_MODEL": "gemma4:31b",  "SKINNY_HOST": "https://ollama.com",
     "SKINNY_TOOLS": true,          "SKINNY_AUTOSAVE": true,
     "OLLAMA_API_KEY": "..."
-  and an optional "mcpServers" block. The "Default" profile is used unless
-  you pick another with --profile NAME or SKINNY_PROFILE=NAME; other
-  profiles inherit from Default. Also: SKINNY_API, SKINNY_KEEP_ALIVE,
+  and an optional "mcpServers" block. The top-level "defaultProfile" names the
+  profile used unless you pick another with --profile NAME or
+  SKINNY_PROFILE=NAME. A top-level "shared" block (same shape) is what every
+  profile starts from, and "startupEnv" holds settings applied once at launch
+  (NODE_EXTRA_CA_CERTS, colors, SKINNY_TRUSTED_HOSTS, SKINNY_IMAGE_DIR). Also: SKINNY_API, SKINNY_KEEP_ALIVE,
   SKINNY_DATE, SKINNY_MARKDOWN, SKINNY_IMAGES, SKINNY_HIDE_THINKING,
   SKINNY_STOP_ON_EXIT, SKINNY_MCP, SKINNY_DEBUG,
   SKINNY_TRUSTED_HOSTS (hosts, comma-separated, that images and fetch_page may

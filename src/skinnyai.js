@@ -6,7 +6,7 @@ import { classifyFile, extractAttachments } from './attachments.js';
 import { OllamaChat } from './chat.js';
 import { envOptions, parseArgs, printUsage } from './cli.js';
 import { API_NAMES, CONFIG_FILE, VERSION, loadConfigFile, requestedProfile, resolveProfile } from './config.js';
-import { ANTHROPIC_API_KEY, isOllamaCom } from './http.js';
+import { anthropicApiKey, isOllamaCom } from './http.js';
 import { imageSequence, loadImage, sniffImage } from './images.js';
 import { inputPosition } from './lineedit.js';
 import { createMarkdownRenderer } from './markdown.js';
@@ -28,7 +28,7 @@ async function main() {
     console.error(`❌ Error: --api must be 'ollama', 'openai', or 'anthropic' (got '${options.api}')\n`);
     process.exit(1);
   }
-  if (options.api === 'anthropic' && !ANTHROPIC_API_KEY) {
+  if (options.api === 'anthropic' && !anthropicApiKey()) {
     console.error(`❌ Error: --api anthropic needs ANTHROPIC_API_KEY (set it in the environment or ${CONFIG_FILE})\n`);
     process.exit(1);
   }

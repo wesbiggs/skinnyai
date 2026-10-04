@@ -5,7 +5,8 @@ import { ANTHROPIC_VERSION } from './config.js';
 
 // ollama.com (cloud models, web search/fetch) needs an API key. It's only
 // ever sent to ollama.com over https, never to other --host servers.
-export const OLLAMA_API_KEY = process.env.OLLAMA_API_KEY || '';
+// Read on each use, since /set profile changes the environment's keys.
+export const ollamaApiKey = () => process.env.OLLAMA_API_KEY || '';
 
 export function isOllamaCom(url) {
   const { hostname } = new URL(url);
@@ -13,8 +14,9 @@ export function isOllamaCom(url) {
 }
 
 export function ollamaAuthHeaders(url) {
-  if (!OLLAMA_API_KEY) return {};
-  return new URL(url).protocol === 'https:' && isOllamaCom(url) ? { Authorization: `Bearer ${OLLAMA_API_KEY}` } : {};
+  const key = ollamaApiKey();
+  if (!key) return {};
+  return new URL(url).protocol === 'https:' && isOllamaCom(url) ? { Authorization: `Bearer ${key}` } : {};
 }
 
 // fetch() for requests to the chat server, adding the API key when it's ollama.com.
@@ -69,12 +71,12 @@ export async function readErrorBody(res) {
 
 // The Anthropic API wants its key in x-api-key (sent to whatever --host is
 // set, since the key is only ever configured for this API) and a version.
-export const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+export const anthropicApiKey = () => process.env.ANTHROPIC_API_KEY || '';
 export function anthropicHeaders() {
-  return { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': ANTHROPIC_VERSION };
+  return { 'x-api-key': anthropicApiKey(), 'anthropic-version': ANTHROPIC_VERSION };
 }
 
 // OpenAI-style servers, hosted or local, take a bearer key if one is set.
 // It goes to whatever --host is, so a stray OPENAI_API_KEY in the
 // environment reaches a local server too; the host is always your choice.
-export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+export const openaiApiKey = () => process.env.OPENAI_API_KEY || '';

@@ -2,7 +2,7 @@ import readline from 'readline';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import './config.js';
-import { CONFIG_FILE, DEFAULT_PROFILE, PROFILE, VERSION } from './config.js';
+import { CONFIG_FILE, PROFILE, VERSION } from './config.js';
 
 // --- MCP servers (the active profile's mcpServers in $SKINNY_HOME/config.json) ---
 //
@@ -209,8 +209,8 @@ export class McpServer {
     this.trust = [...(Array.isArray(this.trust) ? this.trust : []), toolName];
     try {
       const json = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
-      // The server is in the active profile, or inherited from Default.
-      const entry = [json.profiles?.[PROFILE.name], json.profiles?.[DEFAULT_PROFILE]]
+      // The server is in the active profile, or in "shared".
+      const entry = [json.profiles?.[PROFILE.name], json.shared]
         .map((p) => (p?.mcpServers ?? p?.servers)?.[this.name]).find(Boolean);
       if (!entry) return false;
       entry.trust = this.trust;

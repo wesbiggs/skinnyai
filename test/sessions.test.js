@@ -96,6 +96,31 @@ describe('/save', () => {
     expect(chat.format).toBe('json');
   });
 
+  it('/load says whether autosave is on', async () => {
+    const saver = openaiChat();
+    saver.history.push({ role: 'user', content: 'q' });
+    await saver.save('note');
+    const off = openaiChat();
+    await off.load('note');
+    expect(output()).toContain('Autosave is off');
+    const on = openaiChat({ autosave: true });
+    await on.load('note');
+    expect(output()).toContain("Autosave is on (saving to 'note' after each reply)");
+  });
+
+  it('/load restores verbose and stop on exit', async () => {
+    const saver = new skinnyai.OllamaChat('some-model', { host: server.url, api: 'ollama' });
+    saver.verbose = true;
+    saver.stopOnExit = true;
+    saver.history.push({ role: 'user', content: 'q' });
+    await saver.save('life');
+    expect(readSession('life').settings).toMatchObject({ verbose: 'true', 'stop on exit': 'true' });
+    const chat = new skinnyai.OllamaChat('other', { host: 'http://example.invalid:1' });
+    await chat.load('life');
+    expect(chat.verbose).toBe(true);
+    expect(chat.stopOnExit).toBe(true);
+  });
+
   it('leaves out tool calls and tool results', async () => {
     const chat = openaiChat();
     chat.history = [

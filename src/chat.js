@@ -4,9 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import './config.js';
 import { INLINE_FILE, extractAttachments, inlineFile } from './attachments.js';
-import { API_LABELS, API_NAMES, CONFIG, CONFIG_FILE, DEFAULT_ANTHROPIC_HOST, DEFAULT_KEEP_ALIVE, DEFAULT_OLLAMA_HOST, EXTRA_CA_FILE, PROFILE, VERSION } from './config.js';
+import { envOptions } from './cli.js';
+import { API_LABELS, API_NAMES, CONFIG, CONFIG_FILE, DEFAULT_ANTHROPIC_HOST, DEFAULT_KEEP_ALIVE, DEFAULT_OLLAMA_HOST, EXTRA_CA_FILE, PROFILE, VERSION, activateProfile, loadConfigFile, resolveProfile } from './config.js';
 import { DEBUG_LOG, IMAGE_DIR, debugLog, enableDebugLog, setDebugEnabled } from './debug.js';
-import { OLLAMA_API_KEY, OPENAI_API_KEY, anthropicHeaders, hostFetch, isOllamaCom, readErrorBody, streamingPost } from './http.js';
+import { anthropicHeaders, ollamaApiKey, openaiApiKey, hostFetch, isOllamaCom, readErrorBody, streamingPost } from './http.js';
 import { IMAGE_PROTOCOL, sniffImage } from './images.js';
 import { decodeCsiU, inputPosition } from './lineedit.js';
 import { createMarkdownRenderer } from './markdown.js';
@@ -145,7 +146,7 @@ export class OllamaChat {
   // per host by hostFetch/streamingPost (it only goes to ollama.com).
   authHeaders() {
     if (this.api === 'anthropic') return anthropicHeaders();
-    if (this.api === 'openai' && OPENAI_API_KEY) return { Authorization: `Bearer ${OPENAI_API_KEY}` };
+    if (this.api === 'openai' && openaiApiKey()) return { Authorization: `Bearer ${openaiApiKey()}` };
     return {};
   }
 
@@ -319,6 +320,8 @@ export class OllamaChat {
     if (bool(saved['show thinking']) !== undefined) this.showThinking = bool(saved['show thinking']);
     if (bool(saved.tools) !== undefined) this.toolsEnabled = bool(saved.tools);
     if (bool(saved.markdown) !== undefined) this.markdown = bool(saved.markdown);
+    if (bool(saved.verbose) !== undefined) this.verbose = bool(saved.verbose);
+    if (bool(saved['stop on exit']) !== undefined) this.stopOnExit = bool(saved['stop on exit']);
     if (bool(saved.images) !== undefined) this.images = bool(saved.images) && IMAGE_PROTOCOL !== null;
     this.injectDate = bool(saved.date);
     this.format = saved.format === 'json' ? 'json' : '';
@@ -337,6 +340,8 @@ export class OllamaChat {
     for (const [param, value] of session.parameters) this.setParameter(param, [value]);
     this.sessionName = name; // autosave keeps updating the same file
     await this.printRestoredHistory(this.history, `📜 Restored saved session '${name}' (model: ${this.model}):`);
+    // Autosave isn't a saved setting, so say where it stands.
+    console.log(`${CHROME_COLOR}💾 Autosave is ${this.autosave ? `on (saving to '${name}' after each reply)` : 'off (/set autosave turns it on)'}${ANSI.reset}\n`);
   }
 
   // At startup, a name with a locally saved session resumes it, the way
@@ -558,9 +563,13 @@ export class OllamaChat {
       tools: this.toolsEnabled,
       date: this.injectDate,
       markdown: this.markdown,
-      images: this.images
+      images: this.images,
+      verbose: this.verbose
     };
-    if (this.managesModelLifetime) settings['keep-alive'] = this.keepAlive;
+    if (this.managesModelLifetime) {
+      settings['keep-alive'] = this.keepAlive;
+      settings['stop on exit'] = this.stopOnExit;
+    }
     return { from: this.model, system: this.getSystemMessage(), parameters: this.options, messages: this.savableMessages(), settings };
   }
 
@@ -649,7 +658,7 @@ export class OllamaChat {
       const path = isAnthropic ? '/v1/messages' : isOpenAI ? '/v1/chat/completions' : '/api/chat';
 
       debugLog('request', {
-        api: this.api, url: `${this.host}${path}`, authenticated: Object.keys(this.authHeaders()).length > 0 || (this.api === 'ollama' && Boolean(OLLAMA_API_KEY) && isOllamaCom(this.host)),
+        api: this.api, url: `${this.host}${path}`, authenticated: Object.keys(this.authHeaders()).length > 0 || (this.api === 'ollama' && Boolean(ollamaApiKey()) && isOllamaCom(this.host)),
         offeredTools: (body.tools || []).map((t) => t.function?.name ?? t.name), body
       });
       const response = await streamingPost(`${this.host}${path}`, body, this.authHeaders());
@@ -902,7 +911,7 @@ export class OllamaChat {
     if (this.api !== 'ollama') lines.push(`🔌 API: ${API_LABELS[this.api]}`);
     lines.push(`🌐 Host: ${this.host}`);
     if (this.toolsEnabled) {
-      lines.push(`🔧 Tools: ${Object.keys(TOOLS).join(', ')} (${OLLAMA_API_KEY ? 'Ollama web search' : 'DuckDuckGo'})`);
+      lines.push(`🔧 Tools: ${Object.keys(TOOLS).join(', ')} (${ollamaApiKey() ? 'Ollama web search' : 'DuckDuckGo'})`);
     }
     lines.push(...(this.mcpLines || []));
     if (this.debug) lines.push(`🐞 Debug log: ${DEBUG_LOG}`);
@@ -961,6 +970,7 @@ export class OllamaChat {
     console.log('  /set nodebug           Stop logging (default)');
     console.log('  /set autosave          Save the session to a local file after each reply');
     console.log('  /set noautosave        Stop autosaving (default)');
+    console.log('  /set profile [name]    Switch to a profile from config.json (starts a new conversation)');
     console.log('\nUse /show settings to see the current values.');
     console.log('');
   }
@@ -991,7 +1001,7 @@ export class OllamaChat {
       ['think', think],
       ['show thinking', onOff(this.showThinking)],
       ['verbose', onOff(this.verbose)],
-      ['tools', this.toolsEnabled ? `on (${Object.keys(TOOLS).join(', ')}; ${OLLAMA_API_KEY ? 'Ollama web search' : 'DuckDuckGo'})` : 'off'],
+      ['tools', this.toolsEnabled ? `on (${Object.keys(TOOLS).join(', ')}; ${ollamaApiKey() ? 'Ollama web search' : 'DuckDuckGo'})` : 'off'],
       ['date', dateSetting],
       ['markdown', onOff(this.markdown)],
       ['images', images],
@@ -1356,9 +1366,82 @@ export class OllamaChat {
     }
   }
 
+  // The settings a profile decides (the ones ENV_SETTINGS names), which
+  // /set profile replaces as a set.
+  static PROFILE_FIELDS = ['model', 'modelIsDefault', 'api', 'host', 'keepAlive', 'showThinking', 'stopOnExit', 'toolsEnabled',
+    'mcpEnabled', 'injectDate', 'markdown', 'images', 'autosave'];
+
+  // /set profile: lists the profiles, or switches to one and starts a fresh
+  // conversation (the system message stays), as if launched with --profile.
+  // Command-line flags only applied to the launch, so they don't carry over.
+  async switchProfile(name) {
+    let config;
+    try {
+      config = loadConfigFile(CONFIG_FILE);
+    } catch (error) {
+      console.log(`\n❌ ${error.message}\n`);
+      return;
+    }
+    if (!config) {
+      console.log(`\nThere is no ${CONFIG_FILE}, so there are no profiles to switch to.\n`);
+      return;
+    }
+    if (!name) {
+      const defaultName = resolveProfile(config).name;
+      console.log('\nProfiles:');
+      for (const profile of Object.keys(config.profiles)) {
+        const marks = [profile === PROFILE.name ? 'active' : '', profile === defaultName ? 'default' : ''].filter(Boolean);
+        console.log(`  ${profile}${marks.length ? ` (${marks.join(', ')})` : ''}`);
+      }
+      console.log('\nUsage: /set profile <name>\n');
+      return;
+    }
+
+    const before = Object.fromEntries(OllamaChat.PROFILE_FIELDS.map((field) => [field, this[field]]));
+    const previous = PROFILE.name;
+    const revert = (error) => {
+      activateProfile(previous);
+      Object.assign(this, before);
+      console.log(`\n❌ Couldn't switch to profile '${name}': ${error.message}\n`);
+    };
+    try {
+      activateProfile(name);
+    } catch (error) {
+      console.log(`\n❌ ${error.message}\n`);
+      return;
+    }
+    const { model, ...options } = envOptions();
+    if (!model) return revert(new Error('it sets no SKINNY_MODEL'));
+    if (options.api && !API_NAMES.includes(options.api)) return revert(new Error(`SKINNY_API must be 'ollama', 'openai', or 'anthropic' (got '${options.api}')`));
+
+    if (this.stopOnExit) await this.stopModel(); // still the old model and host
+    const fresh = new OllamaChat(model, options);
+    for (const field of OllamaChat.PROFILE_FIELDS) this[field] = fresh[field];
+    this.modelIsDefault = false;
+    try {
+      await this.resolveDefaultModel();
+    } catch (error) {
+      return revert(error);
+    }
+    this.mcp?.close();
+    this.mcp = null;
+    await this.startMcp();
+    const system = this.getSystemMessage();
+    this.history = system ? [{ role: 'system', content: system }] : [];
+    this.options = {};
+    this.format = '';
+    this.think = undefined;
+    this.queuedAttachments = [];
+    this.sessionName = null;
+    this.printWelcome();
+    console.log(`Switched to profile '${PROFILE.name}'; this is a new conversation.\n`);
+  }
+
   handleSet(args) {
     const [sub, ...rest] = args;
     switch (sub) {
+      case 'profile':
+        return this.switchProfile(rest.join(' ').trim());
       case undefined:
         this.printSetUsage();
         break;
