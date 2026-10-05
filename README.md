@@ -321,7 +321,7 @@ Colors are only applied on a real terminal; the flags are silently ignored when 
 ```bash
 $ ./bin/skinnyai.js llama2
 ┌───────────────────────────────────────────────────────┐
-│ 🚀 SkinnyAI v0.9.0                                    │
+│ 🚀 SkinnyAI v0.10.0                                   │
 │ 📦 Model: llama2                                      │
 │ ⏳ Keep-alive: 1h                                     │
 │ 🌐 Host: http://localhost:11434                       │

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 // Keep in step with package.json (a test checks).
-export const VERSION = '0.9.0';
+export const VERSION = '0.10.0';
 
 export const DEFAULT_KEEP_ALIVE = '1h';
 export const DEFAULT_OLLAMA_HOST = 'http://localhost:11434';
