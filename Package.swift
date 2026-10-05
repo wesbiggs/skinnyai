@@ -8,8 +8,8 @@ let package = Package(
     name: "SkinnyAI",
     platforms: [.macOS(.v13)],
     dependencies: [
-        // git main for the wide-character reflow fix; switch back to `from:` once a release includes it.
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", branch: "main"),
+        // Pinned to a main commit for the wide-character reflow fix; switch back to `from:` once a release includes it.
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", revision: "4d5eeea89ed7c0fabffea9c8415cc392a6a06a31"),
     ],
     targets: [
         .executableTarget(
