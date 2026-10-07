@@ -8,3 +8,4 @@ build/AppIcon.iconset
 build/AppIcon-preview.png
 .build
 .DS_Store
+.signing.env

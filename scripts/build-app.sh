@@ -13,10 +13,14 @@
 #
 #   SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 #   NOTARY_PROFILE=skinnyai scripts/build-app.sh --dmg
+#
+# Or put those two assignments in a gitignored .signing.env at the repo root
+# (loaded automatically; `npm run release:app` is build-app.sh --dmg).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
+[ -f .signing.env ] && . ./.signing.env
 version="$(node -p "require('./package.json').version")"
 identity="${SIGN_IDENTITY:--}"
 app="dist/SkinnyAI.app"
@@ -34,6 +38,23 @@ cp -R "$bin/SwiftTerm_SwiftTerm.bundle" "$app/Contents/Resources/"
 cp build/skinnyai "$app/Contents/MacOS/skinnyai-cli"
 sed "s/@VERSION@/$version/g" macos/Info.plist > "$app/Contents/Info.plist"
 [ -f macos/AppIcon.icns ] && cp macos/AppIcon.icns "$app/Contents/Resources/AppIcon.icns" || true
+
+# License texts for what the app embeds (Node via the SEA binary, SwiftTerm)
+# plus our own, so the notices travel with the binaries.
+node_license="$(dirname "$(dirname "$(node -p process.execPath)")")/LICENSE"
+swiftterm_license=".build/checkouts/SwiftTerm/LICENSE"
+for f in "$node_license" "$swiftterm_license"; do
+  [ -f "$f" ] || { echo "Missing license file for the notices: $f" >&2; exit 1; }
+done
+cp LICENSE "$app/Contents/Resources/LICENSE.txt"
+{
+  echo "SkinnyAI is licensed under the Apache License 2.0 (see LICENSE.txt)."
+  echo "It includes the following third-party software."
+  printf '\n================ Node.js %s (embedded in skinnyai-cli) ================\n\n' "$(node -p process.version)"
+  cat "$node_license"
+  printf '\n================ SwiftTerm ================\n\n'
+  cat "$swiftterm_license"
+} > "$app/Contents/Resources/THIRD_PARTY_NOTICES.txt"
 
 # Sign inside-out: the node binary needs the JIT entitlements, then the bundle.
 options=()
