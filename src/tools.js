@@ -1,6 +1,6 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
-import './config.js';
+import { VERSION } from './config.js';
 import { ollamaApiKey, ollamaAuthHeaders } from './http.js';
 import { ANSI } from './style.js';
 
@@ -8,12 +8,10 @@ import { ANSI } from './style.js';
 
 export const MAX_TOOL_ROUNDS = 5;
 export const SEARCH_TIMEOUT_MS = 10000;
-export const MAX_SEARCH_RESULTS = 8;
-// DuckDuckGo's HTML endpoint serves a bot-check page (HTTP 202, 'anomaly'
-// markup) to clients that don't look like a browser.
-export const BROWSER_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36',
-  'Accept': 'text/html',
+// An honest identity: skinnyai fetches pages on the user's behalf and says so,
+// rather than posing as a browser.
+export const APP_HEADERS = {
+  'User-Agent': `skinnyai/${VERSION} (+https://github.com/wesbiggs/skinnyai)`,
   'Accept-Language': 'en-US,en;q=0.9'
 };
 
@@ -37,66 +35,26 @@ export function stripHtml(html) {
 }
 
 // DuckDuckGo's official Instant Answer API: Wikipedia-style abstracts and
-// direct answers only, not web results - many queries come back empty.
+// direct answers only, not web results - many queries come back empty. Its
+// terms ask for the t= app name and attribution to DuckDuckGo and the source.
 export async function ddgInstantAnswer(query) {
-  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS) });
+  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1&t=skinnyai`;
+  const res = await fetch(url, { headers: APP_HEADERS, signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`Instant Answer API: HTTP ${res.status}`);
   const data = await res.json();
   const lines = [];
   if (data.Answer) lines.push(`Answer: ${stripHtml(String(data.Answer))}`);
   if (data.AbstractText) {
     lines.push(`${data.Heading ? data.Heading + ': ' : ''}${data.AbstractText}`);
-    if (data.AbstractURL) lines.push(`Source: ${data.AbstractURL}`);
+    if (data.AbstractURL) lines.push(`Source: ${data.AbstractSource ? data.AbstractSource + ', ' : ''}${data.AbstractURL}`);
   }
   if (data.Definition) {
     lines.push(`Definition: ${data.Definition}`);
     if (data.DefinitionURL) lines.push(`Source: ${data.DefinitionURL}`);
   }
+  if (lines.length) lines.push('(Instant answer from DuckDuckGo, https://duckduckgo.com)');
   return lines.join('\n');
 }
-
-// Unofficial: scrapes html.duckduckgo.com. May break if the markup changes,
-// and heavy use gets rate-limited/CAPTCHA'd.
-// `df` is DuckDuckGo's date filter: 'd' | 'w' | 'm' | 'y', or '' for any time.
-export async function ddgHtmlSearch(query, df = '') {
-  const res = await fetch('https://html.duckduckgo.com/html/', {
-    method: 'POST',
-    headers: {
-      ...BROWSER_HEADERS,
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Referer': 'https://html.duckduckgo.com/'
-    },
-    body: new URLSearchParams({ q: query, b: '', df }),
-    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS)
-  });
-  const html = await res.text();
-  if (res.status === 202 || /anomaly-modal/.test(html)) {
-    throw new Error('DuckDuckGo blocked the request as automated traffic (try again later)');
-  }
-  if (!res.ok) throw new Error(`DuckDuckGo search: HTTP ${res.status}`);
-
-  const results = [];
-  for (const block of html.split('class="result__a"').slice(1)) {
-    const link = block.match(/^[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/);
-    if (!link) continue;
-    let href = link[1].replace(/&amp;/g, '&');
-    // Older markup routes results through a //duckduckgo.com/l/?uddg=<url> redirect.
-    const redirect = href.match(/[?&]uddg=([^&]+)/);
-    if (redirect) href = decodeURIComponent(redirect[1]);
-    if (href.includes('duckduckgo.com/y.js')) continue; // ad
-    const snippet = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/);
-    results.push({ title: stripHtml(link[2]), url: href, snippet: snippet ? stripHtml(snippet[1]) : '' });
-    if (results.length >= MAX_SEARCH_RESULTS) break;
-  }
-  return results
-    .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? `\n   ${r.snippet}` : ''}`)
-    .join('\n');
-}
-
-// Small models don't always stick to the schema's enum, so unrecognized
-// recency values just mean "any time" rather than an error.
-export const RECENCY_FILTERS = { day: 'd', today: 'd', week: 'w', month: 'm', year: 'y' };
 
 // Ollama's hosted search (used when ollamaApiKey() is set) returns each
 // result's page text, not just a snippet, so small models get real content
@@ -156,7 +114,9 @@ export function noteFallback(what, error) {
   process.stdout.write(`${ANSI.assistant.narration}   ⚠️  Ollama ${what} failed (${error.message}); falling back to the local implementation${ANSI.reset}\n`);
 }
 
-export async function webSearch({ query, recency }) {
+export const NO_KEY_NOTE = 'Without an Ollama API key, web_search only returns DuckDuckGo Instant Answers (encyclopedia-style summaries), not web results. Set OLLAMA_API_KEY (a free ollama.com account) for full web search.';
+
+export async function webSearch({ query }) {
   if (!query || typeof query !== 'string') throw new Error("missing 'query' argument");
   if (ollamaApiKey()) {
     try {
@@ -165,19 +125,8 @@ export async function webSearch({ query, recency }) {
       noteFallback('web search', error);
     }
   }
-  const df = RECENCY_FILTERS[String(recency ?? '').toLowerCase()] || '';
-  // Instant Answers are timeless encyclopedia summaries, so skip them when
-  // the model asked for recent results.
-  if (!df) {
-    let instant = '';
-    try {
-      instant = await ddgInstantAnswer(query);
-    } catch (e) {
-      // Fall through to the HTML search.
-    }
-    if (instant) return instant;
-  }
-  return (await ddgHtmlSearch(query, df)) || `No results found for "${query}".`;
+  const instant = await ddgInstantAnswer(query);
+  return instant || `No instant answer found for "${query}". ${NO_KEY_NOTE}`;
 }
 
 export const FETCH_TIMEOUT_MS = 15000;
@@ -233,7 +182,7 @@ export async function fetchPublic(target, accept) {
   for (let hop = 0; ; hop++) {
     await assertPublicUrl(target);
     res = await fetch(target, {
-      headers: { ...BROWSER_HEADERS, 'Accept': accept },
+      headers: { ...APP_HEADERS, 'Accept': accept },
       redirect: 'manual',
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
     });
@@ -368,28 +317,19 @@ export function formatToday() {
 export const TOOLS = {
   web_search: {
     get description() {
-      return `Search the web. Use this for current events, recent facts, or anything you are unsure about. Returns result titles, URLs, and ${ollamaApiKey() ? 'the start of each result page' : 'snippets'}.`;
+      return ollamaApiKey()
+        ? 'Search the web. Use this for current events, recent facts, or anything you are unsure about. Returns result titles, URLs, and the start of each result page.'
+        : 'Look up a topic. Use this for facts about well-known people, places, and things. Returns a short encyclopedia-style answer if one exists; it is not a full web search, so it is often empty.';
     },
-    // Ollama's hosted search has no date filter, so recency is only offered
-    // with DuckDuckGo.
     parameters: () => ({
       type: 'object',
       properties: {
-        query: {
-          type: 'string',
-          description: "The search query, naming the topic (e.g. 'world news headlines')" +
-            (ollamaApiKey() ? '' : ". Use recency for time limits instead of words like 'today'.")
-        },
-        ...(!ollamaApiKey() && { recency: {
-          type: 'string',
-          enum: ['day', 'week', 'month', 'year'],
-          description: 'Only return results from the past day, week, month, or year. Use for news and other time-sensitive queries.'
-        } })
+        query: { type: 'string', description: "The search query, naming the topic (e.g. 'world news headlines')" }
       },
       required: ['query']
     }),
     mentionsDate: true,
-    describe: (args) => `searching: "${args.query}"${RECENCY_FILTERS[args.recency] && !ollamaApiKey() ? ` (past ${args.recency})` : ''}`,
+    describe: (args) => `searching: "${args.query}"`,
     run: webSearch
   },
   fetch_page: {

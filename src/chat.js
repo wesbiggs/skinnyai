@@ -13,7 +13,7 @@ import { decodeCsiU, inputPosition } from './lineedit.js';
 import { createMarkdownRenderer } from './markdown.js';
 import { loadMcpConfig, runTool, startMcpServers, toolDefinitions } from './mcp.js';
 import { pickDefaultModel } from './models.js';
-import { SESSION_DIR, autosaveName, deleteLocalSession, isAutosaveName, listLocalSessions, localSessionExists, readLocalSession, saveLocalSession } from './sessions.js';
+import { SESSION_DIR, autosaveName, deleteLocalSession, isAutosaveName, listLocalSessions, localSessionExists, readLocalSession, resumeHint, saveLocalSession, sessionStamp } from './sessions.js';
 import { ANSI, CHROME_COLOR, PROMPT, createWordWrapper, drawBox, graphemeWidth, graphemes, styleLine, styledPrompt, supportsColor, visibleWidth } from './style.js';
 import { MAX_TOOL_ROUNDS, TOOLS, formatToday } from './tools.js';
 
@@ -49,6 +49,9 @@ export class OllamaChat {
     // set by autosave, a local /save, or loading a local session; cleared
     // when a new conversation starts (/clear, loading a model).
     this._sessionName = null;
+    // What that file looked like when this chat last wrote or read it, to
+    // notice another chat saving to it (see writeSession).
+    this.sessionStamp = null;
   }
 
   get sessionName() { return this._sessionName; }
@@ -58,6 +61,7 @@ export class OllamaChat {
   set sessionName(name) {
     if (name === this._sessionName) return;
     this._sessionName = name;
+    this.sessionStamp = null;
     if (process.env.TERM_PROGRAM === 'SkinnyAI' && process.stdout.isTTY) {
       process.stdout.write(`\x1b]2;${name ? `SkinnyAI: ${name}` : 'SkinnyAI'}\x07`);
     }
@@ -156,11 +160,13 @@ export class OllamaChat {
   // so it's always current and never ends up in /save or /show system.
   requestMessages(today) {
     let messages = this.history;
-    if (today) {
-      const dateLine = `Today's date is ${today}.`;
+    // JSON mode is also asked for in words: not every server honors the
+    // format field (and OpenAI's refuses unless the messages mention JSON).
+    const notes = [today && `Today's date is ${today}.`, this.format === 'json' && 'Respond only with a valid JSON object.'].filter(Boolean).join(' ');
+    if (notes) {
       const system = this.getSystemMessage();
       const rest = system ? this.history.slice(1) : this.history;
-      messages = [{ role: 'system', content: system ? `${dateLine}\n\n${system}` : dateLine }, ...rest];
+      messages = [{ role: 'system', content: system ? `${notes}\n\n${system}` : notes }, ...rest];
     }
     // A tool result's images are relayed as they were returned. Anthropic takes
     // them inside the tool_result (buildAnthropicChatBody). OpenAI-style servers
@@ -311,11 +317,11 @@ export class OllamaChat {
   }
 
   // Restores the settings /save recorded in comments. Unknown or malformed
-  // values are ignored; the host and API are only restored by /load.
-  applySavedSettings(saved, connection) {
+  // values are ignored.
+  applySavedSettings(saved) {
     const bool = (v) => (v === 'true' ? true : v === 'false' ? false : undefined);
-    if (connection && API_NAMES.includes(saved.api)) this.api = saved.api;
-    if (connection && /^https?:\/\//.test(saved.host || '')) this.host = saved.host;
+    if (API_NAMES.includes(saved.api)) this.api = saved.api;
+    if (/^https?:\/\//.test(saved.host || '')) this.host = saved.host;
     if (saved['keep-alive']) this.keepAlive = saved['keep-alive'];
     if (bool(saved['show thinking']) !== undefined) this.showThinking = bool(saved['show thinking']);
     if (bool(saved.tools) !== undefined) this.toolsEnabled = bool(saved.tools);
@@ -330,32 +336,53 @@ export class OllamaChat {
   }
 
   // Switches to a session saved on this machine (see saveLocalSession): its
-  // FROM model, system message, parameters, and conversation.
-  async applyLocalSession(name, session, { connection = true } = {}) {
-    this.applySavedSettings(session.settings || {}, connection);
+  // FROM model, system message, parameters, and conversation. Quiet, so
+  // startup can do it before the welcome box (which reports the result).
+  applySessionState(name, session) {
+    this.applySavedSettings(session.settings || {}, true);
     this.model = session.from || this.model;
     this.history = session.system ? [{ role: 'system', content: session.system }] : [];
     this.history.push(...session.messages);
     this.options = {};
     for (const [param, value] of session.parameters) this.setParameter(param, [value]);
     this.sessionName = name; // autosave keeps updating the same file
+    this.sessionStamp = session.stamp ?? null;
+  }
+
+  async applyLocalSession(name, session) {
+    this.applySessionState(name, session);
+    await this.showRestoredSession(name);
+  }
+
+  async showRestoredSession(name) {
     await this.printRestoredHistory(this.history, `📜 Restored saved session '${name}' (model: ${this.model}):`);
     // Autosave isn't a saved setting, so say where it stands.
     console.log(`${CHROME_COLOR}💾 Autosave is ${this.autosave ? `on (saving to '${name}' after each reply)` : 'off (/set autosave turns it on)'}${ANSI.reset}\n`);
   }
 
   // At startup, a name with a locally saved session resumes it, the way
-  // `ollama run` resumes a model /save created; otherwise an Ollama server
-  // is asked for the model's own saved messages.
-  async loadModelContext() {
+  // `ollama run` resumes a model /save created, on the model, API, and host
+  // it was saved with (the name is not the model); otherwise an Ollama
+  // server is asked for the model's own saved messages. The state is applied
+  // before the welcome box so that shows the real model.
+  async prepareStartupSession() {
+    this.startupSession = null;
     try {
       const session = await readLocalSession(this.model);
       if (session) {
-        // The command line already chose the server, so it wins at startup.
-        await this.applyLocalSession(this.model, session, { connection: false });
-      } else if (this.api === 'ollama') {
-        await this.fetchAndApplyModelContext(this.model);
+        this.startupSession = this.model;
+        this.applySessionState(this.model, session);
       }
+    } catch (error) {
+      // Non-fatal: just start with an empty session.
+    }
+  }
+
+  async loadModelContext() {
+    try {
+      if (this.startupSession === undefined) await this.prepareStartupSession();
+      if (this.startupSession) await this.showRestoredSession(this.startupSession);
+      else if (this.api === 'ollama') await this.fetchAndApplyModelContext(this.model);
     } catch (error) {
       // Non-fatal: just start with an empty session.
     }
@@ -582,10 +609,59 @@ export class OllamaChat {
       process.stdout.write(`${CHROME_COLOR}💾 Autosaving as '${this.sessionName}' (/save <name> saves it under a new name)${ANSI.reset}\n\n`);
     }
     try {
-      await saveLocalSession(this.sessionName, this.sessionSnapshot());
+      await this.writeSession(this.sessionName);
     } catch (error) {
       console.log(`⚠️  Autosave failed: ${error.message}\n`);
     }
+  }
+
+  // Writes the conversation to the session file `name`, first checking that
+  // another chat hasn't saved to that file since this one last did. Returns
+  // the path written, or null if nothing was (after saying why).
+  async writeSession(name) {
+    if (name === this.sessionName && this.sessionStamp) {
+      const current = await sessionStamp(name);
+      if (current !== null && current !== this.sessionStamp) return this.resolveSessionConflict(name);
+    }
+    return this.writeSessionFile(name);
+  }
+
+  async writeSessionFile(name) {
+    const file = await saveLocalSession(name, this.sessionSnapshot());
+    this.sessionName = name;
+    this.sessionStamp = await sessionStamp(name);
+    return file;
+  }
+
+  // The file changed under us: reload it, keep this conversation under a new
+  // name, overwrite it anyway, or skip (asked again at the next save).
+  async resolveSessionConflict(name) {
+    const answer = await this.choose(
+      `\n⚠️  Session '${name}' was saved by another chat since you last saved it.\n` +
+      '   Reload it (r, drops this chat\'s unsaved changes), save under a new name (s), overwrite it (o), or skip (anything else)?',
+      '[r/s/o/N]', 'rso');
+    if (answer === 'r') {
+      const session = await readLocalSession(name);
+      if (session) {
+        console.log('');
+        await this.applyLocalSession(name, session);
+        return null;
+      }
+      return this.writeSessionFile(name); // deleted meanwhile
+    }
+    if (answer === 'o') return this.writeSessionFile(name);
+    if (answer === 's') {
+      console.log('\nNew name for this session:');
+      const newName = ((await this.readTurnInput()) || '').trim();
+      if (newName && newName !== name &&
+          (!await localSessionExists(newName) || await this.confirm(`\nA saved session named '${newName}' already exists. Overwrite it?`))) {
+        const file = await this.writeSessionFile(newName);
+        console.log(`\n✅ Saved session '${newName}' to ${file}; '${name}' is unchanged.\n`);
+        return file;
+      }
+    }
+    console.log('Not saved.\n');
+    return null;
   }
 
   async runToolCalls(toolCalls) {
@@ -911,7 +987,7 @@ export class OllamaChat {
     if (this.api !== 'ollama') lines.push(`🔌 API: ${API_LABELS[this.api]}`);
     lines.push(`🌐 Host: ${this.host}`);
     if (this.toolsEnabled) {
-      lines.push(`🔧 Tools: ${Object.keys(TOOLS).join(', ')} (${ollamaApiKey() ? 'Ollama web search' : 'DuckDuckGo'})`);
+      lines.push(`🔧 Tools: ${Object.keys(TOOLS).join(', ')} (${ollamaApiKey() ? 'Ollama web search' : 'DuckDuckGo instant answers'})`);
     }
     lines.push(...(this.mcpLines || []));
     if (this.debug) lines.push(`🐞 Debug log: ${DEBUG_LOG}`);
@@ -988,11 +1064,8 @@ export class OllamaChat {
     const images = IMAGE_PROTOCOL
       ? `${onOff(this.images)} (terminal supports ${protocols[IMAGE_PROTOCOL]})`
       : "off (this terminal can't draw images)";
-    const rows = [
+    const changeable = [
       ['model', this.model],
-      ['api', API_LABELS[this.api]],
-      ['host', this.host],
-      ...(this.managesModelLifetime ? [['keep-alive', this.keepAlive]] : []),
       ['system message', sys ? `set, ${sys.length} characters (/show system)` : 'none'],
       ['parameters', Object.keys(this.options).length
         ? Object.entries(this.options).map(([k, v]) => `${k}=${Array.isArray(v) ? JSON.stringify(v) : v}`).join(', ')
@@ -1001,19 +1074,27 @@ export class OllamaChat {
       ['think', think],
       ['show thinking', onOff(this.showThinking)],
       ['verbose', onOff(this.verbose)],
-      ['tools', this.toolsEnabled ? `on (${Object.keys(TOOLS).join(', ')}; ${ollamaApiKey() ? 'Ollama web search' : 'DuckDuckGo'})` : 'off'],
+      ['tools', this.toolsEnabled ? `on (${Object.keys(TOOLS).join(', ')}; ${ollamaApiKey() ? 'Ollama web search' : 'DuckDuckGo instant answers'})` : 'off'],
       ['date', dateSetting],
       ['markdown', onOff(this.markdown)],
       ['images', images],
       ...(this.debug ? [['debug log', DEBUG_LOG]] : []),
       ['autosave', this.autosave ? `on (${this.sessionName ? `'${this.sessionName}'` : 'named after the next reply'})` : 'off'],
-      ...(this.managesModelLifetime ? [['stop on exit', onOff(this.stopOnExit)]] : []),
+      ['profile', CONFIG ? PROFILE.name : 'none (no config.json)']
+    ];
+    const fixed = [
+      ['api', API_LABELS[this.api]],
+      ['host', this.host],
+      ...(this.managesModelLifetime ? [['keep-alive', this.keepAlive], ['stop on exit', onOff(this.stopOnExit)]] : []),
       ...(EXTRA_CA_FILE ? [['extra CA certs', EXTRA_CA_FILE]] : []),
-      ['profile', CONFIG ? PROFILE.name : 'none (no config.json)'],
       ['defaults file', CONFIG ? CONFIG_FILE : `none (${CONFIG_FILE})`]
     ];
-    console.log('\nSession settings:');
-    for (const [name, value] of rows) console.log(`  ${name.padEnd(16)} ${value}`);
+    const print = (title, rows) => {
+      console.log(`\n${title}`);
+      for (const [name, value] of rows) console.log(`  ${name.padEnd(16)} ${value}`);
+    };
+    print('Changeable settings (/set ..., /load, /help lists them):', changeable);
+    print('Fixed for this session (from the profile, config.json, or command line; for information):', fixed);
     console.log('');
   }
 
@@ -1061,13 +1142,14 @@ export class OllamaChat {
         console.log('Not saved.\n');
         return;
       }
-      const file = await saveLocalSession(target, this.sessionSnapshot());
+      const file = await this.writeSession(target);
+      if (!file) return; // the conflict prompt said what happened
+      if (this.sessionName !== target) return; // and saved it under another name
       if (renaming) await deleteLocalSession(previous);
-      this.sessionName = target;
       if (renaming) console.log(`\n✅ Renamed session '${previous}' to '${target}' (${file})`);
       else console.log(`\n✅ Saved session '${target}' to ${file}`);
       if (previous && previous !== target && !renaming) console.log(`   '${previous}' is unchanged; from now on this session saves as '${target}'.`);
-      console.log(`   Resume it with /load ${target}, or start with: skinnyai.js ${target}\n`);
+      console.log(`   Resume it with /load ${target}, or ${resumeHint(target)}\n`);
     } catch (error) {
       console.error(`\n❌ Error saving session: ${error.message}\n`);
     }
@@ -1676,8 +1758,8 @@ export class OllamaChat {
   // Like confirm, but with more answers than yes and no: `letters` are the
   // accepted single-letter answers ('y', 'a' for "always"); anything else is 'n'.
   async choose(question, hint, letters) {
-    const words = { y: /^y(es)?$/i, a: /^a(lways)?$/i };
-    const labels = { y: 'yes', a: 'always', n: 'no' };
+    const words = { y: /^y(es)?$/i, a: /^a(lways)?$/i, r: /^r(eload)?$/i, s: /^s(ave)?$/i, o: /^o(verwrite)?$/i };
+    const labels = { y: 'yes', a: 'always', r: 'reload', s: 'new name', o: 'overwrite', n: 'no' };
     process.stdout.write(`${question} ${hint} `);
     if (!process.stdin.isTTY) {
       const line = await this.nextPipedLine();
@@ -1942,6 +2024,7 @@ export class OllamaChat {
 
   async start() {
     if (this.debug) await enableDebugLog();
+    await this.prepareStartupSession();
     await this.resolveDefaultModel();
     await this.startMcp(); // before the welcome box, which reports on it
     this.printWelcome();

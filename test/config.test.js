@@ -255,6 +255,22 @@ describe('sessions on disk', () => {
     expect(await skinnyai.readLocalSession('missing')).toBeNull();
   });
 
+  it('keeps spaces in filenames, and still finds files saved with %20', async () => {
+    const session = { from: 'm', system: '', parameters: {}, messages: [] };
+    const file = await skinnyai.saveLocalSession('My Memos', session);
+    expect(path.basename(file)).toBe('My Memos.Modelfile');
+    expect(await skinnyai.listLocalSessions()).toContain('My Memos');
+    fs.renameSync(file, path.join(path.dirname(file), 'My%20Memos.Modelfile'));
+    expect((await skinnyai.readLocalSession('My Memos')).from).toBe('m');
+    expect((await skinnyai.listLocalSessions()).filter((n) => n === 'My Memos')).toHaveLength(1);
+  });
+
+  it('words how to resume a session by how the program was started', () => {
+    expect(skinnyai.resumeHint('trip', { termProgram: 'SkinnyAI', script: '/x/skinnyai-cli' })).toBe('use File > Open Chat...');
+    expect(skinnyai.resumeHint('trip', { termProgram: 'iTerm.app', script: '/home/me/.local/bin/skinnyai' })).toBe('start with: skinnyai trip');
+    expect(skinnyai.resumeHint('My Memos', { termProgram: undefined, script: '/a/skinnyai.js' })).toBe("start with: skinnyai.js 'My Memos'");
+  });
+
   it('recognizes ollama.com hosts', () => {
     expect(skinnyai.isOllamaCom('https://ollama.com')).toBe(true);
     expect(skinnyai.isOllamaCom('https://api.ollama.com/x')).toBe(true);

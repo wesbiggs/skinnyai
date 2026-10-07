@@ -134,7 +134,7 @@ Options:
                        (same as running \`/set autosave\`)
   --hide-thinking      Don't stream thinking-model reasoning output
                        (shown by default; same as running \`/set hidethinking\`)
-  --no-tools           Don't offer the model web_search (DuckDuckGo) and
+  --no-tools           Don't offer the model web_search and
                        fetch_page; they're on by default (same as running
                        \`/set notools\`). They need a
                        tool-capable model (e.g. llama3.1, qwen3). With

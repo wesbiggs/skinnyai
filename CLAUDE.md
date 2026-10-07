@@ -1,6 +1,6 @@
 # skinnyai
 
-A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic, plus a small native macOS app that wraps it. Node >= 22, no runtime dependencies by design (raw HTTPS, no SDKs). README.md is the user-facing reference; this file is for orientation and the non-obvious decisions.
+A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic, plus a small native macOS app that wraps it. Node >= 22, no runtime dependencies by design (raw HTTPS, no SDKs). README.md is the short user-facing overview and `docs/*.md` hold the details; this file is for orientation and the non-obvious decisions.
 
 ## Layout
 
@@ -21,6 +21,7 @@ A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic
 - State lives in `~/.skinny` (override with `SKINNY_HOME`): `config.json` (named profiles, each with an `env` block and optional `mcpServers`; a top-level `"defaultProfile"` names the profile used when none is requested; a top-level `"shared"` block (profile-shaped) sits under every profile (`resolveProfile`), and `"startupEnv"` holds launch-only settings (CA file, colors, trusted hosts, image dir) applied once by `activateProfile(…, { startup: true })`, never changed by `/set profile`; `/set profile` re-reads the file via `activateProfile`, and API keys are read live from `process.env` for that reason), `mcp.json`, `sessions/<name>.Modelfile`, `app-chat.pid`.
 - The app edits `config.json` through `ConfigFile`, preserving anything it doesn't manage, and stores only values that differ from the program's own defaults. Which profile the app uses is `UserDefaults` key `profile`; where chats open is `chatIn` (`builtin` | `auto` | `terminal` | `iterm`).
 - Providers in Settings are derived from `SKINNY_API` + `SKINNY_HOST` (ollama.com host => Ollama Cloud, api.openai.com => OpenAI Cloud); nothing extra is stored. Changing provider fills in its host and clears the model. Anthropic and OpenAI Cloud use `SKINNY_MODEL=default`.
+- Local sessions: names are URL-encoded into filenames except spaces (`sessionPath` still finds old `%20` files). A chat remembers its file's mtime:size stamp (`sessionStamp`) and `writeSession` prompts (reload / new name / overwrite / skip) if another process changed it. `skinnyai NAME` at startup applies the session (model, api, host, settings) *before* the welcome box.
 - `--model default` looks up `/v1/models` at startup: newest plain `gpt-N` for OpenAI, newest **Opus** for Anthropic (change `pickDefaultModel` for another family).
 
 ## Behavior decisions worth keeping

@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import './config.js';
@@ -12,9 +13,21 @@ export const SESSION_DIR = path.join(SKINNY_HOME, 'sessions');
 export const SESSION_SUFFIX = '.Modelfile';
 
 // Names can hold anything a model name can (like 'me/chat:v2'), so they're
-// URL-encoded into safe filenames.
+// URL-encoded into safe filenames, except that spaces stay spaces.
 export function sessionPath(name) {
-  return path.join(SESSION_DIR, encodeURIComponent(name) + SESSION_SUFFIX);
+  const file = path.join(SESSION_DIR, encodeURIComponent(name).replace(/%20/g, ' ') + SESSION_SUFFIX);
+  // Earlier versions wrote spaces as %20; keep finding those files.
+  const legacy = path.join(SESSION_DIR, encodeURIComponent(name) + SESSION_SUFFIX);
+  return legacy !== file && !existsSync(file) && existsSync(legacy) ? legacy : file;
+}
+
+// How to resume a saved session, for the message after saving: the app has a
+// menu item; otherwise it's the command this process was started with (a
+// symlink like ~/.local/bin/skinnyai shows as just 'skinnyai').
+export function resumeHint(name, { termProgram = process.env.TERM_PROGRAM, script = process.argv[1] } = {}) {
+  if (termProgram === 'SkinnyAI') return 'use File > Open Chat...';
+  const command = (script && path.basename(script)) || 'skinnyai';
+  return `start with: ${command} ${/[\s'"]/.test(name) ? `'${name.replace(/'/g, "'\\''")}'` : name}`;
 }
 
 // A triple-quoted Modelfile value. Ollama's format has no escape for a
@@ -90,6 +103,19 @@ export function parseModelfile(text) {
   return session;
 }
 
+// Identifies the version of a session's file on disk (null if there's none),
+// so a chat can tell whether another process saved over its file.
+export async function sessionStamp(name) {
+  try {
+    const { mtimeMs, size } = await fs.stat(sessionPath(name));
+    return `${mtimeMs}:${size}`;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+// Returns the path written; the file's new stamp is `await sessionStamp(name)`.
 export async function saveLocalSession(name, session) {
   await fs.mkdir(SESSION_DIR, { recursive: true });
   const file = sessionPath(name);
@@ -97,10 +123,13 @@ export async function saveLocalSession(name, session) {
   return file;
 }
 
-// Returns the parsed session, or null if none is saved under that name.
+// Returns the parsed session (with the `stamp` it had just before it was
+// read), or null if none is saved under that name.
 export async function readLocalSession(name) {
   try {
-    return parseModelfile(await fs.readFile(sessionPath(name), 'utf8'));
+    const stamp = await sessionStamp(name);
+    const session = parseModelfile(await fs.readFile(sessionPath(name), 'utf8'));
+    return { ...session, stamp };
   } catch (error) {
     if (error.code === 'ENOENT') return null;
     throw error;
@@ -142,7 +171,8 @@ export async function autosaveName() {
 export async function listLocalSessions() {
   try {
     const files = await fs.readdir(SESSION_DIR);
-    return files.filter((f) => f.endsWith(SESSION_SUFFIX)).map((f) => decodeURIComponent(f.slice(0, -SESSION_SUFFIX.length))).sort();
+    const names = files.filter((f) => f.endsWith(SESSION_SUFFIX)).map((f) => decodeURIComponent(f.slice(0, -SESSION_SUFFIX.length)));
+    return [...new Set(names)].sort();
   } catch (error) {
     return [];
   }

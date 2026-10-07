@@ -44,6 +44,27 @@ function fixTime() {
   vi.setSystemTime(new Date(2026, 8, 30, 15, 49, 7));
 }
 
+describe('JSON format', () => {
+  it('is also asked for in the system message', () => {
+    const chat = withHistory(openaiChat(), 'q');
+    chat.format = 'json';
+    expect(chat.requestMessages('')[0]).toEqual({ role: 'system', content: 'Respond only with a valid JSON object.' });
+    chat.setSystemMessage('Be brief.');
+    expect(chat.requestMessages('Mon')[0].content).toBe("Today's date is Mon. Respond only with a valid JSON object.\n\nBe brief.");
+  });
+});
+
+describe('/show settings', () => {
+  it('separates what can be changed from what is fixed', () => {
+    openaiChat().printSettings();
+    const text = output();
+    const fixedAt = text.indexOf('Fixed for this session');
+    expect(text.indexOf('Changeable settings')).toBeLessThan(fixedAt);
+    expect(text.indexOf('autosave')).toBeLessThan(fixedAt);
+    expect(text.indexOf('host')).toBeGreaterThan(fixedAt);
+  });
+});
+
 describe('window title in the SkinnyAI app', () => {
   it('announces the session name through the terminal title', async () => {
     vi.stubEnv('TERM_PROGRAM', 'SkinnyAI');
@@ -275,6 +296,86 @@ describe('/load', () => {
   });
 });
 
+describe('resuming at startup', () => {
+  it('uses the saved model, API, and host, and shows them in the welcome box', async () => {
+    await withHistory(openaiChat(), 'q', 'a').save('resume-me');
+    const chat = new skinnyai.OllamaChat('resume-me', { api: 'ollama', host: 'http://example.invalid:1' });
+    await chat.prepareStartupSession();
+    expect(chat).toMatchObject({ model: 'some-model', api: 'openai', host: server.url });
+    chat.printWelcome();
+    expect(output()).toContain('Model: some-model');
+  });
+});
+
+describe('two chats saving to one file', () => {
+  const other = async (name) => {
+    const chat = withHistory(openaiChat(), 'from', 'elsewhere');
+    await chat.save(name);
+    return chat;
+  };
+  const bump = (name) => {
+    const file = skinnyai.sessionPath(name);
+    const later = new Date(Date.now() + 5000);
+    fs.utimesSync(file, later, later);
+  };
+
+  it('is noticed, and skipping leaves the other chat\'s file alone', async () => {
+    const chat = await other('shared');
+    chat.history.push({ role: 'user', content: 'more' });
+    bump('shared');
+    let asked = '';
+    chat.choose = async (question) => ((asked = question), 'n');
+    chat.autosave = true;
+    await chat.autosaveSession();
+    expect(asked).toContain("Session 'shared' was saved by another chat");
+    expect(output()).toContain('Not saved.');
+    expect(readSession('shared').messages).toHaveLength(2);
+  });
+
+  it('can reload the other chat\'s version', async () => {
+    const chat = await other('shared');
+    const theirs = withHistory(openaiChat(), 'q1', 'a1', 'q2');
+    theirs.sessionName = 'shared';
+    await theirs.save('shared');
+    bump('shared');
+    chat.choose = async () => 'r';
+    await chat.save('shared');
+    expect(chat.history.map((m) => m.content)).toEqual(['q1', 'a1', 'q2']);
+    expect(output()).toContain("Restored saved session 'shared'");
+  });
+
+  it('can save under a new name instead', async () => {
+    const chat = await other('shared');
+    chat.history.push({ role: 'user', content: 'mine' });
+    bump('shared');
+    chat.choose = async () => 's';
+    chat.readTurnInput = async () => 'Mine Too';
+    await chat.save('shared');
+    expect(chat.sessionName).toBe('Mine Too');
+    expect(readSession('Mine Too').messages).toHaveLength(3);
+    expect(readSession('shared').messages).toHaveLength(2);
+  });
+
+  it('can overwrite', async () => {
+    const chat = await other('shared');
+    chat.history.push({ role: 'user', content: 'mine' });
+    bump('shared');
+    chat.choose = async () => 'o';
+    await chat.save('shared');
+    expect(readSession('shared').messages).toHaveLength(3);
+  });
+
+  it('does not bother us for our own saves', async () => {
+    const chat = await other('shared');
+    chat.choose = async () => { throw new Error('should not ask'); };
+    chat.autosave = true;
+    chat.history.push({ role: 'user', content: 'more' });
+    await chat.autosaveSession();
+    await chat.autosaveSession();
+    expect(readSession('shared').messages).toHaveLength(3);
+  });
+});
+
 describe('/list', () => {
   it('lists saved sessions below the server models', async () => {
     await withHistory(openaiChat(), 'q').save('saved-one');
@@ -364,7 +465,7 @@ describe('/show settings', () => {
     expect(text).toMatch(/system message +set, 8 characters/);
     expect(text).toMatch(/parameters +temperature=0\.3/);
     expect(text).toMatch(/think +high/);
-    expect(text).toMatch(/tools +on \(web_search, fetch_page; DuckDuckGo\)/);
+    expect(text).toMatch(/tools +on \(web_search, fetch_page; DuckDuckGo instant answers\)/);
     expect(text).toMatch(/date +on \(automatic: follows tools\)/);
     expect(text).toMatch(/markdown +off/);
     expect(text).toMatch(/autosave +on \(named after the next reply\)/);
