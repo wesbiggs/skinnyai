@@ -7,10 +7,12 @@ Each turn is sent with the full message history (not just the latest prompt), so
 A chat is saved as one SQLite file, `~/.skinny/sessions/<name>.skinny` (`SKINNY_HOME` changes the directory). It works the same with every server: a local or cloud Ollama, OpenAI-compatible, or Anthropic. The file holds:
 
 - the model, API, host, system message, parameters, and the settings that came with the session;
-- every message, with the API and model that wrote each reply;
+- every message, with the API and model that wrote each reply, each with an id and the id of the message it follows;
 - tool calls and their results, thinking blocks, and attached images and PDFs (stored once each, as bytes).
 
-Because it holds the whole conversation, a chat can move to another model without losing its tool calls, and old attachments are still there. Nothing is encrypted yet, so treat these files like the conversations they contain: fetched page text and attachments are in them too. Names may contain any characters (they're URL-encoded into the filename, except spaces), and you can rename or move a file freely.
+Because it holds the whole conversation, a chat can move to another model without losing its tool calls, and old attachments are still there.
+
+A chat file is an append-only log: each save adds a *commit* (the new messages, and any change to the model, system message, parameters, or settings) that records which device wrote it, a counter, and the commits it follows. The device is identified by `~/.skinny/device`, which holds a generated id and a name you can edit (it starts as the machine's name). This is the groundwork for keeping chats in sync across devices; nothing is synced yet. If two writers ever add to the same message, the chat has two lines of conversation; the one with the latest activity is shown, and the other stays in the file. Nothing is encrypted yet, so treat these files like the conversations they contain: fetched page text and attachments are in them too. Names may contain any characters (they're URL-encoded into the filename, except spaces), and you can rename or move a file freely.
 
 ```
 > /save trip-planning
@@ -22,7 +24,7 @@ Because it holds the whole conversation, a chat can move to another model withou
 - `/save <new name>` is "save as": it writes a new file and leaves the old one as it was, and from then on `/save` (and autosave) update the new name. The exception is a session that still has a date-and-time name (from autosave or a bare `/save`): that file is renamed instead, so naming a session doesn't leave a stray copy behind.
 - If the name belongs to a different saved session, `/save` asks before overwriting it (`[y/N]`).
 - `/load <name>` or `skinnyai <name>` resumes a saved session: it switches to the session's model (not the session's name), API, and host, and restores its system message, parameters, and conversation. A saved session takes precedence over a server model with the same name, and `/list` shows saved sessions below the server's models.
-- If another chat saves to the same file after you last did, the next save (or autosave) notices and asks whether to reload their version, save yours under a new name, overwrite it, or skip.
+- If another chat saves to the same file after you last did, the next save (or autosave) notices and asks whether to reload their version, save yours under a new name, or skip. (There's no "overwrite": a chat file only grows.)
 
 ## Autosave
 
@@ -32,7 +34,7 @@ Autosave is **on by default in a terminal**: the session is saved after every re
 
 - `/new [name]` starts a new conversation (the system message stays), optionally named. The old chat stays on disk under its name, and a name already in use isn't accepted.
 - `/delete [name]` deletes a saved chat file (the current one by default) after asking. Deleting the current chat starts a new one. It never touches old-format Modelfiles.
-- `/purge thinking|tools|blobs` shrinks the current chat and its file: `thinking` drops saved thinking blocks, `tools` turns tool calls and results into text, and `blobs` removes attached images and PDFs and images in tool results, leaving a note where each was.
+- `/purge thinking|tools|blobs` shrinks the current chat and its file (the purge is recorded in the file's log): `thinking` drops saved thinking blocks, `tools` turns tool calls and results into text, and `blobs` removes attached images and PDFs and images in tool results, leaving a note where each was.
 
 ## Exporting and sharing
 

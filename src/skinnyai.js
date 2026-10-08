@@ -12,7 +12,7 @@ import { imageSequence, loadImage, sniffImage } from './images.js';
 import { inputPosition } from './lineedit.js';
 import { createMarkdownRenderer } from './markdown.js';
 import { pickDefaultModel } from './models.js';
-import { SESSION_DIR, autosaveName, chatFileExists, compactLocalSession, formatModelfile, isAutosaveName, legacySessionPath, listLocalSessions, localSessionExists, messageCount, parseModelfile, readLocalSession, resumeHint, saveLocalSession, sessionPath } from './sessions.js';
+import { SESSION_DIR, autosaveName, chatFileExists, commitCount, formatModelfile, isAutosaveName, legacySessionPath, listLocalSessions, localSessionExists, messageCount, parseModelfile, readLocalSession, redactLocalSession, resumeHint, saveLocalSession, sessionPath, verifyChat } from './sessions.js';
 import { PROMPT, applyColorOverrides, charWidth, createInlineStyler, createWordWrapper, drawBox, graphemeWidth, renderTable, splitTableRow, styleLine, visibleWidth, wrapStyled } from './style.js';
 
 // Main
@@ -63,7 +63,7 @@ export {
   splitTableRow, wrapStyled, renderTable, createMarkdownRenderer, inputPosition,
   drawBox, VERSION, sniffImage, imageSequence, loadImage, pickDefaultModel, extractAttachments, classifyFile,
   formatModelfile, parseModelfile, saveLocalSession, readLocalSession, listLocalSessions,
-  localSessionExists, isAutosaveName, autosaveName, sessionPath, legacySessionPath, chatFileExists, compactLocalSession, messageCount, resumeHint,
+  localSessionExists, isAutosaveName, autosaveName, sessionPath, legacySessionPath, chatFileExists, commitCount, redactLocalSession, verifyChat, messageCount, resumeHint,
   loadConfigFile, resolveProfile, requestedProfile, envOptions, parseArgs, isOllamaCom, OllamaChat, main,
   PROMPT, SESSION_DIR, CONFIG_FILE
 };

@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { messageCount, readChat, revisionOf, writeChat } from '../src/chatdb.js';
+import { commitCount, messageCount, newMessageId, readChat, redactChat, verifyChat, writeChat } from '../src/chatdb.js';
+import { DEVICE_FILE, deviceInfo } from '../src/device.js';
 import { formatMarkdown } from '../src/export.js';
 import { purgeHistory } from '../src/history.js';
 import { captureOutput, fakeTTY, stripAnsi } from './helpers/tty.js';
@@ -34,50 +35,145 @@ const chatOf = (...contents) => {
   chat.history = contents.map((content, i) => ({ role: i % 2 ? 'assistant' : 'user', content }));
   return chat;
 };
+const withTwo = (name) => chatOf('old', 'older').save(name);
 const png = { mime: 'image/png', data: Buffer.from('pixels').toString('base64') };
 const session = (messages) => ({ from: 'm', system: 's', parameters: { temperature: '0.5', stop: ['a', 'b'] }, messages, settings: { api: 'openai', tools: true, format: undefined } });
 
 describe('chat files', () => {
   const file = () => path.join(skinnyai.SESSION_DIR, 'x.skinny');
+  const m = (role, content, extra = {}) => ({ id: newMessageId(), role, content, ...extra });
   beforeEach(() => fs.mkdirSync(skinnyai.SESSION_DIR, { recursive: true }));
 
-  it('round-trips settings and parameters', () => {
-    writeChat(file(), session([{ role: 'user', content: 'hi' }]));
+  it('round-trips ids, settings, and parameters', () => {
+    const hi = m('user', 'hi');
+    writeChat(file(), session([hi]));
     const read = readChat(file());
-    expect(read).toMatchObject({ from: 'm', system: 's', settings: { api: 'openai', tools: 'true' } });
+    expect(read).toMatchObject({ from: 'm', system: 's', settings: { api: 'openai', tools: 'true' }, forks: 0, last: hi.id });
+    expect(read.messages.map((x) => x.id)).toEqual([hi.id]);
     expect(read.parameters).toEqual([['temperature', '0.5'], ['stop', 'a'], ['stop', 'b']]);
     expect(read.chatId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it('appends only new messages when the file holds what the caller expects', () => {
-    const messages = [{ role: 'user', content: 'a' }, { role: 'assistant', content: 'b' }];
-    writeChat(file(), session(messages));
+  it('adds only the messages after the one it already has, and nothing when there is nothing new', () => {
+    const [a, b, c] = [m('user', 'a'), m('assistant', 'b'), m('user', 'c')];
+    writeChat(file(), session([a, b]));
     const db = new DatabaseSync(file());
-    const firstId = db.prepare('SELECT MIN(id) AS id FROM messages').get().id;
+    const firstRow = db.prepare('SELECT MIN(id) AS id FROM messages').get().id;
     db.close();
-    writeChat(file(), session([...messages, { role: 'user', content: 'c' }]), { append: 2 });
+    expect(writeChat(file(), session([a, b, c]), { after: b.id }).commit).toMatch(/^[0-9a-f]{64}$/);
     expect(messageCount(file())).toBe(3);
-    expect(revisionOf(file())).toBe(2);
+    expect(commitCount(file())).toBe(2);
     const after = new DatabaseSync(file());
-    expect(after.prepare('SELECT MIN(id) AS id FROM messages').get().id).toBe(firstId); // earlier rows were left alone
+    expect(after.prepare('SELECT MIN(id) AS id FROM messages').get().id).toBe(firstRow); // earlier rows were left alone
+    expect(after.prepare('SELECT parent_uid FROM messages WHERE uid = ?').get(c.id).parent_uid).toBe(b.id);
     after.close();
+    expect(writeChat(file(), session([a, b, c]), { after: c.id }).commit).toBeNull();
+    expect(commitCount(file())).toBe(2);
+    expect(verifyChat(file())).toEqual([]);
   });
 
-  it('rewrites when the file does not hold what the caller expects', () => {
-    writeChat(file(), session([{ role: 'user', content: 'a' }]));
-    writeChat(file(), session([{ role: 'user', content: 'x' }, { role: 'assistant', content: 'y' }, { role: 'user', content: 'z' }]), { append: 2 });
-    expect(readChat(file()).messages.map((m) => m.content)).toEqual(['x', 'y', 'z']);
+  it('records a change of settings as its own commit', () => {
+    const a = m('user', 'a');
+    writeChat(file(), session([a]));
+    writeChat(file(), { ...session([a]), system: 'new system' }, { after: a.id });
+    expect(commitCount(file())).toBe(2);
+    expect(readChat(file()).system).toBe('new system');
   });
 
-  it('stores identical attachments once and removes ones no message uses', () => {
-    writeChat(file(), session([{ role: 'user', content: 'a', images: [png] }, { role: 'user', content: 'b', images: [png] }]));
+  it('refuses to write over messages it does not know, unless told to replace', () => {
+    const [a, b] = [m('user', 'a'), m('user', 'b')];
+    writeChat(file(), session([a]));
+    expect(() => writeChat(file(), session([b]))).toThrow(/already has messages/);
+    expect(() => writeChat(file(), session([b]), { after: 'nope' })).toThrow(/no longer has/);
+    expect(() => writeChat(file(), session([b]), { after: a.id })).toThrow(/not in the conversation/);
+    writeChat(file(), session([b]), { replace: true });
+    expect(readChat(file()).messages.map((x) => x.content)).toEqual(['b']);
+  });
+
+  it('shows the most recent line when two writers add to the same message', () => {
+    const [a, b, c, d] = [m('user', 'a'), m('assistant', 'b'), m('user', 'c'), m('user', 'd')];
+    writeChat(file(), session([a, b]));
+    writeChat(file(), session([a, b, c]), { after: b.id });
+    writeChat(file(), session([a, b, d]), { after: b.id });
+    const read = readChat(file());
+    expect(read.messages.map((x) => x.content)).toEqual(['a', 'b', 'd']);
+    expect(read.forks).toBe(1);
+    expect(messageCount(file())).toBe(4); // c is still there
+    expect(verifyChat(file())).toEqual([]);
+  });
+
+  it('numbers commits so each follows the ones before it', () => {
+    const a = m('user', 'a');
+    writeChat(file(), session([a]));
+    writeChat(file(), session([a, m('user', 'b')]), { after: a.id });
+    const db = new DatabaseSync(file());
+    const commits = db.prepare('SELECT id, lamport, parents, device_id FROM commits ORDER BY lamport').all();
+    db.close();
+    expect(commits.map((c) => c.lamport)).toEqual([1, 2]);
+    expect(JSON.parse(commits[1].parents)).toEqual([commits[0].id]);
+    expect(commits[0].device_id).toBe(deviceInfo().id);
+  });
+
+  it('reports a broken log', () => {
+    const [a, b] = [m('user', 'a'), m('user', 'b')];
+    writeChat(file(), session([a]));
+    writeChat(file(), session([a, b]), { after: a.id });
+    const db = new DatabaseSync(file());
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.prepare('DELETE FROM commits WHERE lamport = 1').run();
+    db.close();
+    expect(verifyChat(file()).join('\n')).toMatch(/is missing|has no commit/);
+  });
+
+  it('stores identical attachments once and drops ones no message uses after a purge', () => {
+    const [a, b] = [m('user', 'a', { images: [png] }), m('user', 'b', { images: [png] })];
+    writeChat(file(), session([a, b]));
     const db = new DatabaseSync(file());
     expect(db.prepare('SELECT COUNT(*) AS n FROM blobs').get().n).toBe(1);
     db.close();
-    writeChat(file(), session([{ role: 'user', content: 'a' }]));
+    redactChat(file(), 'blobs', [{ ...a, images: undefined }, { ...b, images: undefined }]);
     const again = new DatabaseSync(file());
     expect(again.prepare('SELECT COUNT(*) AS n FROM blobs').get().n).toBe(0);
+    expect(again.prepare('SELECT kind FROM redactions').all()).toEqual([{ kind: 'blobs' }]);
     again.close();
+  });
+
+  it('relinks the conversation when a purge drops messages', () => {
+    const messages = [m('user', 'q'), m('assistant', '', { tool_calls: [{ id: 'c1', function: { name: 't', arguments: {} } }] }), m('tool', 'r', { tool_call_id: 'c1', tool_name: 't' }), m('assistant', 'done')];
+    writeChat(file(), session(messages));
+    const { history } = purgeHistory(messages, 'tools');
+    redactChat(file(), 'tools', history);
+    const read = readChat(file());
+    expect(read.messages.map((x) => x.role)).toEqual(['user', 'assistant', 'assistant']);
+    expect(read.messages[1].content).toContain('[Tool call: t({}) -> r]');
+    expect(read.forks).toBe(0);
+    expect(verifyChat(file())).toEqual([]);
+  });
+
+  it('upgrades a file from the first version in place', () => {
+    const db = new DatabaseSync(file());
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE messages (id INTEGER PRIMARY KEY, role TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', api TEXT, model TEXT, meta TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE blobs (id INTEGER PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, mime TEXT NOT NULL, bytes BLOB NOT NULL);
+      CREATE TABLE parts (id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE, idx INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT, json TEXT, blob_id INTEGER REFERENCES blobs(id));
+      INSERT INTO meta VALUES ('chat_id', 'abc'), ('created_at', '2026-10-01T00:00:00.000Z'), ('revision', '3'), ('system', 'old system'), ('model', 'old-model'), ('options', '{"temperature":"0.1"}'), ('settings', '{"api":"openai"}');
+      INSERT INTO messages (role, content, created_at) VALUES ('user', 'hi', 'x'), ('assistant', 'hello', 'x');
+      PRAGMA user_version = 1;
+    `);
+    db.close();
+    const read = readChat(file());
+    expect(read).toMatchObject({ from: 'old-model', system: 'old system', parameters: [['temperature', '0.1']], settings: { api: 'openai' }, chatId: 'abc', forks: 0 });
+    expect(read.messages.map((x) => x.content)).toEqual(['hi', 'hello']);
+    expect(commitCount(file())).toBe(1);
+    expect(verifyChat(file())).toEqual([]);
+    const upgraded = new DatabaseSync(file());
+    expect(upgraded.prepare('PRAGMA user_version').get().user_version).toBe(2);
+    expect(upgraded.prepare("SELECT COUNT(*) AS n FROM meta WHERE key IN ('revision', 'system')").get().n).toBe(0);
+    upgraded.close();
+    // and it takes new messages afterwards
+    writeChat(file(), { ...session([...read.messages, m('user', 'more')]), from: 'old-model' }, { after: read.last });
+    expect(readChat(file()).messages).toHaveLength(3);
   });
 
   it('refuses files that are not chats or come from a newer version', () => {
@@ -88,6 +184,15 @@ describe('chat files', () => {
     db.exec('CREATE TABLE t (a); PRAGMA user_version = 99');
     db.close();
     expect(() => readChat(file())).toThrow(/newer skinnyai/);
+  });
+});
+
+describe('device identity', () => {
+  it('is made once, kept beside the chats, and has an editable name', () => {
+    const info = deviceInfo();
+    expect(info.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(info.name).toBeTruthy();
+    expect(JSON.parse(fs.readFileSync(DEVICE_FILE, 'utf8'))).toEqual(info);
   });
 });
 
@@ -161,7 +266,7 @@ describe('autosave', () => {
     await chat.autosaveSession();
     const [name] = files();
     expect(messageCount(path.join(skinnyai.SESSION_DIR, name))).toBe(4);
-    expect(revisionOf(path.join(skinnyai.SESSION_DIR, name))).toBe(2);
+    expect(commitCount(path.join(skinnyai.SESSION_DIR, name))).toBe(2);
     expect(new skinnyai.OllamaChat('m', { autosave: false }).autosave).toBe(false);
   });
 });
@@ -198,6 +303,53 @@ describe('/new and /delete', () => {
     expect(chat.sessionName).toBeNull();
     await chat.handleCommand('/delete Nope');
     expect(output()).toContain("No saved session named 'Nope'");
+  });
+});
+
+describe('ids and the log, from a chat', () => {
+  it('keeps message ids off the wire for every API', () => {
+    for (const api of ['ollama', 'openai', 'anthropic']) {
+      const chat = new skinnyai.OllamaChat('m', { api, host: server.url, autosave: false });
+      chat.history = [
+        { id: 'u1', role: 'user', content: 'q' },
+        { id: 'a1', role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 'web_search', arguments: { query: 'x' } } }], origin: { api, model: 'm' } },
+        { id: 't1', role: 'tool', tool_call_id: 'c1', tool_name: 'web_search', content: 'r' },
+        { id: 'a2', role: 'assistant', content: 'done' }
+      ];
+      const sent = chat.requestMessages('');
+      expect(sent.map((m) => 'id' in m)).toEqual([false, false, false, false]);
+    }
+  });
+
+  it('keeps adding to the same file after a purge, with the purge recorded', async () => {
+    const chat = chatOf();
+    chat.history = [{ role: 'user', content: 'see', images: [png] }, { role: 'assistant', content: 'ok' }];
+    await chat.save('keep');
+    await chat.handleCommand('/purge blobs');
+    chat.history.push({ role: 'user', content: 'more' });
+    chat.autosave = true;
+    await chat.autosaveSession();
+    const read = readChat(skinnyai.sessionPath('keep'));
+    expect(read.messages.map((m) => m.content)).toEqual(['see\n\n[1 attached image removed]', 'ok', 'more']);
+    expect(read.forks).toBe(0);
+    expect(verifyChat(skinnyai.sessionPath('keep'))).toEqual([]);
+  });
+
+  it('writes a purge to the file first when the chat had unsaved messages', async () => {
+    const chat = chatOf();
+    chat.history = [{ role: 'user', content: 'a', images: [png] }];
+    await chat.save('late');
+    chat.history.push({ role: 'assistant', content: 'unsaved reply' });
+    await chat.handleCommand('/purge blobs');
+    expect(readChat(skinnyai.sessionPath('late')).messages.map((m) => m.content)).toEqual(['a\n\n[1 attached image removed]', 'unsaved reply']);
+  });
+
+  it('/save over a different session replaces it, after asking', async () => {
+    await withTwo('Target');
+    const chat = chatOf('mine', 'reply');
+    chat.confirm = async () => true;
+    await chat.save('Target');
+    expect(readChat(skinnyai.sessionPath('Target')).messages.map((m) => m.content)).toEqual(['mine', 'reply']);
   });
 });
 

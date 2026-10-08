@@ -15,7 +15,8 @@ import { createMarkdownRenderer } from './markdown.js';
 import { adaptHistory, describeAdaptation, newCallId, parseArguments, purgeHistory, wireShape } from './history.js';
 import { loadMcpConfig, runTool, startMcpServers, toolDefinitions } from './mcp.js';
 import { pickDefaultModel } from './models.js';
-import { SESSION_DIR, autosaveName, chatFileExists, compactLocalSession, deleteLocalSession, formatModelfile, isAutosaveName, legacySessionPath, listLocalSessions, localSessionExists, readLocalSession, resumeHint, saveLocalSession, sessionPath, sessionStamp } from './sessions.js';
+import { newMessageId } from './chatdb.js';
+import { SESSION_DIR, autosaveName, chatFileExists, deleteLocalSession, formatModelfile, isAutosaveName, legacySessionPath, listLocalSessions, localSessionExists, readLocalSession, redactLocalSession, resumeHint, saveLocalSession, sessionPath, sessionStamp } from './sessions.js';
 import { formatMarkdown } from './export.js';
 import { ANSI, CHROME_COLOR, PROMPT, createWordWrapper, drawBox, graphemeWidth, graphemes, styleLine, styledPrompt, supportsColor, visibleWidth } from './style.js';
 import { MAX_TOOL_ROUNDS, TOOLS, formatToday } from './tools.js';
@@ -54,9 +55,9 @@ export class OllamaChat {
     // set by autosave, a local /save, or loading a local session; cleared
     // when a new conversation starts (/new, loading a model).
     this._sessionName = null;
-    // How many messages the session file holds, as far as this chat knows,
-    // so autosave can append instead of rewriting; null when unknown.
-    this.persistedCount = null;
+    // The id of the last message the session file holds from this chat, as
+    // far as it knows, so autosave adds only what follows; null when none.
+    this.savedHead = null;
     // What that file looked like when this chat last wrote or read it, to
     // notice another chat saving to it (see writeSession).
     this.sessionStamp = null;
@@ -70,7 +71,7 @@ export class OllamaChat {
     if (name === this._sessionName) return;
     this._sessionName = name;
     this.sessionStamp = null;
-    this.persistedCount = null;
+    this.savedHead = null;
     if (process.env.TERM_PROGRAM === 'SkinnyAI' && process.stdout.isTTY) {
       process.stdout.write(`\x1b]2;${name ? `SkinnyAI: ${name}` : 'SkinnyAI'}\x07`);
     }
@@ -381,7 +382,7 @@ export class OllamaChat {
     for (const [param, value] of session.parameters) this.setParameter(param, [value]);
     this.sessionName = name; // autosave keeps updating the same file
     this.sessionStamp = session.stamp ?? null;
-    this.persistedCount = session.persisted ?? null;
+    this.savedHead = session.persistedHead ?? null;
   }
 
   async applyLocalSession(name, session) {
@@ -577,7 +578,7 @@ export class OllamaChat {
       content = images.length && images.length === all.length ? 'What is in this image?' : 'Summarize the attached file.';
     }
     content = [content, ...texts.map((t) => inlineFile(t.name, t.text))].filter(Boolean).join('\n\n');
-    const message = { role: 'user', content };
+    const message = { id: newMessageId(), role: 'user', content };
     if (images.length) message.images = images.map(({ mime, data }) => ({ mime, data }));
     if (documents.length) message.documents = documents.map(({ name, mime, data }) => ({ name, mime, data }));
     process.stdout.write('\n');
@@ -617,7 +618,9 @@ export class OllamaChat {
 
   // Everything but the system message, as the session file keeps it.
   conversation() {
-    return this.getSystemMessage() ? this.history.slice(1) : this.history;
+    const messages = this.getSystemMessage() ? this.history.slice(1) : this.history;
+    for (const message of messages) message.id ??= newMessageId();
+    return messages;
   }
 
   sessionSnapshot() {
@@ -658,12 +661,12 @@ export class OllamaChat {
   // Writes the conversation to the session file `name`, first checking that
   // another chat hasn't saved to that file since this one last did. Returns
   // the path written, or null if nothing was (after saying why).
-  async writeSession(name) {
-    if (name === this.sessionName && this.sessionStamp) {
+  async writeSession(name, { replace = false } = {}) {
+    if (!replace && name === this.sessionName && this.sessionStamp) {
       const current = await sessionStamp(name);
       if (current !== null && current !== this.sessionStamp) return this.resolveSessionConflict(name);
     }
-    return this.writeSessionFile(name);
+    return this.writeSessionFile(name, { replace });
   }
 
   // The first save of a session from an earlier version writes the new
@@ -682,27 +685,28 @@ export class OllamaChat {
     }
   }
 
-  // `full` rewrites the file's messages even if this chat could append.
-  async writeSessionFile(name, { full = false } = {}) {
+  // Adds what the session file lacks (everything, for a new file), or with
+  // `replace` discards the file and writes this conversation in its place.
+  async writeSessionFile(name, { replace = false } = {}) {
     const snapshot = this.sessionSnapshot();
-    const append = !full && name === this.sessionName ? this.persistedCount : null;
+    const continuing = !replace && name === this.sessionName && existsSync(sessionPath(name));
     const legacy = legacySessionPath(name);
     const converting = !existsSync(sessionPath(name)) && existsSync(legacy);
-    const file = await saveLocalSession(name, snapshot, { append });
+    const file = await saveLocalSession(name, snapshot, { after: continuing ? this.savedHead : null, replace });
     this.sessionName = name;
     this.sessionStamp = await sessionStamp(name);
-    this.persistedCount = snapshot.messages.length;
+    this.savedHead = snapshot.messages.at(-1)?.id ?? null;
     if (converting) await this.offerToRemoveLegacy(name, legacy);
     return file;
   }
 
   // The file changed under us: reload it, keep this conversation under a new
-  // name, overwrite it anyway, or skip (asked again at the next save).
+  // name, or skip (asked again at the next save).
   async resolveSessionConflict(name) {
     const answer = await this.choose(
       `\n⚠️  Session '${name}' was saved by another chat since you last saved it.\n` +
-      '   Reload it (r, drops this chat\'s unsaved changes), save under a new name (s), overwrite it (o), or skip (anything else)?',
-      '[r/s/o/N]', 'rso');
+      '   Reload it (r, drops this chat\'s unsaved changes), save under a new name (s), or skip (anything else)?',
+      '[r/s/N]', 'rs');
     if (answer === 'r') {
       const session = await readLocalSession(name);
       if (session) {
@@ -710,15 +714,14 @@ export class OllamaChat {
         await this.applyLocalSession(name, session);
         return null;
       }
-      return this.writeSessionFile(name, { full: true }); // deleted meanwhile
+      return this.writeSessionFile(name, { replace: true }); // deleted meanwhile
     }
-    if (answer === 'o') return this.writeSessionFile(name, { full: true });
     if (answer === 's') {
       console.log('\nNew name for this session:');
       const newName = ((await this.readTurnInput()) || '').trim();
       if (newName && newName !== name &&
           (!await localSessionExists(newName) || await this.confirm(`\nA saved session named '${newName}' already exists. Overwrite it?`))) {
-        const file = await this.writeSessionFile(newName);
+        const file = await this.writeSessionFile(newName, { replace: true });
         console.log(`\n✅ Saved session '${newName}' to ${file}; '${name}' is unchanged.\n`);
         return file;
       }
@@ -769,7 +772,7 @@ export class OllamaChat {
         process.stdout.write(`${ANSI.assistant.narration}   ${result}${ANSI.reset}\n`);
       }
 
-      const message = { role: 'tool', tool_call_id: call.id, tool_name: name, content: result };
+      const message = { id: newMessageId(), role: 'tool', tool_call_id: call.id, tool_name: name, content: result };
       if (images.length) {
         message.images = images;
         message.parts = outcome.parts;
@@ -995,7 +998,7 @@ export class OllamaChat {
         call.id ||= newCallId();
         call.function.arguments = parseArguments(call.function.arguments);
       }
-      const message = { role: 'assistant', content: fullResponse, origin: { api: this.api, model: this.model } };
+      const message = { id: newMessageId(), role: 'assistant', content: fullResponse, origin: { api: this.api, model: this.model } };
       if (calls.length > 0) message.tool_calls = calls;
       const kept = thinkingBlocks.filter(Boolean);
       if (kept.length > 0) message.thinkingBlocks = kept;
@@ -1206,12 +1209,12 @@ export class OllamaChat {
     const target = name || previous || await autosaveName();
     const renaming = previous && previous !== target && isAutosaveName(previous);
     try {
-      if (target !== previous && await localSessionExists(target) &&
-          !await this.confirm(`\nA saved session named '${target}' already exists. Overwrite it?`)) {
+      const taken = target !== previous && await localSessionExists(target);
+      if (taken && !await this.confirm(`\nA saved session named '${target}' already exists. Overwrite it?`)) {
         console.log('Not saved.\n');
         return;
       }
-      const file = await this.writeSession(target);
+      const file = await this.writeSession(target, { replace: taken });
       if (!file) return; // the conflict prompt said what happened
       if (this.sessionName !== target) return; // and saved it under another name
       if (renaming) await deleteLocalSession(previous);
@@ -1311,11 +1314,19 @@ export class OllamaChat {
       console.log(`\nNothing to purge: this conversation has no ${kinds[kind] === 'tools' ? 'tool calls' : kinds[kind]}.\n`);
       return;
     }
-    this.history = history;
     try {
-      if (this.sessionName && await localSessionExists(this.sessionName)) {
-        await this.writeSessionFile(this.sessionName, { full: true });
-        compactLocalSession(this.sessionName);
+      const name = this.sessionName;
+      const saved = name && await chatFileExists(name);
+      // The file has to hold everything before it can be rewritten.
+      if (saved && !await this.writeSession(name)) {
+        console.log('Not purged.\n');
+        return;
+      }
+      this.history = history;
+      if (saved) {
+        redactLocalSession(name, kinds[kind], this.conversation());
+        this.sessionStamp = await sessionStamp(name);
+        this.savedHead = this.conversation().at(-1)?.id ?? null;
       }
       console.log(`\n🧹 Purged ${removed} ${kinds[kind] === 'tools' ? 'tool call' : kinds[kind] === 'blobs' ? 'attachment' : 'thinking block'}${removed === 1 ? '' : 's'}.\n`);
     } catch (error) {

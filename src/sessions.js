@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import './config.js';
 import { SKINNY_HOME } from './config.js';
-import { messageCount, readChat, revisionOf, vacuum, writeChat } from './chatdb.js';
+import { commitCount, messageCount, readChat, redactChat, stampOf, verifyChat, writeChat } from './chatdb.js';
 
 // Sessions saved on this machine, one SQLite file per name (see chatdb.js),
 // so they work with any server and hold the whole conversation: tool calls,
@@ -115,7 +115,7 @@ export function parseModelfile(text) {
 // chat can tell whether another process saved over it: the chat file's
 // revision, or for a Modelfile from an earlier version its mtime and size.
 export async function sessionStamp(name) {
-  if (existsSync(sessionPath(name))) return `rev:${revisionOf(sessionPath(name))}`;
+  if (existsSync(sessionPath(name))) return stampOf(sessionPath(name));
   try {
     const { mtimeMs, size } = await fs.stat(legacySessionPath(name));
     return `${mtimeMs}:${size}`;
@@ -126,27 +126,28 @@ export async function sessionStamp(name) {
 }
 
 // Saves a session ({ from, system, parameters, messages, settings }) and
-// returns the path written. `append` is how many messages the caller knows
-// the file already holds, so only the new ones are written (see writeChat).
-export async function saveLocalSession(name, session, { append = null } = {}) {
+// returns the path written. `after` is the id of the last message the file
+// already has from this conversation, so only the ones after it are added;
+// `replace` discards an existing chat file of that name first (see writeChat).
+export async function saveLocalSession(name, session, { after = null, replace = false } = {}) {
   await fs.mkdir(SESSION_DIR, { recursive: true });
   const file = sessionPath(name);
-  writeChat(file, session, { append });
+  writeChat(file, session, { after, replace });
   return file;
 }
 
 // Returns the session (with the `stamp` it had just before it was read, and
-// `persisted`, how many messages the file holds), or null if none is saved
+// `persistedHead`, the id of its last message), or null if none is saved
 // under that name. A Modelfile from an earlier version is read as text only.
 export async function readLocalSession(name) {
   try {
     const stamp = await sessionStamp(name);
     if (existsSync(sessionPath(name))) {
       const session = readChat(sessionPath(name));
-      return { ...session, stamp, persisted: session.messages.length };
+      return { ...session, stamp, persistedHead: session.last };
     }
     const session = parseModelfile(await fs.readFile(legacySessionPath(name), 'utf8'));
-    return { ...session, stamp, persisted: null };
+    return { ...session, stamp, persistedHead: null };
   } catch (error) {
     if (error.code === 'ENOENT') return null;
     throw error;
@@ -169,12 +170,12 @@ export async function deleteLocalSession(name) {
   await fs.rm(sessionPath(name), { force: true });
 }
 
-// Shrinks a chat file after its contents were rewritten (/purge).
-export function compactLocalSession(name) {
-  if (existsSync(sessionPath(name))) vacuum(sessionPath(name));
+// /purge in a saved chat: `messages` is the conversation after the purge.
+export function redactLocalSession(name, kind, messages) {
+  redactChat(sessionPath(name), kind, messages);
 }
 
-export { messageCount };
+export { commitCount, messageCount, verifyChat };
 
 // Whether a session still has the name autosave gave it (see autosaveName).
 export function isAutosaveName(name) {

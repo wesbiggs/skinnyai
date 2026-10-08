@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Chat files are an append-only log: every save is a commit (new messages and changed settings) recording its device, a Lamport counter, and the commits it follows, and every message has an id and a parent, so changes from two devices can later be merged. `~/.skinny/device` holds this installation's id and an editable name. If two writers add to one message, the latest line is shown and the other is kept. `/purge` is recorded as an operation.
 - Chats are saved as SQLite files (`<name>.skinny`, via `node:sqlite`) holding the whole conversation: tool calls and results, thinking blocks, attached images and PDFs (stored once each), and which model wrote each reply. `.Modelfile` sessions from earlier versions still load and are written as `.skinny` the next time they're saved.
 - `/new [name]`, `/delete [name]` (asks first), `/export [path]` (`.md` transcript or `.Modelfile`), and `/purge thinking|tools|blobs`. `/clear` is replaced by `/new`, which keeps the old chat saved. `/delete` leaves old-format Modelfiles alone; the first save of one asks whether to delete it.
 - `/set model <name>` switches model on the same server, keeping the conversation.
@@ -21,7 +22,7 @@
 - `/show settings` separates settings you can change from those fixed for the session.
 - Session names keep spaces in their filenames (files saved with `%20` still load).
 - After `/save`, the resume hint matches how the program was launched (`skinnyai`, or File > Open Chat... in the app).
-- A chat that finds another chat saved to its session file since it last did asks whether to reload, save under a new name, overwrite, or skip.
+- A chat that finds another chat saved to its session file since it last did asks whether to reload, save under a new name, or skip (there is no overwrite: chat files only grow).
 - `/set format json` also adds "Respond only with a valid JSON object." to the system message.
 
 ### Fixed

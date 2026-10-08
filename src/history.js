@@ -167,7 +167,7 @@ export function wireShape(messages, api) {
   return messages.map((m) => {
     if (m.role === 'assistant') {
       const { tool_calls } = m;
-      const rest = without(m, 'origin', 'thinkingBlocks', 'tool_calls');
+      const rest = without(m, 'id', 'origin', 'thinkingBlocks', 'tool_calls');
       const out = api === 'anthropic' && m.thinkingBlocks ? { ...rest, thinkingBlocks: m.thinkingBlocks } : rest;
       if (!tool_calls?.length) return out;
       for (const call of tool_calls) names.set(call.id, call.function.name);
@@ -187,12 +187,13 @@ export function wireShape(messages, api) {
       return { ...out, tool_calls };
     }
     if (m.role === 'tool') {
-      const { tool_call_id, tool_name, ...rest } = m;
+      const { tool_call_id, tool_name } = m;
+      const rest = without(m, 'id', 'tool_call_id', 'tool_name');
       if (api === 'ollama') return { ...rest, tool_name: tool_name ?? names.get(tool_call_id) };
       if (api === 'openai') return { ...rest, tool_call_id };
       return { ...rest, tool_call_id };
     }
-    return m;
+    return m.id ? without(m, 'id') : m;
   });
 }
 
