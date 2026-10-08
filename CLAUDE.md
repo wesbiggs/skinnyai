@@ -26,6 +26,7 @@ A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic
 
 ## Behavior decisions worth keeping
 
+- History is provider-neutral (`src/history.js`: tool calls carry ids and object arguments, assistant messages carry `origin: {api, model}`); `adaptHistory` + `wireShape` shape a copy per request (flatten calls to unavailable tools, replay thinking only to its model, drop what a model can't take), so `/set profile` and `/set model` keep the conversation. Never mutate stored history for a target.
 - Web search/tools are on by default (`--no-tools`, `SKINNY_TOOLS=false`, `/set notools` to disable); the date line goes into the system message by default.
 - `keep_alive` and unload-on-exit only apply to a self-hosted Ollama (`managesModelLifetime`: api is ollama and host isn't ollama.com); elsewhere they're not sent and their UI is hidden.
 - `--api openai` does not default its host to api.openai.com when a key is set: a stray key must never silently redirect prompts. `OPENAI_API_KEY` is sent as a Bearer token on any host.

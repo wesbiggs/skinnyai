@@ -11,6 +11,7 @@ import { anthropicHeaders, ollamaApiKey, openaiApiKey, hostFetch, isOllamaCom, r
 import { IMAGE_PROTOCOL, sniffImage } from './images.js';
 import { decodeCsiU, inputPosition } from './lineedit.js';
 import { createMarkdownRenderer } from './markdown.js';
+import { adaptHistory, describeAdaptation, newCallId, parseArguments, wireShape } from './history.js';
 import { loadMcpConfig, runTool, startMcpServers, toolDefinitions } from './mcp.js';
 import { pickDefaultModel } from './models.js';
 import { SESSION_DIR, autosaveName, deleteLocalSession, isAutosaveName, listLocalSessions, localSessionExists, readLocalSession, resumeHint, saveLocalSession, sessionStamp } from './sessions.js';
@@ -154,6 +155,29 @@ export class OllamaChat {
     return {};
   }
 
+  // What the next request can take, for adaptHistory. The window is only
+  // known (and enforced here) when the user set num_ctx on Ollama; elsewhere
+  // the server decides what to do with a long conversation.
+  adaptTarget() {
+    const numCtx = Number(this.options.num_ctx);
+    return {
+      api: this.api,
+      model: this.model,
+      toolNames: new Set(this.activeTools().keys()),
+      vision: this.visionCache?.get(this.model) ?? null,
+      contextTokens: this.api === 'ollama' && numCtx > 0 ? numCtx : null
+    };
+  }
+
+  // After switching model or profile with the conversation kept: how much
+  // came along and what the new model won't get as it was.
+  carryOverNote(prefix) {
+    const kept = this.history.filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content).length;
+    const changes = describeAdaptation(adaptHistory(this.history, this.adaptTarget()).report);
+    const lines = [`${prefix}; kept the conversation (${kept} message${kept === 1 ? '' : 's'}).`, ...changes.map((c) => `   ${c}`)];
+    return `${lines.join('\n')}\n`;
+  }
+
   // Models only know their training cutoff (llama3.2's template even states
   // "Cutting Knowledge Date: December 2023"), so they assume it's still then.
   // The date goes into the outgoing system message rather than into history,
@@ -168,6 +192,8 @@ export class OllamaChat {
       const rest = system ? this.history.slice(1) : this.history;
       messages = [{ role: 'system', content: system ? `${notes}\n\n${system}` : notes }, ...rest];
     }
+    // The history is provider-neutral; shape it for this model and API.
+    messages = wireShape(adaptHistory(messages, this.adaptTarget()).messages, this.api);
     // A tool result's images are relayed as they were returned. Anthropic takes
     // them inside the tool_result (buildAnthropicChatBody). OpenAI-style servers
     // get the result's parts as a content array, with each image as an image_url
@@ -706,9 +732,7 @@ export class OllamaChat {
         process.stdout.write(`${ANSI.assistant.narration}   ${result}${ANSI.reset}\n`);
       }
 
-      const message = this.api !== 'ollama'
-        ? { role: 'tool', tool_call_id: call.id, content: result }
-        : { role: 'tool', tool_name: name, content: result };
+      const message = { role: 'tool', tool_call_id: call.id, tool_name: name, content: result };
       if (images.length) {
         message.images = images;
         message.parts = outcome.parts;
@@ -930,7 +954,11 @@ export class OllamaChat {
 
       // Add assistant response to history (raw, asterisks intact)
       const calls = toolCalls.filter(Boolean);
-      const message = { role: 'assistant', content: fullResponse };
+      for (const call of calls) {
+        call.id ||= newCallId();
+        call.function.arguments = parseArguments(call.function.arguments);
+      }
+      const message = { role: 'assistant', content: fullResponse, origin: { api: this.api, model: this.model } };
       if (calls.length > 0) message.tool_calls = calls;
       const kept = thinkingBlocks.filter(Boolean);
       if (kept.length > 0) message.thinkingBlocks = kept;
@@ -1046,7 +1074,8 @@ export class OllamaChat {
     console.log('  /set nodebug           Stop logging (default)');
     console.log('  /set autosave          Save the session to a local file after each reply');
     console.log('  /set noautosave        Stop autosaving (default)');
-    console.log('  /set profile [name]    Switch to a profile from config.json (starts a new conversation)');
+    console.log('  /set profile [name]    Switch to a profile from config.json, keeping the conversation (--new starts a fresh one)');
+    console.log('  /set model <name>      Switch to another model on this server, keeping the conversation');
     console.log('\nUse /show settings to see the current values.');
     console.log('');
   }
@@ -1453,10 +1482,12 @@ export class OllamaChat {
   static PROFILE_FIELDS = ['model', 'modelIsDefault', 'api', 'host', 'keepAlive', 'showThinking', 'stopOnExit', 'toolsEnabled',
     'mcpEnabled', 'injectDate', 'markdown', 'images', 'autosave'];
 
-  // /set profile: lists the profiles, or switches to one and starts a fresh
-  // conversation (the system message stays), as if launched with --profile.
-  // Command-line flags only applied to the launch, so they don't carry over.
-  async switchProfile(name) {
+  // /set profile: lists the profiles, or switches to one, as if launched with
+  // --profile. The conversation carries over (adapted to the new model, see
+  // adaptHistory) unless `newChat`, which starts a new one with the system
+  // message kept. Command-line flags only applied to the launch, so they
+  // don't carry over.
+  async switchProfile(name, { newChat = false } = {}) {
     let config;
     try {
       config = loadConfigFile(CONFIG_FILE);
@@ -1475,7 +1506,7 @@ export class OllamaChat {
         const marks = [profile === PROFILE.name ? 'active' : '', profile === defaultName ? 'default' : ''].filter(Boolean);
         console.log(`  ${profile}${marks.length ? ` (${marks.join(', ')})` : ''}`);
       }
-      console.log('\nUsage: /set profile <name>\n');
+      console.log('\nUsage: /set profile <name> [--new]\n');
       return;
     }
 
@@ -1508,22 +1539,64 @@ export class OllamaChat {
     this.mcp?.close();
     this.mcp = null;
     await this.startMcp();
-    const system = this.getSystemMessage();
-    this.history = system ? [{ role: 'system', content: system }] : [];
+    if (newChat) {
+      const system = this.getSystemMessage();
+      this.history = system ? [{ role: 'system', content: system }] : [];
+      this.sessionName = null;
+    }
     this.options = {};
     this.format = '';
     this.think = undefined;
     this.queuedAttachments = [];
-    this.sessionName = null;
     this.printWelcome();
-    console.log(`Switched to profile '${PROFILE.name}'; this is a new conversation.\n`);
+    console.log(newChat ? `Switched to profile '${PROFILE.name}'; this is a new conversation.\n` : this.carryOverNote(`Switched to profile '${PROFILE.name}'`));
+  }
+
+  // /set model: another model on the same server, with the conversation kept
+  // (the sampling parameters and settings stay as they are).
+  async switchModel(name) {
+    if (!name) {
+      console.log(`\nUsage: /set model <name>   (now: ${this.model}; /list shows what's available)\n`);
+      return;
+    }
+    if (this.api === 'ollama') {
+      try {
+        const response = await hostFetch(`${this.host}/api/show`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: name })
+        });
+        if (response.status === 404) {
+          console.log(`\nCouldn't find model '${name}'\n`);
+          return;
+        }
+      } catch (error) {
+        console.log(`\n❌ Couldn't check model '${name}': ${error.message}\n`);
+        return;
+      }
+    }
+    if (this.stopOnExit) await this.stopModel(); // still the old model
+    this.model = name;
+    this.modelIsDefault = false;
+    try {
+      await this.resolveDefaultModel();
+    } catch (error) {
+      console.log(`\n❌ ${error.message}\n`);
+      return;
+    }
+    console.log(`\n${this.carryOverNote(`Switched to model '${this.model}'`)}`);
   }
 
   handleSet(args) {
     const [sub, ...rest] = args;
     switch (sub) {
-      case 'profile':
-        return this.switchProfile(rest.join(' ').trim());
+      case 'profile': {
+        const text = rest.join(' ').trim();
+        const newChat = /(^|\s)--new$/.test(text);
+        return this.switchProfile(text.replace(/\s*--new$/, ''), { newChat });
+      }
+      case 'model':
+        return this.switchModel(rest.join(' ').trim());
       case undefined:
         this.printSetUsage();
         break;

@@ -381,7 +381,7 @@ describe('images in tool results', () => {
   const png = { mime: 'image/png', data: 'AAAA' };
   const history = [
     { role: 'user', content: 'draw' },
-    { role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 't', arguments: '{}' } }, { id: 'c2', function: { name: 't', arguments: '{}' } }] },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 'web_search', arguments: '{}' } }, { id: 'c2', function: { name: 'web_search', arguments: '{}' } }] },
     { role: 'tool', tool_call_id: 'c1', content: 'saved to /tmp/p.png\n[image: image/png, 0 KB]', images: [png], parts: [{ type: 'image', ...png }, { type: 'text', text: 'saved to /tmp/p.png' }] },
     { role: 'tool', tool_call_id: 'c2', content: 'two' }
   ];

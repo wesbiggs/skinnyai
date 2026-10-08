@@ -2,7 +2,12 @@
 
 ## Unreleased
 
+### Added
+- `/set model <name>` switches model on the same server, keeping the conversation.
+- Conversations are kept in a provider-neutral form (`src/history.js`) and adapted to each model when a request is sent: tool calls become text when the new model lacks the tools, thinking blocks replay only to the model that wrote them, and PDFs/images a model can't take are noted instead.
+
 ### Changed
+- `/set profile` keeps the conversation (use `--new` for a fresh one). Tool calls now always get ids and object arguments in history.
 - Removed the DuckDuckGo HTML scraper and the `recency` argument. Without an `OLLAMA_API_KEY`, `web_search` returns only DuckDuckGo Instant Answers (with `t=skinnyai` and attribution, per the API's terms); full web search uses Ollama's hosted search.
 - skinnyai identifies itself (`skinnyai/<version>`) instead of sending a browser User-Agent, for Instant Answers and `fetch_page`.
 - README trimmed to an overview; details moved to `docs/*.md`, with corrections (requests go to `/api/chat`, the app's start window, the Anthropic API).

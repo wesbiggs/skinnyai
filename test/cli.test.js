@@ -185,13 +185,38 @@ describe('/set profile', () => {
     expect(stdout).toMatch(/profile +Alpha/);
   });
 
-  it('switches profile with a fresh conversation and its own settings', async () => {
+  it('switches profile keeping the conversation, with its own settings', async () => {
     const { stdout } = await run([], 'first\n/set profile beta\nsecond\n/show settings\n');
     const requests = chatRequests();
     expect(requests.map((r) => r.body.model)).toEqual(['amodel', 'bmodel']);
-    expect(requests[1].body.messages.map((m) => m.content)).toEqual(['second']);
-    expect(stdout).toContain("Switched to profile 'Beta'");
+    expect(requests[1].body.messages.map((m) => m.content)).toEqual(['first', 'You said: **first**', 'second']);
+    expect(stdout).toContain("Switched to profile 'Beta'; kept the conversation (2 messages).");
     expect(stdout).toMatch(/profile +Beta/);
+  });
+
+  it('starts a fresh conversation with --new', async () => {
+    const { stdout } = await run([], 'first\n/set profile beta --new\nsecond\n');
+    expect(chatRequests()[1].body.messages.map((m) => m.content)).toEqual(['second']);
+    expect(stdout).toContain("Switched to profile 'Beta'; this is a new conversation.");
+  });
+
+  it('carries the conversation across APIs, in the shape the new API wants', async () => {
+    const config = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
+    config.profiles.Gamma = { env: { SKINNY_MODEL: 'gmodel', SKINNY_API: 'ollama', SKINNY_HOST: server.url } };
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(config));
+    await run([], 'first\n/set profile gamma\nsecond\n');
+    const ollama = server.requests.filter((r) => r.url === '/api/chat').at(-1);
+    expect(ollama.body.model).toBe('gmodel');
+    expect(ollama.body.messages.map((m) => [m.role, m.content])).toEqual([['user', 'first'], ['assistant', 'You said: **first**'], ['user', 'second']]);
+  });
+
+  it('switches model with /set model, keeping the conversation and parameters', async () => {
+    const { stdout } = await run([], 'first\n/set parameter temperature 0.3\n/set model other\nsecond\n');
+    const requests = chatRequests();
+    expect(requests.map((r) => r.body.model)).toEqual(['amodel', 'other']);
+    expect(requests[1].body.messages.map((m) => m.content)).toEqual(['first', 'You said: **first**', 'second']);
+    expect(requests[1].body.temperature).toBe(0.3);
+    expect(stdout).toContain("Switched to model 'other'; kept the conversation (2 messages).");
   });
 
   it('stays put when the profile is missing or unusable', async () => {
