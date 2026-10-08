@@ -308,6 +308,7 @@ export function writeChat(file, session, { after = null, replace = false, device
       const now = new Date().toISOString();
       if (!getMeta(db, 'chat_id')) setMeta(db, 'chat_id', randomUUID());
       if (!getMeta(db, 'created_at')) setMeta(db, 'created_at', now);
+      if (session.project && !getMeta(db, 'project')) setMeta(db, 'project', session.project);
       return { commit, chatId: getMeta(db, 'chat_id'), last: session.messages.at(-1)?.id ?? null };
     });
   } finally {
@@ -379,6 +380,7 @@ export function readChat(file) {
       messages: line,
       settings: JSON.parse(state.get('settings') ?? '{}'),
       chatId: getMeta(db, 'chat_id'),
+      project: getMeta(db, 'project') ?? null,
       forks,
       last: line.at(-1)?.id ?? null
     };
@@ -481,6 +483,26 @@ export function chatIdOf(file) {
   return withDb(file, (db) => getMeta(db, 'chat_id') ?? null);
 }
 
+// The current state entries ([key, value]) of a chat: its name, system
+// message, model, parameters, and settings.
+export function chatState(file) {
+  return withDb(file, (db) => [...currentState(db)]);
+}
+
+// Which project the chat belongs to (null for none yet).
+export function chatProjectOf(file) {
+  return withDb(file, (db) => getMeta(db, 'project') ?? null);
+}
+
+export function setChatProject(file, project) {
+  const db = open(file);
+  try {
+    inTransaction(db, () => setMeta(db, 'project', project));
+  } finally {
+    db.close();
+  }
+}
+
 export function commitIds(file) {
   return withDb(file, (db) => db.prepare('SELECT id FROM commits ORDER BY lamport, created_at, id').all().map((c) => c.id));
 }
@@ -532,12 +554,13 @@ export function exportCommit(file, id, nameBlob) {
 
 // Starts an empty chat file that is the chat `chatId` (for commits to be
 // imported into).
-export function createChat(file, chatId, createdAt) {
+export function createChat(file, chatId, createdAt, project = null) {
   const db = open(file, { create: true });
   try {
     inTransaction(db, () => {
       setMeta(db, 'chat_id', chatId);
       setMeta(db, 'created_at', createdAt ?? new Date().toISOString());
+      if (project) setMeta(db, 'project', project);
     });
   } finally {
     db.close();
@@ -637,15 +660,17 @@ export function splitIds(chatId, tipUid) {
   return { chatId: `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`, commitId: hash };
 }
 
-// Writes a new chat file holding one line of conversation as a single commit,
-// from fixed values (see splitIds) so it comes out the same everywhere.
-export function writeSplitChat(file, { chatId, commitId, createdAt, state, line }) {
+// Writes a new chat file holding one line of conversation as a single commit.
+// A split-off line uses fixed values (see splitIds) so it comes out the same
+// everywhere; a copy to another project gives its own.
+export function writeSplitChat(file, { chatId, commitId, createdAt, state, line, project = null, device = { id: 'split', name: 'split' } }) {
   const db = open(file, { create: true });
   try {
     inTransaction(db, () => {
       setMeta(db, 'chat_id', chatId);
       setMeta(db, 'created_at', createdAt);
-      db.prepare('INSERT INTO commits (id, device_id, device_name, lamport, parents, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(commitId, 'split', 'split', 1, '[]', createdAt);
+      if (project) setMeta(db, 'project', project);
+      db.prepare('INSERT INTO commits (id, device_id, device_name, lamport, parents, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(commitId, device.id, device.name, 1, '[]', createdAt);
       for (const [key, value] of state) db.prepare('INSERT INTO state_log (commit_id, key, value) VALUES (?, ?, ?)').run(commitId, key, value);
       let parent = null;
       for (const message of line) {

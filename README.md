@@ -13,7 +13,7 @@ A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic
 - Drag in [images, PDFs, or text files](docs/display.md#attaching-files)
 - [Markdown rendering](docs/display.md), inline images, thinking output, and multi-line input
 - [Sessions](docs/sessions.md): every chat autosaves to one file you own (tool calls and attachments included), and continues with any model
-- [Sync across devices](docs/sync.md) through any cloud folder, end-to-end encrypted
+- [Sync across devices](docs/sync.md) through any cloud folder, end-to-end encrypted, with projects that have a key each
 - Named [profiles](docs/configuration.md) in `~/.skinny/config.json`
 
 ## Setup

@@ -3,10 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chatIdOf, commitIds, messageCount, newMessageId, readChat, redactChat, verifyChat, writeChat } from '../src/chatdb.js';
+import { chatIdOf, chatProjectOf, commitIds, messageCount, newMessageId, readChat, redactChat, setChatProject as setProject, verifyChat, writeChat } from '../src/chatdb.js';
 import { chatKeys, openCommit, sealCommit } from '../src/seal.js';
-import { deleteSyncedChat, describeSync, initVault, keyMatches, nameFromFile, readVaultInfo, sessionFileName, syncChats } from '../src/sync.js';
-import { decodeRecoveryKey, encodeRecoveryKey, generateVaultKey } from '../src/vault.js';
+import { adoptUnassigned, copyChat, deleteSyncedChat, describeSync, initProject, keyOpensProject, nameFromFile, pushChat, readProject, sessionFileName, suggestedName, syncProject, syncProjects } from '../src/sync.js';
+import { decodeProjectKey, encodeProjectKey, generateProjectKey, projectId } from '../src/keys.js';
 import { purgeHistory } from '../src/history.js';
 
 // Two devices are two sessions directories and two device identities,
@@ -14,6 +14,7 @@ import { purgeHistory } from '../src/history.js';
 let tmp;
 let folder;
 let key;
+let project;
 const laptop = { id: 'laptop-id', name: 'laptop' };
 const phone = { id: 'phone-id', name: 'phone' };
 const dev = (name, device) => ({ name, device, dir: path.join(tmp, name) });
@@ -23,8 +24,9 @@ let b;
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'skinnyai-sync-'));
   folder = path.join(tmp, 'cloud');
-  key = generateVaultKey();
-  initVault(folder, key);
+  key = generateProjectKey();
+  initProject(folder, key, 'Shared stuff');
+  project = { id: projectId(key), folder, name: 'Shared stuff' };
   a = dev('a', laptop);
   b = dev('b', phone);
   fs.mkdirSync(a.dir);
@@ -35,8 +37,8 @@ afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 const m = (role, content, extra = {}) => ({ id: newMessageId(), role, content, ...extra });
 const png = { mime: 'image/png', data: Buffer.from('secret pixels').toString('base64') };
 const fileOf = (d, name) => path.join(d.dir, sessionFileName(name));
-const save = (d, name, messages, after = null) => writeChat(fileOf(d, name), { from: 'm', system: 'be brief', parameters: {}, settings: {}, messages, name }, { after, device: d.device });
-const sync = (d) => syncChats({ folder, key, sessionsDir: d.dir });
+const save = (d, name, messages, after = null) => writeChat(fileOf(d, name), { from: 'm', system: 'be brief', parameters: {}, settings: {}, messages, name, project: project.id }, { after, device: d.device });
+const sync = (d) => syncProject({ project, key, sessionsDir: d.dir });
 const contents = (file) => readChat(file).messages.map((x) => x.content);
 const listChats = (d) => fs.readdirSync(d.dir).filter((f) => f.endsWith('.skinny')).sort();
 const allFiles = (dir) => fs.readdirSync(dir, { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).map((e) => path.join(e.parentPath, e.name));
@@ -207,11 +209,11 @@ describe('deleting', () => {
 describe('what it refuses', () => {
   it('will not sync with a different key', () => {
     save(a, 'Mine', [m('user', 'hi')]);
-    expect(() => syncChats({ folder, key: generateVaultKey(), sessionsDir: a.dir })).toThrow(/doesn't open/);
-    expect(keyMatches(folder, key)).toBe(true);
-    expect(keyMatches(folder, generateVaultKey())).toBe(false);
-    expect(() => initVault(folder, generateVaultKey())).toThrow(/different key/);
-    expect(() => syncChats({ folder: path.join(tmp, 'empty'), key, sessionsDir: a.dir })).toThrow(/no synced chats/);
+    expect(() => syncProject({ project, key: generateProjectKey(), sessionsDir: a.dir })).toThrow(/doesn't open/);
+    expect(keyOpensProject(folder, key)).toBe(true);
+    expect(keyOpensProject(folder, generateProjectKey())).toBe(false);
+    expect(() => initProject(folder, generateProjectKey(), 'Other')).toThrow(/different project/);
+    expect(() => syncProject({ project: { ...project, folder: path.join(tmp, 'empty') }, key, sessionsDir: a.dir })).toThrow(/isn't a project folder/);
   });
 
   it('skips a damaged file, says so, and carries on with the rest', () => {
@@ -255,19 +257,106 @@ describe('what it refuses', () => {
   });
 });
 
-describe('keys and recovery', () => {
-  it('writes a recovery key that comes back as the same key, despite typos in case and spacing', () => {
-    const text = encodeRecoveryKey(key);
+describe('project keys and files', () => {
+  it('writes a project key as text that comes back as the same key, despite case and spacing', () => {
+    const text = encodeProjectKey(key);
     expect(text).toMatch(/^([0-9A-Z]{4}-){13}[0-9A-Z]{4}$/);
-    expect(decodeRecoveryKey(text.toLowerCase().replaceAll('-', ' ')).equals(key)).toBe(true);
-    expect(() => decodeRecoveryKey(text.replace(/.$/, text.endsWith('0') ? '1' : '0'))).toThrow(/typo/);
-    expect(() => decodeRecoveryKey('abc')).toThrow(/recovery key/);
+    expect(decodeProjectKey(text.toLowerCase().replaceAll('-', ' ')).equals(key)).toBe(true);
+    expect(() => decodeProjectKey(text.replace(/.$/, text.endsWith('0') ? '1' : '0'))).toThrow(/typo/);
+    expect(() => decodeProjectKey('abc')).toThrow(/project key/);
   });
 
-  it('records the vault in the folder without the key', () => {
-    const info = readVaultInfo(folder);
-    expect(info).toMatchObject({ format: 1 });
-    expect(JSON.stringify(info)).not.toContain(key.toString('hex'));
+  it('names the project by a hash of its key and seals the suggested name', () => {
+    const info = readProject(folder);
+    expect(info.project).toBe(projectId(key));
+    expect(info.project).toMatch(/^[0-9a-f]{32}$/);
+    const raw = fs.readFileSync(path.join(folder, 'skinnyai-sync', 'project.json'), 'utf8');
+    expect(raw).not.toContain(key.toString('hex'));
+    expect(raw).not.toContain('Shared stuff');
+    expect(suggestedName(folder, key)).toBe('Shared stuff');
+    expect(suggestedName(folder, generateProjectKey())).toBeNull();
     expect(nameFromFile('/x/Trip%2F1.skinny')).toBe('Trip/1');
+  });
+});
+
+describe('projects', () => {
+  const other = () => {
+    const otherKey = generateProjectKey();
+    const otherFolder = path.join(tmp, 'cloud2');
+    initProject(otherFolder, otherKey, 'Work');
+    return { key: otherKey, project: { id: projectId(otherKey), folder: otherFolder, name: 'Work' } };
+  };
+
+  it('keeps each project\'s chats in its own folder, under its own key', () => {
+    const work = other();
+    save(a, 'Home chat', [m('user', 'at home')]);
+    const workFile = fileOf(a, 'Work chat');
+    writeChat(workFile, { from: 'm', system: '', parameters: {}, settings: {}, name: 'Work chat', project: work.project.id, messages: [m('user', 'at work')] }, { device: laptop });
+    const report = syncProjects({ config: { default: project.id, projects: [project, work.project] }, sessionsDir: a.dir, keyFor: (id) => (id === project.id ? key : work.key) });
+    expect(report.pushed).toBe(2);
+    const inHome = fs.readdirSync(path.join(folder, 'skinnyai-sync', 'chats'));
+    const inWork = fs.readdirSync(path.join(work.project.folder, 'skinnyai-sync', 'chats'));
+    expect(inHome).toEqual([chatIdOf(fileOf(a, 'Home chat'))]);
+    expect(inWork).toEqual([chatIdOf(workFile)]);
+    // a device with only the home key gets only the home chat, and says why
+    const partial = syncProjects({ config: { default: project.id, projects: [project, work.project] }, sessionsDir: b.dir, keyFor: (id) => (id === project.id ? key : null) });
+    expect(listChats(b)).toEqual(['Home chat.skinny']);
+    expect(partial.errors.join('\n')).toMatch(/no key for it/);
+  });
+
+  it('refuses a chat that was moved by hand into a project with another key', () => {
+    const work = other();
+    save(a, 'Wandered', [m('user', 'oops')]);
+    sync(a);
+    const id = chatIdOf(fileOf(a, 'Wandered'));
+    fs.cpSync(path.join(folder, 'skinnyai-sync', 'chats', id), path.join(work.project.folder, 'skinnyai-sync', 'chats', id), { recursive: true });
+    const report = syncProject({ project: work.project, key: work.key, sessionsDir: b.dir });
+    expect(report.errors.join('\n')).toMatch(/couldn't decrypt/);
+    expect(listChats(b)).toEqual([]);
+  });
+
+  it('skips a remote chat whose id is already in another project on this device', () => {
+    const work = other();
+    save(a, 'Same id', [m('user', 'here')]);
+    sync(a);
+    const id = chatIdOf(fileOf(a, 'Same id'));
+    setProject(fileOf(a, 'Same id'), work.project.id);
+    const report = sync(a);
+    expect(report.errors.join('\n')).toMatch(/in another project on this device/);
+    expect(chatProjectOf(fileOf(a, 'Same id'))).toBe(work.project.id);
+    expect(id).toBeTruthy();
+  });
+
+  it('puts chats that have no project into one when asked', () => {
+    writeChat(fileOf(a, 'Loose'), { from: 'm', system: '', parameters: {}, settings: {}, name: 'Loose', messages: [m('user', 'x')] }, { device: laptop });
+    expect(chatProjectOf(fileOf(a, 'Loose'))).toBeNull();
+    expect(adoptUnassigned(a.dir, project.id)).toBe(1);
+    expect(chatProjectOf(fileOf(a, 'Loose'))).toBe(project.id);
+    expect(adoptUnassigned(a.dir, 'someone-else')).toBe(0);
+  });
+
+  it('copies a chat into another project as a new chat, and a move leaves only a deletion marker', () => {
+    const work = other();
+    const msgs = [m('user', 'q', { images: [png] }), m('assistant', 'a')];
+    save(a, 'Travelling', msgs);
+    sync(a);
+    const oldId = chatIdOf(fileOf(a, 'Travelling'));
+
+    const copy = copyChat({ file: fileOf(a, 'Travelling'), sessionsDir: a.dir, project: work.project.id });
+    expect(copy.name).toBe('Travelling (2)');
+    expect(chatIdOf(copy.file)).not.toBe(oldId);
+    expect(chatProjectOf(copy.file)).toBe(work.project.id);
+    expect(readChat(copy.file).messages.map((x) => x.content)).toEqual(['q', 'a']);
+    expect(readChat(copy.file).messages[0].images).toEqual([png]);
+    expect(pushChat({ folder: work.project.folder, key: work.key, file: copy.file })).toBe(1);
+    expect(syncProject({ project: work.project, key: work.key, sessionsDir: b.dir }).newChats).toEqual(['Travelling (2)']);
+
+    // a move: the original goes, with a marker that says nothing about where
+    deleteSyncedChat({ folder, key, chatId: oldId });
+    const marker = path.join(folder, 'skinnyai-sync', 'chats', oldId);
+    expect(fs.readdirSync(marker)).toEqual(['deleted']);
+    expect(fs.readFileSync(path.join(marker, 'deleted')).includes('Work')).toBe(false);
+    const gone = sync(b);
+    expect(gone.deleted).toEqual([]); // b never had the home chat: nothing to delete there
   });
 });

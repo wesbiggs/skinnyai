@@ -10,7 +10,7 @@ The command set mirrors the native `ollama run` terminal, plus a few extras.
 | `/load <name>` | Restore a saved session, or switch to a different model (restoring its saved session/system message if any) |
 | `/save [name]` | Save the session to a local file ([sessions](sessions.md)) |
 | `/share [name]` | Save the session as a model on a self-hosted Ollama server |
-| `/sync [setup\|status\|key\|off]` | Keep chats in step across devices through a folder ([sync](sync.md)) |
+| `/sync`, `/project` | Keep chats in step across devices through a folder, in projects ([sync](sync.md)): global commands for all projects, and `/project move\|copy` for the open chat |
 | `/export [path]` | Write the conversation to a `.md` transcript or a `.Modelfile` |
 | `/new [name]` | Start a new conversation (the system message stays), optionally named; the old one stays saved |
 | `/delete [name]` | Delete a saved chat file (the current one by default), after asking |

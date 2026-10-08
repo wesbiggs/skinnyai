@@ -2,8 +2,8 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, ran
 import { deflateSync, inflateSync } from 'node:zlib';
 
 // The encrypted objects a synced chat is made of (see sync.js). Everything is
-// AES-256-GCM under keys derived from the vault key and the chat's id, so a
-// chat's files mean nothing without the vault key, and a file moved to
+// AES-256-GCM under keys derived from the project key and the chat's id, so a
+// chat's files mean nothing without the project key, and a file moved to
 // another chat or renamed fails to open (its name and chat id are part of
 // what GCM authenticates).
 //
@@ -15,15 +15,16 @@ import { deflateSync, inflateSync } from 'node:zlib';
 // file a blob is.
 
 const COMMIT_MAGIC = Buffer.from('SKC1');
+const NAME_MAGIC = Buffer.from('SKN1');
 const BLOB_MAGIC = Buffer.from('SKB1');
 const NONCE = 12;
 const TAG = 16;
 
 const derive = (secret, info, salt = '') => Buffer.from(hkdfSync('sha256', secret, Buffer.from(salt), Buffer.from(info), 32));
 
-// The keys one chat uses, from the vault key.
-export function chatKeys(vaultKey, chatId) {
-  const chat = derive(vaultKey, 'skinnyai chat key v1', chatId);
+// The keys one chat uses, from its project's key.
+export function chatKeys(projectKey, chatId) {
+  const chat = derive(projectKey, 'skinnyai chat key v1', chatId);
   return { commit: derive(chat, 'commits'), blob: derive(chat, 'blobs'), name: derive(chat, 'blob names') };
 }
 
@@ -69,4 +70,13 @@ export function openBlob(keys, chatId, name, data) {
   const bytes = open(BLOB_MAGIC, keys.blob, data, blobAad(chatId, name));
   if (blobName(keys, createHash('sha256').update(bytes).digest('hex')) !== name) throw new Error('blob does not match its name');
   return bytes;
+}
+
+// A project's name, sealed in the folder as a suggestion for whoever joins.
+export function sealProjectName(projectKey, id, name) {
+  return seal(NAME_MAGIC, derive(projectKey, 'project name'), Buffer.from(name), `skinny-project-name\0${id}`);
+}
+
+export function openProjectName(projectKey, id, data) {
+  return open(NAME_MAGIC, derive(projectKey, 'project name'), data, `skinny-project-name\0${id}`).toString('utf8');
 }

@@ -1,4 +1,5 @@
 import readline from 'readline';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -15,14 +16,25 @@ import { createMarkdownRenderer } from './markdown.js';
 import { adaptHistory, describeAdaptation, newCallId, parseArguments, purgeHistory, wireShape } from './history.js';
 import { loadMcpConfig, runTool, startMcpServers, toolDefinitions } from './mcp.js';
 import { pickDefaultModel } from './models.js';
-import { chatIdOf, newMessageId } from './chatdb.js';
+import { chatIdOf, chatProjectOf, newMessageId } from './chatdb.js';
 import { SESSION_DIR, autosaveName, chatFileExists, deleteLocalSession, formatModelfile, isAutosaveName, legacySessionPath, listLocalSessions, localSessionExists, readLocalSession, redactLocalSession, resumeHint, saveLocalSession, sessionPath, sessionStamp } from './sessions.js';
 import { formatMarkdown } from './export.js';
-import { deleteSyncedChat, describeSync, initVault, keyMatches, pushChat, readVaultInfo, syncChats } from './sync.js';
-import { clearSyncFolder, setSyncFolder, syncFolder } from './syncconfig.js';
-import { decodeRecoveryKey, encodeRecoveryKey, generateVaultKey, loadVaultKey, saveVaultKey } from './vault.js';
+import { adoptUnassigned, copyChat, deleteSyncedChat, describeSync, initProject, keyOpensProject, pushChat, readProject, suggestedName, syncProjects } from './sync.js';
+import { addProject, defaultProject, findProject, loadSyncConfig, removeProject, renameProject, saveSyncConfig, setDefaultProject } from './syncconfig.js';
+import { decodeProjectKey, encodeProjectKey, generateProjectKey, loadProjectKey, projectId, saveProjectKey } from './keys.js';
 import { ANSI, CHROME_COLOR, PROMPT, createWordWrapper, drawBox, graphemeWidth, graphemes, styleLine, styledPrompt, supportsColor, visibleWidth } from './style.js';
 import { MAX_TOOL_ROUNDS, TOOLS, formatToday } from './tools.js';
+
+// A folder argument as an absolute path (quotes and ~ handled).
+const resolveFolder = (text) => path.resolve(text.replace(/^~(?=\/|$)/, os.homedir()));
+const unquote = (text) => text.trim().replace(/^(['"])(.*)\1$/, '$2');
+
+// For /show settings: how sync is set up.
+function syncSummary() {
+  const config = loadSyncConfig();
+  if (!config.projects.length) return 'off';
+  return `${config.projects.length} project${config.projects.length === 1 ? '' : 's'} (default: ${defaultProject(config)?.name ?? 'none'})`;
+}
 
 export class OllamaChat {
   constructor(model, options = {}) {
@@ -692,7 +704,7 @@ export class OllamaChat {
   // Adds what the session file lacks (everything, for a new file), or with
   // `replace` discards the file and writes this conversation in its place.
   async writeSessionFile(name, { replace = false } = {}) {
-    const snapshot = { ...this.sessionSnapshot(), name };
+    const snapshot = { ...this.sessionSnapshot(), name, project: defaultProject(loadSyncConfig())?.id ?? null };
     const continuing = !replace && name === this.sessionName && existsSync(sessionPath(name));
     const legacy = legacySessionPath(name);
     const converting = !existsSync(sessionPath(name)) && existsSync(legacy);
@@ -1075,7 +1087,8 @@ export class OllamaChat {
     console.log('  /share [name]   Save your current session as a model on the Ollama server');
     console.log('  /new [name]     Start a new conversation, optionally named (the old one stays saved)');
     console.log('  /delete [name]  Delete a saved session (this one by default)');
-    console.log('  /sync [setup|status|key|off]  Keep chats in step across devices through a folder');
+    console.log('  /sync [setup <folder>|status|off]  Keep chats in step across devices (all projects)');
+    console.log('  /project [new|add|default|key|rename|forget|move|copy]  Projects: groups of chats that share a folder and a key');
     console.log('  /export [path]  Write the conversation to a .md transcript or a .Modelfile');
     console.log('  /purge <kind>   Shrink the saved chat: thinking, tools (as text), or blobs (images and PDFs)');
     console.log('  /model          Show current model, keep-alive, and host');
@@ -1164,7 +1177,7 @@ export class OllamaChat {
       ['host', this.host],
       ...(this.managesModelLifetime ? [['keep-alive', this.keepAlive], ['stop on exit', onOff(this.stopOnExit)]] : []),
       ...(EXTRA_CA_FILE ? [['extra CA certs', EXTRA_CA_FILE]] : []),
-      ['sync folder', syncFolder() ?? 'off'],
+      ['sync', syncSummary()],
       ['defaults file', CONFIG ? CONFIG_FILE : `none (${CONFIG_FILE})`]
     ];
     const print = (title, rows) => {
@@ -1269,18 +1282,20 @@ export class OllamaChat {
       return;
     }
     let chatId;
+    let projectId_;
     try {
       chatId = chatIdOf(sessionPath(target));
+      projectId_ = chatProjectOf(sessionPath(target));
       await deleteLocalSession(target);
     } catch (error) {
       console.error(`\n❌ Error deleting session: ${error.message}\n`);
       return;
     }
     console.log(`\n🗑️  Deleted session '${target}'.`);
-    const sync = this.syncTarget({ quiet: true });
-    if (sync && chatId) {
+    const home = projectId_ ? this.projectFor(projectId_) : null;
+    if (home && chatId) {
       try {
-        if (deleteSyncedChat({ ...sync, chatId })) console.log('   Removed it from the sync folder too; your other devices delete it at their next sync.');
+        if (deleteSyncedChat({ folder: home.project.folder, key: home.key, chatId })) console.log("   Removed it from the project's sync folder too; your other devices delete it at their next sync.");
       } catch (error) {
         console.log(`⚠️  Couldn't remove it from the sync folder: ${error.message}`);
       }
@@ -1292,100 +1307,91 @@ export class OllamaChat {
     console.log('');
   }
 
-  // --- Sync (see sync.js) ---
+  // --- Sync and projects (see sync.js) ---
 
-  // The folder and key to sync with, or null (saying why, unless `quiet`).
-  syncTarget({ quiet = false } = {}) {
-    const folder = syncFolder();
-    if (!folder) {
-      if (!quiet) console.log('\nSync is off. /sync setup <folder> turns it on: a folder your cloud drive (iCloud Drive, Dropbox, ...) already syncs.\n');
-      return null;
-    }
-    const key = loadVaultKey();
-    if (!key) {
-      if (!quiet) console.log(`\n⚠️  Sync is set to ${folder}, but this device has no key for it. /sync setup ${folder} asks for the recovery key.\n`);
-      return null;
-    }
-    return { folder, key };
+  // A project from the sync config with its key, or null (no such project
+  // here, or no key for it on this device).
+  projectFor(id) {
+    const project = loadSyncConfig().projects.find((p) => p.id === id);
+    const key = project ? loadProjectKey(id) : null;
+    return project && key ? { project, key } : null;
+  }
+
+  // The project the open chat is in, as { project, key }, or null.
+  currentProject() {
+    if (!this.sessionName || !existsSync(sessionPath(this.sessionName))) return null;
+    const id = chatProjectOf(sessionPath(this.sessionName));
+    return id ? this.projectFor(id) : null;
+  }
+
+  printSyncResult(report, { quiet = false } = {}) {
+    const line = describeSync(report);
+    const dim = (text) => (quiet ? `${CHROME_COLOR}${text}${ANSI.reset}` : text);
+    if (line) console.log(dim(`🔄 ${line}`));
+    else if (!quiet) console.log('🔄 Already in sync.');
+    for (const split of report.splits) console.log(dim(`   '${split.chat}' continued on two devices; the other line is now '${split.copy}'.`));
+    for (const error of report.errors) console.log(dim(`⚠️  Sync: ${error}`));
   }
 
   // At startup, before any chat is resumed: a quiet sync that says only what changed.
   syncAtStartup() {
-    const target = this.syncTarget({ quiet: true });
-    if (!target) return;
+    const config = loadSyncConfig();
+    if (!config.projects.length) return;
     try {
-      const report = syncChats({ ...target, sessionsDir: SESSION_DIR });
-      const line = describeSync(report);
-      if (line) console.log(`${CHROME_COLOR}🔄 ${line}${ANSI.reset}`);
-      for (const split of report.splits) console.log(`${CHROME_COLOR}   '${split.chat}' continued on two devices; the other line is now '${split.copy}'.${ANSI.reset}`);
-      for (const error of report.errors) console.log(`${CHROME_COLOR}⚠️  Sync: ${error}${ANSI.reset}`);
+      this.printSyncResult(syncProjects({ config, sessionsDir: SESSION_DIR, keyFor: loadProjectKey }), { quiet: true });
     } catch (error) {
       console.log(`${CHROME_COLOR}⚠️  Sync failed: ${error.message}${ANSI.reset}`);
     }
   }
 
-  // After a save: send the chat's new commits, quietly.
+  // After a save: send the chat's new commits to its project, quietly.
   pushToSync() {
-    const target = this.syncTarget({ quiet: true });
-    if (!target || !this.sessionName || !existsSync(sessionPath(this.sessionName))) return;
+    const home = this.currentProject();
+    if (!home) return;
     try {
-      pushChat({ ...target, file: sessionPath(this.sessionName) });
+      pushChat({ folder: home.project.folder, key: home.key, file: sessionPath(this.sessionName) });
     } catch (error) {
       console.log(`${CHROME_COLOR}⚠️  Sync failed: ${error.message}${ANSI.reset}`);
     }
   }
 
+  // /sync: syncs every project. (Global.)
   async sync(arg) {
-    const [sub, ...rest] = arg.split(/\s+/).filter(Boolean);
+    const [sub] = arg.split(/\s+/).filter(Boolean);
     switch ((sub ?? '').toLowerCase()) {
       case '':
         return this.runSync();
       case 'setup':
-        return this.syncSetup(arg.replace(/^\S+\s*/, '').replace(/^(['"])(.*)\1$/, '$2'));
-      case 'status': {
-        const folder = syncFolder();
-        console.log(`\nSync folder: ${folder ?? 'off'}`);
-        if (folder) {
-          console.log(`This device's key: ${loadVaultKey() ? (keyMatches(folder, loadVaultKey()) ? 'matches the folder' : 'does not match the folder') : 'missing'}`);
-          console.log(`Vault: ${readVaultInfo(folder)?.vault ?? 'not set up in that folder'}`);
-        }
-        console.log('');
-        return undefined;
-      }
-      case 'key': {
-        const key = loadVaultKey();
-        if (!key) {
-          console.log('\nThis device has no sync key yet. /sync setup <folder> makes one.\n');
-          return undefined;
-        }
-        console.log(`\nRecovery key (anyone with this can read your synced chats):\n\n  ${encodeRecoveryKey(key)}\n`);
-        return undefined;
-      }
+        return this.syncSetup(unquote(arg.replace(/^\S+\s*/, '')));
+      case 'status':
+        return this.printProjects();
       case 'off':
-        clearSyncFolder();
-        console.log('\nSync is off on this device. Its chats and key are untouched; the folder keeps what was synced.\n');
+        saveSyncConfig({ default: null, projects: [] });
+        console.log("\nSync is off on this device. Chats and keys are untouched, and the folders keep what was synced. /sync setup or /project add turns it back on.\n");
         return undefined;
       default:
-        console.log(`\nUnknown /sync option '${sub}${rest.length ? ' …' : ''}'. Use /sync, /sync setup <folder>, /sync status, /sync key, or /sync off.\n`);
+        console.log(`\nUnknown /sync option '${sub}'. Use /sync, /sync setup <folder>, /sync status, or /sync off.\n`);
         return undefined;
     }
   }
 
-  // /sync: save the open chat, sync every chat, and bring the open one up to date.
+  // Saves the open chat, syncs every project, and brings the open chat up
+  // to date with what arrived.
   async runSync() {
-    const target = this.syncTarget();
-    if (!target) return;
+    const config = loadSyncConfig();
+    if (!config.projects.length) {
+      console.log('\nSync is off. /sync setup <folder> turns it on: a folder your cloud drive (iCloud Drive, Dropbox, ...) already syncs.\n');
+      return;
+    }
     try {
       if (this.autosave && this.sessionName) await this.autosaveSession({ push: false });
       const before = this.sessionName && existsSync(sessionPath(this.sessionName)) ? await sessionStamp(this.sessionName) : null;
-      const report = syncChats({ ...target, sessionsDir: SESSION_DIR });
-      const line = describeSync(report);
-      console.log(`\n${line ? `🔄 ${line}` : '🔄 Already in sync.'}`);
-      for (const split of report.splits) console.log(`   '${split.chat}' continued on two devices; the other line is now '${split.copy}'.`);
-      for (const error of report.errors) console.log(`⚠️  ${error}`);
+      console.log('');
+      const report = syncProjects({ config, sessionsDir: SESSION_DIR, keyFor: loadProjectKey });
+      this.printSyncResult(report);
       const after = this.sessionName && existsSync(sessionPath(this.sessionName)) ? await sessionStamp(this.sessionName) : null;
       if (before && !after) {
-        console.log(`   '${this.sessionName}' was deleted on another device. This conversation is kept here, unsaved.`);
+        console.log(`   '${this.sessionName}' was deleted or moved on another device. This conversation is kept here, unsaved.`);
         this.sessionName = null;
       } else if (before && after && before !== after) await this.refreshFromSync(report);
       console.log('');
@@ -1410,49 +1416,242 @@ export class OllamaChat {
     }
   }
 
-  // /sync setup <folder>: the first device makes a key and writes it down
-  // for you; later devices ask for it.
+  // /sync setup <folder>: turns sync on with a default project in that folder.
   async syncSetup(arg) {
     if (!arg) {
       console.log('\nUsage: /sync setup <folder>   (a folder inside iCloud Drive, Dropbox, or similar, on every device)\n');
       return;
     }
-    const folder = path.resolve(arg.replace(/^~(?=\/|$)/, os.homedir()));
+    const config = loadSyncConfig();
+    if (config.default) {
+      console.log(`\nSync is already set up: the default project is '${defaultProject(config).name}'. /project add <folder> or /project new <name> <folder> adds more.\n`);
+      return;
+    }
+    const folder = resolveFolder(arg);
+    if (readProject(folder)) await this.joinProject(folder);
+    else await this.createProject('Default', folder);
+  }
+
+  // Makes a project: a folder, and a new key that is kept here and shown once.
+  async createProject(name, folder) {
+    const config = loadSyncConfig();
+    if (findProject(config, name)) {
+      console.log(`\nYou already have a project called '${name}'.\n`);
+      return;
+    }
+    if (readProject(folder)) {
+      console.log(`\n${folder} is already a project. /project add ${folder} joins it.\n`);
+      return;
+    }
     try {
       await fs.mkdir(folder, { recursive: true });
-      let key = loadVaultKey();
-      let created = false;
-      if (readVaultInfo(folder)) {
-        if (!key || !keyMatches(folder, key)) {
-          console.log(`\n${folder} already holds synced chats. Enter the recovery key from your other device (/sync key shows it there):`);
-          try {
-            key = decodeRecoveryKey((await this.readTurnInput()) || '');
-          } catch (error) {
-            console.log(`\n❌ ${error.message}\n`);
-            return;
-          }
-          if (!keyMatches(folder, key)) {
-            console.log("\n❌ That key doesn't open the chats in that folder.\n");
-            return;
-          }
-          console.log(`\nKey kept in ${saveVaultKey(key)}.`);
-        }
-      } else {
-        if (!key) {
-          key = generateVaultKey();
-          created = true;
-          console.log(`\nMade a key for your chats, kept in ${saveVaultKey(key)}.`);
-        }
-        initVault(folder, key);
+      const key = generateProjectKey();
+      const where = saveProjectKey(key);
+      initProject(folder, key, name);
+      const first = !config.default;
+      addProject({ id: projectId(key), folder, name });
+      console.log(`\n✅ Project '${name}' syncs through ${folder}. Its key is kept in ${where}.`);
+      if (first) {
+        const adopted = adoptUnassigned(SESSION_DIR, projectId(key));
+        console.log(`   It's the default project: new chats go in it${adopted ? `, and so did your ${adopted} existing chat${adopted === 1 ? '' : 's'}` : ''}.`);
       }
-      setSyncFolder(folder);
-      console.log(`✅ Syncing through ${folder}.`);
-      if (created) {
-        console.log(`\nWrite down this recovery key and keep it somewhere safe. You need it to add another device, and without it (or this device) synced chats can't be read:\n\n  ${encodeRecoveryKey(key)}\n`);
+      console.log(`\nKeep a copy of this project key somewhere safe, such as your password manager. You need it to add another device, and without it (or a device that has it) the project's chats can't be read:\n\n  ${encodeProjectKey(key)}\n`);
+      await this.runSync();
+    } catch (error) {
+      console.log(`\n❌ Couldn't make the project: ${error.message}\n`);
+    }
+  }
+
+  // Joins the project in a folder, asking for its key if this device doesn't have it.
+  async joinProject(folder, alias) {
+    const info = readProject(folder);
+    if (!info) {
+      console.log(`\n${folder} isn't a project folder (no ${path.join('skinnyai-sync', 'project.json')}). If another device just set it up, wait for the folder to finish syncing.\n`);
+      return;
+    }
+    const config = loadSyncConfig();
+    const existing = config.projects.find((p) => p.id === info.project);
+    if (existing) {
+      console.log(`\nThat folder is already your project '${existing.name}'.\n`);
+      return;
+    }
+    try {
+      let key = loadProjectKey(info.project);
+      if (!key) {
+        console.log(`\nThis project's key isn't on this device. Enter the project key (/project key on a device that has it shows it):`);
+        try {
+          key = decodeProjectKey((await this.readTurnInput()) || '');
+        } catch (error) {
+          console.log(`\n❌ ${error.message}\n`);
+          return;
+        }
+        if (!keyOpensProject(folder, key)) {
+          console.log("\n❌ That key doesn't open the project in that folder.\n");
+          return;
+        }
+        console.log(`\nKey kept in ${saveProjectKey(key)}.`);
+      }
+      const suggested = suggestedName(folder, key);
+      let name = alias || suggested || path.basename(folder);
+      for (let n = 2; findProject(config, name); n++) name = `${alias || suggested || path.basename(folder)} (${n})`;
+      addProject({ id: info.project, folder, name });
+      console.log(`✅ Joined project '${name}'${suggested && suggested !== name ? ` (its creator calls it '${suggested}')` : ''}.`);
+      if (!config.default) {
+        const adopted = adoptUnassigned(SESSION_DIR, info.project);
+        console.log(`   It's the default project: new chats go in it${adopted ? `, and so did your ${adopted} existing chat${adopted === 1 ? '' : 's'}` : ''}.`);
       }
       await this.runSync();
     } catch (error) {
-      console.log(`\n❌ Couldn't set up sync: ${error.message}\n`);
+      console.log(`\n❌ Couldn't join the project: ${error.message}\n`);
+    }
+  }
+
+  printProjects() {
+    const config = loadSyncConfig();
+    if (!config.projects.length) {
+      console.log('\nNo projects yet. /sync setup <folder> makes the default one; /project new <name> <folder> makes another.\n');
+      return;
+    }
+    const current = this.sessionName && existsSync(sessionPath(this.sessionName)) ? chatProjectOf(sessionPath(this.sessionName)) : null;
+    console.log('\nProjects:');
+    for (const project of config.projects) {
+      const marks = [project.id === config.default ? 'default' : '', project.id === current ? 'this chat' : '', loadProjectKey(project.id) ? '' : 'no key on this device', existsSync(project.folder) ? '' : 'folder not found'].filter(Boolean);
+      console.log(`  ${project.name}${marks.length ? ` (${marks.join(', ')})` : ''}\n    ${project.folder}`);
+    }
+    console.log('');
+  }
+
+  // /project: global operations (list, new, add, default, key, rename,
+  // forget) and operations on the open chat (move, copy).
+  async project(arg) {
+    const [sub, ...rest] = arg.split(/\s+/).filter(Boolean);
+    const config = loadSyncConfig();
+    const named = (text) => {
+      const found = findProject(config, text);
+      if (!found) console.log(`\nNo project called '${text}'. /project lists them.\n`);
+      return found;
+    };
+    switch ((sub ?? '').toLowerCase()) {
+      case '':
+        return this.printProjects();
+      case 'new': {
+        const match = /^new\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s+(.+)$/.exec(arg);
+        if (!match) {
+          console.log('\nUsage: /project new <name> <folder>\n');
+          return undefined;
+        }
+        return this.createProject(match[1] ?? match[2] ?? match[3], resolveFolder(unquote(match[4])));
+      }
+      case 'add':
+        if (!rest.length) {
+          console.log('\nUsage: /project add <folder> [name]   (name: what you want to call it here)\n');
+          return undefined;
+        }
+        return this.joinFolderArg(arg.replace(/^\S+\s*/, ''));
+      case 'default': {
+        const found = named(rest.join(' '));
+        if (found) {
+          setDefaultProject(found.id);
+          console.log(`\n'${found.name}' is now the default project: new chats go in it.\n`);
+        }
+        return undefined;
+      }
+      case 'key': {
+        const found = rest.length ? named(rest.join(' ')) : defaultProject(config);
+        if (!found) {
+          if (!rest.length) console.log('\nNo default project yet. /sync setup <folder> makes one.\n');
+          return undefined;
+        }
+        const key = loadProjectKey(found.id);
+        console.log(key
+          ? `\nProject key for '${found.name}'. Anyone who has this and can open the folder can read and change every chat in the project; give it to people only by some route other than the folder:\n\n  ${encodeProjectKey(key)}\n`
+          : `\nThis device has no key for '${found.name}'.\n`);
+        return undefined;
+      }
+      case 'rename': {
+        const match = /^rename\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s+(.+)$/.exec(arg);
+        const found = match && findProject(config, match[1] ?? match[2] ?? match[3]);
+        if (!found) {
+          console.log('\nUsage: /project rename <project> <new name>   (a local label; the folder keeps its own suggestion)\n');
+          return undefined;
+        }
+        if (findProject(config, unquote(match[4]))) {
+          console.log(`\nYou already have a project called '${unquote(match[4])}'.\n`);
+          return undefined;
+        }
+        renameProject(found.id, unquote(match[4]));
+        console.log(`\nRenamed '${found.name}' to '${unquote(match[4])}'.\n`);
+        return undefined;
+      }
+      case 'forget': {
+        const found = named(rest.join(' '));
+        if (found) {
+          removeProject(found.id);
+          console.log(`\nStopped syncing '${found.name}' on this device. Its chats stay here, unsynced, and the folder and key are untouched.\n`);
+        }
+        return undefined;
+      }
+      case 'move':
+      case 'copy': {
+        const found = named(rest.join(' '));
+        return found ? this.moveOrCopyChat(found, sub.toLowerCase() === 'move') : undefined;
+      }
+      default:
+        console.log(`\nUnknown /project option '${sub}'. Global: /project, new, add, default, key, rename, forget. This chat: move, copy.\n`);
+        return undefined;
+    }
+  }
+
+  // "/project add <folder> [name]": the folder may contain spaces, so a
+  // trailing quoted name is the only way to give one.
+  async joinFolderArg(text) {
+    const quoted = /^(.*\S)\s+(?:"([^"]+)"|'([^']+)')$/.exec(text);
+    const folder = resolveFolder(unquote(quoted ? quoted[1] : text));
+    return this.joinProject(folder, quoted ? (quoted[2] ?? quoted[3]) : undefined);
+  }
+
+  // /project move|copy <project>: puts this chat in another project as a
+  // chat of its own (new id, sealed under that project's key). A move
+  // removes it from the old project, leaving only a deletion marker there.
+  async moveOrCopyChat(target, move) {
+    const targetKey = loadProjectKey(target.id);
+    if (!targetKey) {
+      console.log(`\nThis device has no key for '${target.name}'.\n`);
+      return;
+    }
+    try {
+      if (this.conversation().length === 0) {
+        console.log('\nThis chat has no messages yet.\n');
+        return;
+      }
+      const name = this.sessionName ?? await autosaveName();
+      if (!await this.writeSession(name)) return; // a conflict was skipped
+      const file = sessionPath(name);
+      const fromId = chatProjectOf(file);
+      if (fromId === target.id) {
+        console.log(`\nThis chat is already in '${target.name}'.\n`);
+        return;
+      }
+      const previous = fromId ? this.projectFor(fromId) : null;
+      const oldChatId = chatIdOf(file);
+      if (!move) {
+        const copy = copyChat({ file, sessionsDir: SESSION_DIR, project: target.id });
+        pushChat({ folder: target.folder, key: targetKey, file: copy.file });
+        console.log(`\n✅ Copied to '${target.name}' as '${copy.name}'. This chat is unchanged.\n`);
+        return;
+      }
+      // Build the copy beside the original, then swap, so nothing is lost if this stops half way.
+      const copy = copyChat({ file, sessionsDir: SESSION_DIR, project: target.id, name, to: path.join(SESSION_DIR, `${randomUUID()}.incoming`) });
+      pushChat({ folder: target.folder, key: targetKey, file: copy.file });
+      await deleteLocalSession(name);
+      await fs.rename(copy.file, file);
+      if (previous) deleteSyncedChat({ folder: previous.project.folder, key: previous.key, chatId: oldChatId });
+      this.sessionName = name;
+      this.sessionStamp = await sessionStamp(name);
+      this.savedHead = this.conversation().at(-1)?.id ?? null;
+      console.log(`\n✅ Moved to '${target.name}'.${previous ? ` Other devices in '${previous.project.name}' remove it at their next sync.` : ''}\n`);
+    } catch (error) {
+      console.log(`\n❌ Couldn't ${move ? 'move' : 'copy'} the chat: ${error.message}\n`);
     }
   }
 
@@ -2073,6 +2272,9 @@ export class OllamaChat {
         return true;
       case '/sync':
         await this.sync(trimmed.slice(rawCmd.length).trim());
+        return true;
+      case '/project':
+        await this.project(trimmed.slice(rawCmd.length).trim());
         return true;
       case '/export':
         await this.exportChat(trimmed.slice(rawCmd.length).trim());
