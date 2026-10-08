@@ -274,6 +274,11 @@ describe('project keys and files', () => {
     expect(raw).not.toContain(key.toString('hex'));
     expect(raw).not.toContain('Shared stuff');
     expect(suggestedName(folder, key)).toBe('Shared stuff');
+    expect(Object.keys(info)).toEqual(['format', 'project', 'created_at', 'sealed_name']);
+    // projects made by the first builds called the field `name`
+    const file = path.join(folder, 'skinnyai-sync', 'project.json');
+    fs.writeFileSync(file, JSON.stringify({ format: 2, project: info.project, created_at: info.created_at, name: info.sealed_name }));
+    expect(suggestedName(folder, key)).toBe('Shared stuff');
     expect(suggestedName(folder, generateProjectKey())).toBeNull();
     expect(nameFromFile('/x/Trip%2F1.skinny')).toBe('Trip/1');
   });

@@ -12,7 +12,7 @@ import { blobName, chatKeys, openBlob, openCommit, openProjectName, sealBlob, se
 // written once under a name of its own, so devices never write to the same
 // file:
 //
-//   skinnyai-sync/project.json                      project id (a hash of the key), name sealed
+//   skinnyai-sync/project.json                      project id (a hash of the key), sealed_name (encrypted)
 //   skinnyai-sync/chats/<chat id>/commits/<id>.c    one sealed commit
 //   skinnyai-sync/chats/<chat id>/blobs/<name>.b    one sealed attachment
 //   skinnyai-sync/chats/<chat id>/deleted           sealed marker: the chat was deleted
@@ -44,8 +44,9 @@ function writeOnce(file, data) {
 const names = (dir, suffix) => (existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(suffix)).map((f) => f.slice(0, -suffix.length)) : []);
 const subdirs = (dir) => (existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name) : []);
 
-// What the folder says about its project: { project: id, created_at, name }
-// (name is sealed; see suggestedName), or null if it isn't one.
+// What the folder says about its project: { project: id, created_at,
+// sealed_name } (the name is encrypted; see suggestedName), or null if it
+// isn't one.
 export function readProject(folder) {
   try {
     const info = JSON.parse(readFileSync(projectFile(folder), 'utf8'));
@@ -64,7 +65,7 @@ export function initProject(folder, key, name) {
     if (existing.project !== id) throw new Error(`${folder} already belongs to a different project`);
     return existing;
   }
-  const info = { format: 2, project: id, created_at: new Date().toISOString(), name: sealProjectName(key, id, name).toString('base64') };
+  const info = { format: 2, project: id, created_at: new Date().toISOString(), sealed_name: sealProjectName(key, id, name).toString('base64') };
   mkdirSync(root(folder), { recursive: true });
   writeFileSync(projectFile(folder), `${JSON.stringify(info, null, 2)}\n`);
   return info;
@@ -75,9 +76,10 @@ export const keyOpensProject = (folder, key) => readProject(folder)?.project ===
 // The name its creator gave the project, or null if the key doesn't open it.
 export function suggestedName(folder, key) {
   const info = readProject(folder);
-  if (!info || info.project !== projectId(key) || !info.name) return null;
+  const sealed = info?.sealed_name ?? info?.name; // `name` is what the first builds called it
+  if (!info || info.project !== projectId(key) || !sealed) return null;
   try {
-    return openProjectName(key, info.project, Buffer.from(info.name, 'base64'));
+    return openProjectName(key, info.project, Buffer.from(sealed, 'base64'));
   } catch (error) {
     return null;
   }

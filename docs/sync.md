@@ -71,6 +71,6 @@ Not covered yet: attributing changes to people, removing a member's access to wh
 
 ## For the curious
 
-A project folder holds `skinnyai-sync/project.json` (the project id, when it was made, and the sealed name), and under `chats/<chat id>/` one `commits/<commit id>.c` per save, one `blobs/<name>.b` per attachment, and a `deleted` marker if the chat was deleted. Each file is written once, under its own name, so devices never write to the same file. Commits form a chain by the commits they follow, and a device applies a commit only after the ones before it have arrived; ones that depend on files still syncing wait for the next `/sync`.
+A project folder holds `skinnyai-sync/project.json` (the project id, when it was made, and `sealed_name`, the project's suggested name encrypted under its key, so it looks like random text), and under `chats/<chat id>/` one `commits/<commit id>.c` per save, one `blobs/<name>.b` per attachment, and a `deleted` marker if the chat was deleted. Each file is written once, under its own name, so devices never write to the same file. Commits form a chain by the commits they follow, and a device applies a commit only after the ones before it have arrived; ones that depend on files still syncing wait for the next `/sync`.
 
 Environment: `SKINNY_PROJECT_KEYS` supplies project keys (comma-separated, as text), for machines with no keychain; `SKINNY_KEY_STORE=file|keychain` forces where keys are kept. Which projects this device syncs, and where their folders are, is in `~/.skinny/sync.json`.
