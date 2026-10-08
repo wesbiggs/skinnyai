@@ -11,9 +11,8 @@ The command set mirrors the native `ollama run` terminal, plus a few extras.
 | `/save [name]` | Save the session to a local file ([sessions](sessions.md)) |
 | `/share [name]` | Save the session as a model on a self-hosted Ollama server |
 | `/export [path]` | Write the conversation to a `.md` transcript or a `.Modelfile` |
-| `/clear [name]` | Start a new conversation (the system message stays); with a name, saves the current one under it first |
-| `/new [name]` | Start a new conversation, optionally named |
-| `/delete [name]` | Delete a saved session (the current one by default), after asking |
+| `/new [name]` | Start a new conversation (the system message stays), optionally named; the old one stays saved |
+| `/delete [name]` | Delete a saved chat file (the current one by default), after asking |
 | `/purge <kind>` | Shrink the saved chat: `thinking`, `tools` (kept as text), or `blobs` (images and PDFs) |
 | `/list` | List available models, then saved sessions |
 | `/saveimage [path]` | Save the latest image in the conversation (a `data:` URL in a reply, or an image a tool returned). No path means `~/Pictures/skinnyai/` (or `SKINNY_IMAGE_DIR`) under a date-and-time name; a folder gets that name too |

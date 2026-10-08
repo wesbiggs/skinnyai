@@ -66,7 +66,7 @@ describe('piped input', () => {
   });
 
   it('reads answers to confirmation prompts from the next line', async () => {
-    const { stdout } = await run(['m', ...openai()], 'hi\n/save report\n/clear\nbye\n/save report\nn\n/save report\ny\n');
+    const { stdout } = await run(['m', ...openai()], 'hi\n/save report\n/new\nbye\n/save report\nn\n/save report\ny\n');
     expect(stdout).toContain("A saved session named 'report' already exists. Overwrite it? [y/N] n\nNot saved.");
     expect(stdout).toContain("Overwrite it? [y/N] y\n\n✅ Saved session 'report'");
     expect(readChat(path.join(home, 'sessions', 'report.skinny')).messages.map((m) => m.content)).toContain('bye');

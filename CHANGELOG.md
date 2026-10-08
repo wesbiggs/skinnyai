@@ -4,7 +4,7 @@
 
 ### Added
 - Chats are saved as SQLite files (`<name>.skinny`, via `node:sqlite`) holding the whole conversation: tool calls and results, thinking blocks, attached images and PDFs (stored once each), and which model wrote each reply. `.Modelfile` sessions from earlier versions still load and are written as `.skinny` the next time they're saved.
-- `/new [name]`, `/delete [name]` (asks first), `/export [path]` (`.md` transcript or `.Modelfile`), and `/purge thinking|tools|blobs`. `/clear <name>` saves the chat under that name before starting a new one.
+- `/new [name]`, `/delete [name]` (asks first), `/export [path]` (`.md` transcript or `.Modelfile`), and `/purge thinking|tools|blobs`. `/clear` is replaced by `/new`, which keeps the old chat saved. `/delete` leaves old-format Modelfiles alone; the first save of one asks whether to delete it.
 - `/set model <name>` switches model on the same server, keeping the conversation.
 - Conversations are kept in a provider-neutral form (`src/history.js`) and adapted to each model when a request is sent: tool calls become text when the new model lacks the tools, thinking blocks replay only to the model that wrote them, and PDFs/images a model can't take are noted instead.
 

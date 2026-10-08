@@ -15,7 +15,7 @@ import { createMarkdownRenderer } from './markdown.js';
 import { adaptHistory, describeAdaptation, newCallId, parseArguments, purgeHistory, wireShape } from './history.js';
 import { loadMcpConfig, runTool, startMcpServers, toolDefinitions } from './mcp.js';
 import { pickDefaultModel } from './models.js';
-import { SESSION_DIR, autosaveName, compactLocalSession, deleteLocalSession, formatModelfile, isAutosaveName, listLocalSessions, localSessionExists, readLocalSession, resumeHint, saveLocalSession, sessionStamp } from './sessions.js';
+import { SESSION_DIR, autosaveName, chatFileExists, compactLocalSession, deleteLocalSession, formatModelfile, isAutosaveName, legacySessionPath, listLocalSessions, localSessionExists, readLocalSession, resumeHint, saveLocalSession, sessionPath, sessionStamp } from './sessions.js';
 import { formatMarkdown } from './export.js';
 import { ANSI, CHROME_COLOR, PROMPT, createWordWrapper, drawBox, graphemeWidth, graphemes, styleLine, styledPrompt, supportsColor, visibleWidth } from './style.js';
 import { MAX_TOOL_ROUNDS, TOOLS, formatToday } from './tools.js';
@@ -52,7 +52,7 @@ export class OllamaChat {
     this.autosave = options.autosave ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
     // The local session file this conversation is saved in, once it has one:
     // set by autosave, a local /save, or loading a local session; cleared
-    // when a new conversation starts (/clear, loading a model).
+    // when a new conversation starts (/new, loading a model).
     this._sessionName = null;
     // How many messages the session file holds, as far as this chat knows,
     // so autosave can append instead of rewriting; null when unknown.
@@ -666,14 +666,33 @@ export class OllamaChat {
     return this.writeSessionFile(name);
   }
 
+  // The first save of a session from an earlier version writes the new
+  // file beside the old Modelfile; the old one is the user's to keep (it's
+  // a point-in-time copy) or remove.
+  async offerToRemoveLegacy(name, legacy) {
+    if (!await this.confirm(`\nConverted '${name}' to the new chat format. Delete the old file ${legacy}?`)) {
+      console.log(`${CHROME_COLOR}Kept ${path.basename(legacy)} as it was.${ANSI.reset}`);
+      return;
+    }
+    try {
+      await fs.rm(legacy, { force: true });
+      console.log(`${CHROME_COLOR}Deleted ${path.basename(legacy)}.${ANSI.reset}`);
+    } catch (error) {
+      console.log(`⚠️  Couldn't delete ${legacy}: ${error.message}`);
+    }
+  }
+
   // `full` rewrites the file's messages even if this chat could append.
   async writeSessionFile(name, { full = false } = {}) {
     const snapshot = this.sessionSnapshot();
     const append = !full && name === this.sessionName ? this.persistedCount : null;
+    const legacy = legacySessionPath(name);
+    const converting = !existsSync(sessionPath(name)) && existsSync(legacy);
     const file = await saveLocalSession(name, snapshot, { append });
     this.sessionName = name;
     this.sessionStamp = await sessionStamp(name);
     this.persistedCount = snapshot.messages.length;
+    if (converting) await this.offerToRemoveLegacy(name, legacy);
     return file;
   }
 
@@ -1047,8 +1066,7 @@ export class OllamaChat {
     console.log('  /load <model>   Load a session or model');
     console.log('  /save [name]    Save your current session to a file on this machine');
     console.log('  /share [name]   Save your current session as a model on the Ollama server');
-    console.log('  /clear [name]   Start a new conversation (with a name, saves this one under it first)');
-    console.log('  /new [name]     Start a new conversation, optionally named');
+    console.log('  /new [name]     Start a new conversation, optionally named (the old one stays saved)');
     console.log('  /delete [name]  Delete a saved session (this one by default)');
     console.log('  /export [path]  Write the conversation to a .md transcript or a .Modelfile');
     console.log('  /purge <kind>   Shrink the saved chat: thinking, tools (as text), or blobs (images and PDFs)');
@@ -1221,14 +1239,18 @@ export class OllamaChat {
     }
     this.startNewConversation();
     if (name) this.sessionName = name;
-    console.log(`🆕 New conversation${name ? ` '${name}'` : ''}.${this.autosave ? '' : ' (Autosave is off; /save keeps it.)'}\n`);
+    console.log(`🆕 New conversation${name ? ` '${name}'` : ''}.${this.autosave ? '' : ' (Autosave is off; /save keeps this one.)'}\n`);
   }
 
   // Asks first, since a deleted session can't be recovered. Deleting the one
   // being chatted in leaves a new conversation.
   async deleteSession(name) {
     const target = name || this.sessionName;
-    if (!target || !await localSessionExists(target)) {
+    if (target && !await chatFileExists(target) && await localSessionExists(target)) {
+      console.log(`\n'${target}' is an old-format Modelfile (${legacySessionPath(target)}). /delete leaves those alone; remove the file yourself if you don't want it.\n`);
+      return;
+    }
+    if (!target || !await chatFileExists(target)) {
       console.log(target ? `\nNo saved session named '${target}'.\n` : '\nThis conversation has no saved session. Usage: /delete <name>\n');
       return;
     }
@@ -1851,16 +1873,6 @@ export class OllamaChat {
       case '/bye':
         console.log('\n👋 Goodbye!\n');
         return false;
-      case '/clear': {
-        const name = rest.join(' ');
-        if (name) {
-          await this.save(name);
-          if (this.sessionName !== name) return true; // not saved, so keep it
-        }
-        this.startNewConversation();
-        console.log(name ? `🗑️  Saved as '${name}' and started a new conversation.\n` : '🗑️  Conversation history cleared.\n');
-        return true;
-      }
       case '/new':
         await this.newConversation(rest.join(' '));
         return true;
@@ -2265,7 +2277,8 @@ export class OllamaChat {
           continue;
         }
         if (extractAttachments(input).attachments.length === 0 && attached.length === 0) {
-          console.log(`Unknown command '${input.trim().split(/\s+/)[0]}'. Type /help for help\n`);
+          const command = input.trim().split(/\s+/)[0];
+          console.log(`Unknown command '${command}'. ${command.toLowerCase() === '/clear' ? 'Use /new to start a new conversation.' : 'Type /help for help'}\n`);
           continue;
         }
       }

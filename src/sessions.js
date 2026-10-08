@@ -153,13 +153,20 @@ export async function readLocalSession(name) {
   }
 }
 
+// Whether the name is taken, by a chat file or an old Modelfile.
 export async function localSessionExists(name) {
   return existsSync(sessionPath(name)) || existsSync(legacySessionPath(name));
 }
 
+// Whether there is a chat file by that name (what /delete can remove).
+export async function chatFileExists(name) {
+  return existsSync(sessionPath(name));
+}
+
+// Removes the chat file only: a Modelfile from an earlier version is left
+// alone, like any exported copy.
 export async function deleteLocalSession(name) {
   await fs.rm(sessionPath(name), { force: true });
-  await fs.rm(legacySessionPath(name), { force: true });
 }
 
 // Shrinks a chat file after its contents were rewritten (/purge).
@@ -176,7 +183,7 @@ export function isAutosaveName(name) {
 
 // Name for a new autosaved session, from the local date and time, e.g.
 // 'chat-2026-09-30-154907', with a -2, -3, ... suffix if that's taken (say,
-// two conversations started within a second of each other via /clear).
+// two conversations started within a second of each other via /new).
 export async function autosaveName() {
   const now = new Date();
   const pad = (n) => String(n).padStart(2, '0');

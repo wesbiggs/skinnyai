@@ -30,9 +30,8 @@ Autosave is **on by default in a terminal**: the session is saved after every re
 
 ## Starting over and cleaning up
 
-- `/clear` starts a new conversation (the system message stays); the old chat stays on disk under its name. `/clear <name>` saves the current chat under that name first.
-- `/new [name]` starts a new conversation, optionally named. It won't take a name that's already in use.
-- `/delete [name]` deletes a saved session (the current one by default) after asking. Deleting the current chat starts a new one.
+- `/new [name]` starts a new conversation (the system message stays), optionally named. The old chat stays on disk under its name, and a name already in use isn't accepted.
+- `/delete [name]` deletes a saved chat file (the current one by default) after asking. Deleting the current chat starts a new one. It never touches old-format Modelfiles.
 - `/purge thinking|tools|blobs` shrinks the current chat and its file: `thinking` drops saved thinking blocks, `tools` turns tool calls and results into text, and `blobs` removes attached images and PDFs and images in tool results, leaving a note where each was.
 
 ## Exporting and sharing
@@ -42,4 +41,4 @@ Autosave is **on by default in a terminal**: the session is saved after every re
 
 ## Sessions from earlier versions
 
-Versions before 0.11 saved sessions as `<name>.Modelfile` text files. Those still load and show up in `/list`; the first time you save one, the chat is written as a `.skinny` file next to it and the Modelfile is left alone (`/delete` removes both).
+Versions before 0.11 saved sessions as `<name>.Modelfile` text files. Those still load and show up in `/list`. The first time you save one, the chat is written as a `.skinny` file next to it and you're asked whether to delete the old Modelfile (the default is to keep it, as a point-in-time copy). `/delete` leaves Modelfiles alone.

@@ -98,28 +98,53 @@ describe('sessions from earlier versions', () => {
     fs.writeFileSync(legacy('old'), skinnyai.formatModelfile({ from: 'legacy-model', system: '', parameters: {}, messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' }] }));
   });
 
-  it('load, list once, and are saved as .skinny files the next time', async () => {
+  it('load, list once, and are saved as .skinny files the next time, keeping the Modelfile if asked to', async () => {
     const chat = chatOf();
     await chat.load('old');
     expect(chat.model).toBe('legacy-model');
     expect(chat.history.map((m) => m.content)).toEqual(['hi', 'hello']);
     chat.history.push({ role: 'user', content: 'more' });
+    let asked = '';
+    chat.confirm = async (question) => ((asked = question), false);
     await chat.save('');
+    expect(asked).toContain('Converted \'old\' to the new chat format. Delete the old file');
+    expect(output()).toContain('Kept old.Modelfile as it was.');
     expect(files()).toEqual(['old.Modelfile', 'old.skinny']);
     expect(await skinnyai.listLocalSessions()).toEqual(['old']);
     expect(readChat(path.join(skinnyai.SESSION_DIR, 'old.skinny')).messages).toHaveLength(3);
+    asked = '';
+    await chat.save(''); // already converted: no second question
+    expect(asked).toBe('');
     const next = chatOf();
     await next.load('old');
     expect(next.history).toHaveLength(3); // the .skinny file wins
   });
 
-  it('are removed along with the chat file by /delete', async () => {
+  it('deletes the old Modelfile when told to', async () => {
     const chat = chatOf();
     await chat.load('old');
+    chat.confirm = async () => true;
+    await chat.save('');
+    expect(files()).toEqual(['old.skinny']);
+    expect(output()).toContain('Deleted old.Modelfile.');
+  });
+
+  it('/delete removes the chat file but leaves a Modelfile alone', async () => {
+    const chat = chatOf();
+    await chat.load('old');
+    chat.confirm = async () => false;
     await chat.save('');
     chat.confirm = async () => true;
     await chat.deleteSession('old');
-    expect(files()).toEqual([]);
+    expect(files()).toEqual(['old.Modelfile']);
+  });
+
+  it('/delete says so for a session that is only a Modelfile', async () => {
+    const chat = chatOf();
+    chat.confirm = async () => { throw new Error('should not ask'); };
+    await chat.deleteSession('old');
+    expect(output()).toContain("'old' is an old-format Modelfile");
+    expect(files()).toEqual(['old.Modelfile']);
   });
 });
 
@@ -141,24 +166,7 @@ describe('autosave', () => {
   });
 });
 
-describe('/clear, /new, and /delete', () => {
-  it('/clear NAME saves the conversation under that name, then starts a new one', async () => {
-    const chat = chatOf('q', 'a');
-    await chat.handleCommand('/clear Keeper');
-    expect(files()).toEqual(['Keeper.skinny']);
-    expect(chat.history).toEqual([]);
-    expect(chat.sessionName).toBeNull();
-    expect(output()).toContain("Saved as 'Keeper' and started a new conversation.");
-  });
-
-  it('/clear NAME keeps the conversation when the save is declined', async () => {
-    await chatOf('old', 'a').save('Taken');
-    const chat = chatOf('q', 'a');
-    chat.confirm = async () => false;
-    await chat.handleCommand('/clear Taken');
-    expect(chat.history).toHaveLength(2);
-  });
-
+describe('/new and /delete', () => {
   it('/new starts a conversation, optionally named, but never takes a name in use', async () => {
     const chat = chatOf('q', 'a');
     chat.setSystemMessage('Be brief.');
@@ -169,6 +177,12 @@ describe('/clear, /new, and /delete', () => {
     await chat.handleCommand('/new Used');
     expect(chat.sessionName).toBe('Fresh');
     expect(output()).toContain("A saved session named 'Used' already exists");
+    await chat.handleCommand('/new');
+    expect(chat.sessionName).toBeNull();
+  });
+
+  it('/clear is gone, with a pointer to /new', async () => {
+    expect(await chatOf('q', 'a').handleCommand('/clear')).toBeNull();
   });
 
   it('/delete asks first, and deleting the current chat starts a new one', async () => {

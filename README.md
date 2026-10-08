@@ -6,7 +6,7 @@ A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic
 
 ## Features
 
-- Streaming chat with the full history sent each turn, and `ollama run` command parity (`/set`, `/show`, `/load`, `/save`, `/clear`, `/bye`, `/?`, `/list`, ...)
+- Streaming chat with the full history sent each turn, and `ollama run` command parity (`/set`, `/show`, `/load`, `/save`, `/bye`, `/?`, `/list`, ...), with `/new` in place of `/clear`
 - Three APIs: Ollama (local or [cloud](docs/apis.md#ollama-cloud)), [OpenAI-compatible](docs/apis.md#openai-compatible-servers) servers, and [Anthropic](docs/apis.md#anthropic)
 - Per-session `keep_alive` for a self-hosted Ollama, without changing the server's behavior for other apps
 - [Web search and page fetching](docs/tools.md) on by default (full web search needs an Ollama API key; without one you get DuckDuckGo instant answers) and [MCP servers](docs/tools.md#mcp-servers) in the standard `mcpServers` format
@@ -63,7 +63,7 @@ Every flag has a matching `SKINNY_*` environment variable or `config.json` setti
 | `/show ...` | Model info, or `/show settings` for this session's state |
 | `/save [name]`, `/load <name>`, `/new`, `/export`, `/share` | [Sessions](docs/sessions.md) |
 | `/attach <file>` | Send a file with your next message |
-| `/list`, `/mcp`, `/clear`, `/exit` | Models and sessions, MCP servers, reset, quit |
+| `/list`, `/mcp`, `/exit` | Models and sessions, MCP servers, quit |
 
 Enter sends; Ctrl+J or Shift+Enter adds a new line. See [commands](docs/commands.md) for everything else.
 

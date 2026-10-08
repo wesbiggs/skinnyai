@@ -238,11 +238,11 @@ describe('autosave', () => {
     expect(output().match(/Autosaving as/g)).toHaveLength(1);
   });
 
-  it('starts a new file after /clear, even within the same second', async () => {
+  it('starts a new file after /new, even within the same second', async () => {
     fixTime();
     const chat = openaiChat({ autosave: true });
     await chat.chat('x');
-    await chat.handleCommand('/clear');
+    await chat.handleCommand('/new');
     await chat.chat('y');
     expect(sessionFiles()).toEqual(['chat-2026-09-30-154907-2.skinny', 'chat-2026-09-30-154907.skinny']);
     expect(readSession('chat-2026-09-30-154907-2').messages[0].content).toBe('y');
