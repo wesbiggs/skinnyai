@@ -87,7 +87,7 @@ export function adaptHistory(history, target) {
     }
 
     let next = m;
-    if (m.thinkingBlocks?.length && !(m.origin && m.origin.api === target.api && m.origin.model === target.model && target.api === 'anthropic')) {
+    if (m.thinkingBlocks?.length && !target.keepThinking && !(m.origin && m.origin.api === target.api && m.origin.model === target.model && target.api === 'anthropic')) {
       report.thinking += m.thinkingBlocks.length;
       next = without(next, 'thinkingBlocks');
     }
@@ -209,4 +209,50 @@ export function describeAdaptation(report) {
   if (report.orphans) lines.push(`${plural(report.orphans, 'unmatched tool result')} dropped`);
   if (report.droppedMessages) lines.push(`the oldest ${plural(report.droppedMessages, 'message')} left out to fit the context window`);
   return lines;
+}
+
+// /purge: rewrites a history without one kind of bulk. Returns
+// { history, removed } (removed counts what went).
+//   thinking  drops the saved thinking blocks
+//   tools     turns tool calls and their results into text
+//   blobs     removes attached images and PDFs and images in tool results,
+//             leaving a note where each was
+export function purgeHistory(history, kind) {
+  if (kind === 'thinking') {
+    let removed = 0;
+    const next = history.map((m) => {
+      if (!m.thinkingBlocks?.length) return m;
+      removed += m.thinkingBlocks.length;
+      return without(m, 'thinkingBlocks');
+    });
+    return { history: next, removed };
+  }
+  if (kind === 'tools') {
+    const { messages, report } = adaptHistory(history, { api: '', model: '', toolNames: new Set(), keepThinking: true });
+    return { history: messages, removed: report.flattened };
+  }
+  if (kind === 'blobs') {
+    let removed = 0;
+    const next = history.map((m) => {
+      const markers = [];
+      let out = m;
+      if (m.images?.length && m.role === 'user') {
+        markers.push(`[${m.images.length} attached image${m.images.length === 1 ? '' : 's'} removed]`);
+        removed += m.images.length;
+        out = without(out, 'images');
+      }
+      if (m.documents?.length) {
+        markers.push(...m.documents.map((d) => `[attached file ${d.name} removed]`));
+        removed += m.documents.length;
+        out = without(out, 'documents');
+      }
+      if (m.role === 'tool' && m.images?.length) {
+        removed += m.images.length;
+        out = without(out, 'images', 'parts');
+      }
+      return markers.length ? { ...out, content: [out.content, ...markers].filter(Boolean).join('\n\n') } : out;
+    });
+    return { history: next, removed };
+  }
+  throw new Error(`unknown kind '${kind}'`);
 }

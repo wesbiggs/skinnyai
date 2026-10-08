@@ -10,7 +10,7 @@
     "bin"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "scripts": {
     "ollama": "node src/skinnyai.js",

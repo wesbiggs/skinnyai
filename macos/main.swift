@@ -143,7 +143,7 @@ struct BoolSetting {
 
 let boolSettings: [BoolSetting] = [
     BoolSetting(key: "SKINNY_TOOLS", title: "Web search and page reading", detail: "Let the model look things up online.", defaultValue: true),
-    BoolSetting(key: "SKINNY_AUTOSAVE", title: "Autosave conversations", detail: "Save each chat to ~/.skinny/sessions as you go.", defaultValue: false),
+    BoolSetting(key: "SKINNY_AUTOSAVE", title: "Autosave conversations", detail: "Save each chat to ~/.skinny/sessions as you go.", defaultValue: true),
     BoolSetting(key: "SKINNY_MARKDOWN", title: "Format replies (markdown)", detail: "Bold, lists, tables, and code blocks.", defaultValue: true),
     BoolSetting(key: "SKINNY_IMAGES", title: "Show inline images", detail: "Needs iTerm2; fetches image URLs in replies.", defaultValue: false),
     BoolSetting(key: "SKINNY_HIDE_THINKING", title: "Hide the model's thinking", detail: "Show only final answers from reasoning models.", defaultValue: false),
@@ -991,7 +991,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.directoryURL = sessionsURL
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [UTType(filenameExtension: "Modelfile") ?? .data]
+        panel.allowedContentTypes = ["skinny", "Modelfile"].map { UTType(filenameExtension: $0) ?? .data }
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }
         guard url.deletingLastPathComponent().standardizedFileURL == sessionsURL.standardizedFileURL else {

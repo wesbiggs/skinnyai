@@ -249,7 +249,7 @@ describe('sessions on disk', () => {
 
   it('stores names with any characters as safe filenames', async () => {
     const file = await skinnyai.saveLocalSession('me/chat:v2', { from: 'm', system: '', parameters: {}, messages: [] });
-    expect(path.basename(file)).toBe('me%2Fchat%3Av2.Modelfile');
+    expect(path.basename(file)).toBe('me%2Fchat%3Av2.skinny');
     expect(await skinnyai.listLocalSessions()).toContain('me/chat:v2');
     expect((await skinnyai.readLocalSession('me/chat:v2')).from).toBe('m');
     expect(await skinnyai.readLocalSession('missing')).toBeNull();
@@ -258,10 +258,12 @@ describe('sessions on disk', () => {
   it('keeps spaces in filenames, and still finds files saved with %20', async () => {
     const session = { from: 'm', system: '', parameters: {}, messages: [] };
     const file = await skinnyai.saveLocalSession('My Memos', session);
-    expect(path.basename(file)).toBe('My Memos.Modelfile');
+    expect(path.basename(file)).toBe('My Memos.skinny');
     expect(await skinnyai.listLocalSessions()).toContain('My Memos');
-    fs.renameSync(file, path.join(path.dirname(file), 'My%20Memos.Modelfile'));
-    expect((await skinnyai.readLocalSession('My Memos')).from).toBe('m');
+    // An earlier version saved Modelfiles with %20 for spaces.
+    fs.rmSync(file);
+    fs.writeFileSync(path.join(path.dirname(file), 'My%20Memos.Modelfile'), skinnyai.formatModelfile({ ...session, from: 'old', parameters: {} }));
+    expect((await skinnyai.readLocalSession('My Memos')).from).toBe('old');
     expect((await skinnyai.listLocalSessions()).filter((n) => n === 'My Memos')).toHaveLength(1);
   });
 

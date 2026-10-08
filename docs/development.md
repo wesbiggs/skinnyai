@@ -1,6 +1,6 @@
 # Development
 
-The source is the ES modules in `src/` (entry `src/skinnyai.js`); `npm run build` minifies it into the single file `bin/skinnyai.js` (not checked in, about 90 KB), which has no runtime dependencies beyond Node.js. esbuild and postject are build tools only. `CLAUDE.md` has a module-by-module orientation and the reasoning behind non-obvious decisions.
+Chats are stored with `node:sqlite`, so the CLI needs Node 22.13 or newer (Node 22 prints an experimental-feature notice for it, which `src/quiet-warnings.js` hides). The source is the ES modules in `src/` (entry `src/skinnyai.js`); `npm run build` minifies it into the single file `bin/skinnyai.js` (not checked in, about 90 KB), which has no runtime dependencies beyond Node.js. esbuild and postject are build tools only. `CLAUDE.md` has a module-by-module orientation and the reasoning behind non-obvious decisions.
 
 ```bash
 npm install

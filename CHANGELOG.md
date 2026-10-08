@@ -3,10 +3,15 @@
 ## Unreleased
 
 ### Added
+- Chats are saved as SQLite files (`<name>.skinny`, via `node:sqlite`) holding the whole conversation: tool calls and results, thinking blocks, attached images and PDFs (stored once each), and which model wrote each reply. `.Modelfile` sessions from earlier versions still load and are written as `.skinny` the next time they're saved.
+- `/new [name]`, `/delete [name]` (asks first), `/export [path]` (`.md` transcript or `.Modelfile`), and `/purge thinking|tools|blobs`. `/clear <name>` saves the chat under that name before starting a new one.
 - `/set model <name>` switches model on the same server, keeping the conversation.
 - Conversations are kept in a provider-neutral form (`src/history.js`) and adapted to each model when a request is sent: tool calls become text when the new model lacks the tools, thinking blocks replay only to the model that wrote them, and PDFs/images a model can't take are noted instead.
 
 ### Changed
+- Autosave is on by default when running in a terminal (piped input still doesn't autosave unless asked), and the app's "Autosave conversations" setting defaults to on. Autosave appends new messages instead of rewriting the file.
+- `/share` and Modelfile `/export` are generated from the saved conversation text; Modelfile is no longer the storage format.
+- Requires Node 22.13 or newer (for `node:sqlite`).
 - `/set profile` keeps the conversation (use `--new` for a fresh one). Tool calls now always get ids and object arguments in history.
 - Removed the DuckDuckGo HTML scraper and the `recency` argument. Without an `OLLAMA_API_KEY`, `web_search` returns only DuckDuckGo Instant Answers (with `t=skinnyai` and attribution, per the API's terms); full web search uses Ollama's hosted search.
 - skinnyai identifies itself (`skinnyai/<version>`) instead of sending a browser User-Agent, for Instant Answers and `fetch_page`.

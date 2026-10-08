@@ -3,22 +3,30 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import './config.js';
 import { SKINNY_HOME } from './config.js';
+import { messageCount, readChat, revisionOf, vacuum, writeChat } from './chatdb.js';
 
-// Sessions saved on this machine, for servers that can't store them: only
-// a self-hosted Ollama has /api/create, not ollama.com or OpenAI-compatible
-// servers. They use the same Modelfile format /save creates on an Ollama
-// server (FROM, SYSTEM, PARAMETER, MESSAGE), one file per name, so a saved
-// session can also be turned into a real model with `ollama create -f`.
+// Sessions saved on this machine, one SQLite file per name (see chatdb.js),
+// so they work with any server and hold the whole conversation: tool calls,
+// attachments, and which model said what. The Modelfile format (FROM, SYSTEM,
+// PARAMETER, MESSAGE) is what /share sends to an Ollama server and what
+// /export can write; sessions saved as .Modelfile by earlier versions still
+// load, and are written as .skinny files the next time they're saved.
 export const SESSION_DIR = path.join(SKINNY_HOME, 'sessions');
-export const SESSION_SUFFIX = '.Modelfile';
+export const SESSION_SUFFIX = '.skinny';
+export const LEGACY_SUFFIX = '.Modelfile';
 
 // Names can hold anything a model name can (like 'me/chat:v2'), so they're
 // URL-encoded into safe filenames, except that spaces stay spaces.
 export function sessionPath(name) {
-  const file = path.join(SESSION_DIR, encodeURIComponent(name).replace(/%20/g, ' ') + SESSION_SUFFIX);
-  // Earlier versions wrote spaces as %20; keep finding those files.
-  const legacy = path.join(SESSION_DIR, encodeURIComponent(name) + SESSION_SUFFIX);
-  return legacy !== file && !existsSync(file) && existsSync(legacy) ? legacy : file;
+  return path.join(SESSION_DIR, encodeURIComponent(name).replace(/%20/g, ' ') + SESSION_SUFFIX);
+}
+
+// The Modelfile an earlier version saved under this name, if there is one.
+// (Earlier versions also wrote spaces as %20; those files are still found.)
+export function legacySessionPath(name) {
+  const file = path.join(SESSION_DIR, encodeURIComponent(name).replace(/%20/g, ' ') + LEGACY_SUFFIX);
+  const old = path.join(SESSION_DIR, encodeURIComponent(name) + LEGACY_SUFFIX);
+  return old !== file && !existsSync(file) && existsSync(old) ? old : file;
 }
 
 // How to resume a saved session, for the message after saving: the app has a
@@ -103,11 +111,13 @@ export function parseModelfile(text) {
   return session;
 }
 
-// Identifies the version of a session's file on disk (null if there's none),
-// so a chat can tell whether another process saved over its file.
+// Identifies the version of a session on disk (null if there's none), so a
+// chat can tell whether another process saved over it: the chat file's
+// revision, or for a Modelfile from an earlier version its mtime and size.
 export async function sessionStamp(name) {
+  if (existsSync(sessionPath(name))) return `rev:${revisionOf(sessionPath(name))}`;
   try {
-    const { mtimeMs, size } = await fs.stat(sessionPath(name));
+    const { mtimeMs, size } = await fs.stat(legacySessionPath(name));
     return `${mtimeMs}:${size}`;
   } catch (error) {
     if (error.code === 'ENOENT') return null;
@@ -115,21 +125,28 @@ export async function sessionStamp(name) {
   }
 }
 
-// Returns the path written; the file's new stamp is `await sessionStamp(name)`.
-export async function saveLocalSession(name, session) {
+// Saves a session ({ from, system, parameters, messages, settings }) and
+// returns the path written. `append` is how many messages the caller knows
+// the file already holds, so only the new ones are written (see writeChat).
+export async function saveLocalSession(name, session, { append = null } = {}) {
   await fs.mkdir(SESSION_DIR, { recursive: true });
   const file = sessionPath(name);
-  await fs.writeFile(file, formatModelfile(session));
+  writeChat(file, session, { append });
   return file;
 }
 
-// Returns the parsed session (with the `stamp` it had just before it was
-// read), or null if none is saved under that name.
+// Returns the session (with the `stamp` it had just before it was read, and
+// `persisted`, how many messages the file holds), or null if none is saved
+// under that name. A Modelfile from an earlier version is read as text only.
 export async function readLocalSession(name) {
   try {
     const stamp = await sessionStamp(name);
-    const session = parseModelfile(await fs.readFile(sessionPath(name), 'utf8'));
-    return { ...session, stamp };
+    if (existsSync(sessionPath(name))) {
+      const session = readChat(sessionPath(name));
+      return { ...session, stamp, persisted: session.messages.length };
+    }
+    const session = parseModelfile(await fs.readFile(legacySessionPath(name), 'utf8'));
+    return { ...session, stamp, persisted: null };
   } catch (error) {
     if (error.code === 'ENOENT') return null;
     throw error;
@@ -137,17 +154,20 @@ export async function readLocalSession(name) {
 }
 
 export async function localSessionExists(name) {
-  try {
-    await fs.access(sessionPath(name));
-    return true;
-  } catch (error) {
-    return false;
-  }
+  return existsSync(sessionPath(name)) || existsSync(legacySessionPath(name));
 }
 
 export async function deleteLocalSession(name) {
   await fs.rm(sessionPath(name), { force: true });
+  await fs.rm(legacySessionPath(name), { force: true });
 }
+
+// Shrinks a chat file after its contents were rewritten (/purge).
+export function compactLocalSession(name) {
+  if (existsSync(sessionPath(name))) vacuum(sessionPath(name));
+}
+
+export { messageCount };
 
 // Whether a session still has the name autosave gave it (see autosaveName).
 export function isAutosaveName(name) {
@@ -171,7 +191,9 @@ export async function autosaveName() {
 export async function listLocalSessions() {
   try {
     const files = await fs.readdir(SESSION_DIR);
-    const names = files.filter((f) => f.endsWith(SESSION_SUFFIX)).map((f) => decodeURIComponent(f.slice(0, -SESSION_SUFFIX.length)));
+    const names = files
+      .filter((f) => f.endsWith(SESSION_SUFFIX) || f.endsWith(LEGACY_SUFFIX))
+      .map((f) => decodeURIComponent(f.slice(0, f.endsWith(SESSION_SUFFIX) ? -SESSION_SUFFIX.length : -LEGACY_SUFFIX.length)));
     return [...new Set(names)].sort();
   } catch (error) {
     return [];

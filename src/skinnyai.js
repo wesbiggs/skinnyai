@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import './quiet-warnings.js';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { classifyFile, extractAttachments } from './attachments.js';
@@ -11,7 +12,7 @@ import { imageSequence, loadImage, sniffImage } from './images.js';
 import { inputPosition } from './lineedit.js';
 import { createMarkdownRenderer } from './markdown.js';
 import { pickDefaultModel } from './models.js';
-import { SESSION_DIR, autosaveName, formatModelfile, isAutosaveName, listLocalSessions, localSessionExists, parseModelfile, readLocalSession, resumeHint, saveLocalSession, sessionPath } from './sessions.js';
+import { SESSION_DIR, autosaveName, compactLocalSession, formatModelfile, isAutosaveName, legacySessionPath, listLocalSessions, localSessionExists, messageCount, parseModelfile, readLocalSession, resumeHint, saveLocalSession, sessionPath } from './sessions.js';
 import { PROMPT, applyColorOverrides, charWidth, createInlineStyler, createWordWrapper, drawBox, graphemeWidth, renderTable, splitTableRow, styleLine, visibleWidth, wrapStyled } from './style.js';
 
 // Main
@@ -62,7 +63,7 @@ export {
   splitTableRow, wrapStyled, renderTable, createMarkdownRenderer, inputPosition,
   drawBox, VERSION, sniffImage, imageSequence, loadImage, pickDefaultModel, extractAttachments, classifyFile,
   formatModelfile, parseModelfile, saveLocalSession, readLocalSession, listLocalSessions,
-  localSessionExists, isAutosaveName, autosaveName, sessionPath, resumeHint,
+  localSessionExists, isAutosaveName, autosaveName, sessionPath, legacySessionPath, compactLocalSession, messageCount, resumeHint,
   loadConfigFile, resolveProfile, requestedProfile, envOptions, parseArgs, isOllamaCom, OllamaChat, main,
   PROMPT, SESSION_DIR, CONFIG_FILE
 };

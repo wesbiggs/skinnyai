@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DatabaseSync } from 'node:sqlite';
+import { readChat } from '../src/chatdb.js';
 import { captureOutput, fakeTTY, stripAnsi } from './helpers/tty.js';
 import { startMockServer } from './helpers/mock-server.js';
 
@@ -28,7 +30,12 @@ afterEach(() => {
 
 const output = () => stripAnsi(capture.text);
 const sessionFiles = () => (fs.existsSync(skinnyai.SESSION_DIR) ? fs.readdirSync(skinnyai.SESSION_DIR).sort() : []);
-const readSession = (name) => skinnyai.parseModelfile(fs.readFileSync(skinnyai.sessionPath(name), 'utf8'));
+const readSession = (name) => {
+  const session = readChat(skinnyai.sessionPath(name));
+  delete session.revision;
+  delete session.chatId;
+  return session;
+};
 
 function openaiChat(options = {}) {
   return new skinnyai.OllamaChat('some-model', { api: 'openai', host: server.url, ...options });
@@ -83,7 +90,7 @@ describe('/save', () => {
     const chat = withHistory(openaiChat(), 'q', 'a');
     await chat.save('');
     await chat.save('');
-    expect(sessionFiles()).toEqual(['chat-2026-09-30-154907.Modelfile']);
+    expect(sessionFiles()).toEqual(['chat-2026-09-30-154907.skinny']);
     expect(chat.sessionName).toBe('chat-2026-09-30-154907');
   });
 
@@ -142,18 +149,35 @@ describe('/save', () => {
     expect(chat.stopOnExit).toBe(true);
   });
 
-  it('leaves out tool calls and tool results', async () => {
+  it('keeps tool calls, results, and where each message came from', async () => {
     const chat = openaiChat();
-    chat.history = [
+    const history = [
       { role: 'user', content: 'weather?' },
-      { role: 'assistant', content: '', tool_calls: [{ function: { name: 'web_search' } }] },
-      { role: 'tool', content: 'sunny' },
-      { role: 'assistant', content: "It's sunny." }
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 'web_search', arguments: { query: 'weather' } } }], origin: { api: 'openai', model: 'some-model' } },
+      { role: 'tool', tool_call_id: 'c1', tool_name: 'web_search', content: 'sunny' },
+      { role: 'assistant', content: "It's sunny.", origin: { api: 'openai', model: 'some-model' } }
     ];
+    chat.history = structuredClone(history);
     await chat.save('tools');
-    expect(readSession('tools').messages).toEqual([
-      { role: 'user', content: 'weather?' }, { role: 'assistant', content: "It's sunny." }
-    ]);
+    expect(readSession('tools').messages).toEqual(history);
+    expect(chat.savableMessages()).toEqual([{ role: 'user', content: 'weather?' }, { role: 'assistant', content: "It's sunny." }]);
+  });
+
+  it('keeps attachments, thinking, and tool-result images as bytes', async () => {
+    const png = { mime: 'image/png', data: Buffer.from('not really a png').toString('base64') };
+    const history = [
+      { role: 'user', content: 'see', images: [png], documents: [{ name: 'a.pdf', mime: 'application/pdf', data: Buffer.from('%PDF').toString('base64') }] },
+      { role: 'assistant', content: 'ok', thinkingBlocks: [{ type: 'thinking', thinking: 'hm', signature: 'sig' }], tool_calls: [{ id: 'c1', function: { name: 'draw', arguments: {} } }] },
+      { role: 'tool', tool_call_id: 'c1', tool_name: 'draw', content: 'saved\n[image: image/png]', images: [png], parts: [{ type: 'image', ...png }, { type: 'text', text: 'saved' }] }
+    ];
+    const chat = openaiChat();
+    chat.history = structuredClone(history);
+    await chat.save('media');
+    expect(readSession('media').messages).toEqual(history);
+    // the same bytes are stored once
+    const db = new DatabaseSync(skinnyai.sessionPath('media'));
+    expect(db.prepare('SELECT COUNT(*) AS n FROM blobs').get().n).toBe(2);
+    db.close();
   });
 
   it('renames a session that only has an autosave name', async () => {
@@ -161,7 +185,7 @@ describe('/save', () => {
     const chat = withHistory(openaiChat(), 'q', 'a');
     await chat.save('');
     await chat.save('report');
-    expect(sessionFiles()).toEqual(['report.Modelfile']);
+    expect(sessionFiles()).toEqual(['report.skinny']);
     expect(output()).toContain("Renamed session 'chat-2026-09-30-154907' to 'report'");
   });
 
@@ -170,7 +194,7 @@ describe('/save', () => {
     await chat.save('report');
     chat.history.push({ role: 'user', content: 'more' });
     await chat.save('report2');
-    expect(sessionFiles()).toEqual(['report.Modelfile', 'report2.Modelfile']);
+    expect(sessionFiles()).toEqual(['report.skinny', 'report2.skinny']);
     expect(readSession('report').messages).toHaveLength(2);
     expect(readSession('report2').messages).toHaveLength(3);
     expect(output()).toContain("'report' is unchanged; from now on this session saves as 'report2'.");
@@ -207,7 +231,7 @@ describe('autosave', () => {
     const chat = openaiChat({ autosave: true });
     await chat.chat('hello');
     await chat.chat('again');
-    expect(sessionFiles()).toEqual(['chat-2026-09-30-154907.Modelfile']);
+    expect(sessionFiles()).toEqual(['chat-2026-09-30-154907.skinny']);
     expect(readSession('chat-2026-09-30-154907').messages.map((m) => m.content)).toEqual([
       'hello', 'You said: **hello**', 'again', 'You said: **again**'
     ]);
@@ -220,7 +244,7 @@ describe('autosave', () => {
     await chat.chat('x');
     await chat.handleCommand('/clear');
     await chat.chat('y');
-    expect(sessionFiles()).toEqual(['chat-2026-09-30-154907-2.Modelfile', 'chat-2026-09-30-154907.Modelfile']);
+    expect(sessionFiles()).toEqual(['chat-2026-09-30-154907-2.skinny', 'chat-2026-09-30-154907.skinny']);
     expect(readSession('chat-2026-09-30-154907-2').messages[0].content).toBe('y');
   });
 
@@ -229,7 +253,7 @@ describe('autosave', () => {
     await chat.chat('one');
     await chat.save('named');
     await chat.chat('two');
-    expect(sessionFiles()).toEqual(['named.Modelfile']);
+    expect(sessionFiles()).toEqual(['named.skinny']);
     expect(readSession('named').messages).toHaveLength(4);
   });
 
@@ -313,16 +337,16 @@ describe('two chats saving to one file', () => {
     await chat.save(name);
     return chat;
   };
-  const bump = (name) => {
-    const file = skinnyai.sessionPath(name);
-    const later = new Date(Date.now() + 5000);
-    fs.utimesSync(file, later, later);
+  // Another process saving to the file: its revision goes up.
+  const bump = async (name) => {
+    const { parameters, ...saved } = readSession(name);
+    await skinnyai.saveLocalSession(name, { ...saved, parameters: Object.fromEntries(parameters) });
   };
 
   it('is noticed, and skipping leaves the other chat\'s file alone', async () => {
     const chat = await other('shared');
     chat.history.push({ role: 'user', content: 'more' });
-    bump('shared');
+    await bump('shared');
     let asked = '';
     chat.choose = async (question) => ((asked = question), 'n');
     chat.autosave = true;
@@ -337,7 +361,7 @@ describe('two chats saving to one file', () => {
     const theirs = withHistory(openaiChat(), 'q1', 'a1', 'q2');
     theirs.sessionName = 'shared';
     await theirs.save('shared');
-    bump('shared');
+    await bump('shared');
     chat.choose = async () => 'r';
     await chat.save('shared');
     expect(chat.history.map((m) => m.content)).toEqual(['q1', 'a1', 'q2']);
@@ -347,7 +371,7 @@ describe('two chats saving to one file', () => {
   it('can save under a new name instead', async () => {
     const chat = await other('shared');
     chat.history.push({ role: 'user', content: 'mine' });
-    bump('shared');
+    await bump('shared');
     chat.choose = async () => 's';
     chat.readTurnInput = async () => 'Mine Too';
     await chat.save('shared');
@@ -359,7 +383,7 @@ describe('two chats saving to one file', () => {
   it('can overwrite', async () => {
     const chat = await other('shared');
     chat.history.push({ role: 'user', content: 'mine' });
-    bump('shared');
+    await bump('shared');
     chat.choose = async () => 'o';
     await chat.save('shared');
     expect(readSession('shared').messages).toHaveLength(3);

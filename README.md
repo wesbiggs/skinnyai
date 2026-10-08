@@ -12,7 +12,7 @@ A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic
 - [Web search and page fetching](docs/tools.md) on by default (full web search needs an Ollama API key; without one you get DuckDuckGo instant answers) and [MCP servers](docs/tools.md#mcp-servers) in the standard `mcpServers` format
 - Drag in [images, PDFs, or text files](docs/display.md#attaching-files)
 - [Markdown rendering](docs/display.md), inline images, thinking output, and multi-line input
-- [Sessions](docs/sessions.md) saved as Modelfiles, with optional autosave
+- [Sessions](docs/sessions.md): every chat autosaves to one file you own (tool calls and attachments included), and continues with any model
 - Named [profiles](docs/configuration.md) in `~/.skinny/config.json`
 
 ## Setup
@@ -61,7 +61,7 @@ Every flag has a matching `SKINNY_*` environment variable or `config.json` setti
 |---------|-------------|
 | `/set ...` | Change settings (system prompt, parameters, thinking, tools, profile, ...) |
 | `/show ...` | Model info, or `/show settings` for this session's state |
-| `/save [name]`, `/load <name>`, `/share` | [Sessions](docs/sessions.md) |
+| `/save [name]`, `/load <name>`, `/new`, `/export`, `/share` | [Sessions](docs/sessions.md) |
 | `/attach <file>` | Send a file with your next message |
 | `/list`, `/mcp`, `/clear`, `/exit` | Models and sessions, MCP servers, reset, quit |
 
@@ -91,7 +91,7 @@ The file may hold API keys, so `chmod 600` it. [Configuration](docs/configuratio
 
 - [Configuration](docs/configuration.md): profiles, environment variables, keep-alive
 - [Commands](docs/commands.md): `/set`, `/show`, thinking output
-- [Sessions](docs/sessions.md): `/save`, `/load`, `/share`, autosave
+- [Sessions](docs/sessions.md): saved chats, autosave, `/new`, `/export`, `/share`
 - [Tools](docs/tools.md): web search, `fetch_page`, MCP, hosted search, the date line
 - [Servers and APIs](docs/apis.md): Ollama, Ollama cloud, OpenAI-compatible, Anthropic
 - [Display, input, and attachments](docs/display.md): markdown, images, colors, shortcuts

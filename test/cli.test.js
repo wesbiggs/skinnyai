@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { readChat } from '../src/chatdb.js';
 import { startMockServer } from './helpers/mock-server.js';
 
 // SKINNYAI_SCRIPT points the same tests at the built bin/skinnyai.js (CI does).
@@ -68,7 +69,7 @@ describe('piped input', () => {
     const { stdout } = await run(['m', ...openai()], 'hi\n/save report\n/clear\nbye\n/save report\nn\n/save report\ny\n');
     expect(stdout).toContain("A saved session named 'report' already exists. Overwrite it? [y/N] n\nNot saved.");
     expect(stdout).toContain("Overwrite it? [y/N] y\n\n✅ Saved session 'report'");
-    expect(fs.readFileSync(path.join(home, 'sessions', 'report.Modelfile'), 'utf8')).toContain('MESSAGE user """bye"""');
+    expect(readChat(path.join(home, 'sessions', 'report.skinny')).messages.map((m) => m.content)).toContain('bye');
   });
 });
 
@@ -86,8 +87,8 @@ describe('saved sessions', () => {
   it('autosaves after each reply with --autosave', async () => {
     await run(['m', ...openai(), '--autosave'], 'hello\nagain\n');
     const [file] = fs.readdirSync(path.join(home, 'sessions'));
-    expect(file).toMatch(/^chat-\d{4}-\d{2}-\d{2}-\d{6}\.Modelfile$/);
-    expect(fs.readFileSync(path.join(home, 'sessions', file), 'utf8').match(/^MESSAGE/gm)).toHaveLength(4);
+    expect(file).toMatch(/^chat-\d{4}-\d{2}-\d{2}-\d{6}\.skinny$/);
+    expect(readChat(path.join(home, 'sessions', file)).messages).toHaveLength(4);
   });
 });
 
