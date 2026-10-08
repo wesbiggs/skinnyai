@@ -33,7 +33,7 @@ const sessionFiles = () => (fs.existsSync(skinnyai.SESSION_DIR) ? fs.readdirSync
 // A saved chat as plain data; message ids are left out unless asked for.
 const readSession = (name, { ids = false } = {}) => {
   const session = readChat(skinnyai.sessionPath(name));
-  for (const key of ['chatId', 'forks', 'last']) delete session[key];
+  for (const key of ['chatId', 'forks', 'last', 'name']) delete session[key];
   if (!ids) for (const message of session.messages) delete message.id;
   return session;
 };

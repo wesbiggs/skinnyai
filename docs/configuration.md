@@ -58,7 +58,7 @@ Highest first: the command line, your shell's environment, the profile, `shared`
 | `SKINNY_PROFILE` | `--profile` |
 | `SKINNY_USER_NORMAL_COLOR`, `SKINNY_USER_ITALIC_COLOR`, `SKINNY_MODEL_NORMAL_COLOR`, `SKINNY_MODEL_ITALIC_COLOR` | the `--*-color` flags ([colors](display.md#colors)) |
 
-`SKINNY_HOME` moves the whole `~/.skinny` directory. API keys (`OLLAMA_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) are read from the environment or a profile's `env`.
+`SKINNY_HOME` moves the whole `~/.skinny` directory. Besides `config.json`, it holds `sessions/`, `device` (this installation's id and a name you can edit), and, with [sync](sync.md) on, `sync.json` and possibly `vault.key`. `SKINNY_SYNC_DIR`, `SKINNY_VAULT_KEY`, and `SKINNY_VAULT_STORE` are described there. API keys (`OLLAMA_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) are read from the environment or a profile's `env`.
 
 On/off values can be JSON `true`/`false` or the strings `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`. Variables already set in your environment take precedence over the file, and command-line flags take precedence over both; that's what the `--no-…` forms are for. Settings that only make sense at launch (`NODE_EXTRA_CA_CERTS`, colors, `SKINNY_TRUSTED_HOSTS`, `SKINNY_IMAGE_DIR`) go in `startupEnv`.
 

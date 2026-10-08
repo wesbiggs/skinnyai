@@ -15,9 +15,12 @@ import { createMarkdownRenderer } from './markdown.js';
 import { adaptHistory, describeAdaptation, newCallId, parseArguments, purgeHistory, wireShape } from './history.js';
 import { loadMcpConfig, runTool, startMcpServers, toolDefinitions } from './mcp.js';
 import { pickDefaultModel } from './models.js';
-import { newMessageId } from './chatdb.js';
+import { chatIdOf, newMessageId } from './chatdb.js';
 import { SESSION_DIR, autosaveName, chatFileExists, deleteLocalSession, formatModelfile, isAutosaveName, legacySessionPath, listLocalSessions, localSessionExists, readLocalSession, redactLocalSession, resumeHint, saveLocalSession, sessionPath, sessionStamp } from './sessions.js';
 import { formatMarkdown } from './export.js';
+import { deleteSyncedChat, describeSync, initVault, keyMatches, pushChat, readVaultInfo, syncChats } from './sync.js';
+import { clearSyncFolder, setSyncFolder, syncFolder } from './syncconfig.js';
+import { decodeRecoveryKey, encodeRecoveryKey, generateVaultKey, loadVaultKey, saveVaultKey } from './vault.js';
 import { ANSI, CHROME_COLOR, PROMPT, createWordWrapper, drawBox, graphemeWidth, graphemes, styleLine, styledPrompt, supportsColor, visibleWidth } from './style.js';
 import { MAX_TOOL_ROUNDS, TOOLS, formatToday } from './tools.js';
 
@@ -645,7 +648,7 @@ export class OllamaChat {
 
   // With autosave on, writes the conversation to its local session file
   // after each model turn, naming it from the date and time the first time.
-  async autosaveSession() {
+  async autosaveSession({ push = true } = {}) {
     if (!this.autosave || this.savableMessages().length === 0) return;
     if (!this.sessionName) {
       this.sessionName = await autosaveName();
@@ -653,6 +656,7 @@ export class OllamaChat {
     }
     try {
       await this.writeSession(this.sessionName);
+      if (push) this.pushToSync();
     } catch (error) {
       console.log(`⚠️  Autosave failed: ${error.message}\n`);
     }
@@ -688,7 +692,7 @@ export class OllamaChat {
   // Adds what the session file lacks (everything, for a new file), or with
   // `replace` discards the file and writes this conversation in its place.
   async writeSessionFile(name, { replace = false } = {}) {
-    const snapshot = this.sessionSnapshot();
+    const snapshot = { ...this.sessionSnapshot(), name };
     const continuing = !replace && name === this.sessionName && existsSync(sessionPath(name));
     const legacy = legacySessionPath(name);
     const converting = !existsSync(sessionPath(name)) && existsSync(legacy);
@@ -1071,6 +1075,7 @@ export class OllamaChat {
     console.log('  /share [name]   Save your current session as a model on the Ollama server');
     console.log('  /new [name]     Start a new conversation, optionally named (the old one stays saved)');
     console.log('  /delete [name]  Delete a saved session (this one by default)');
+    console.log('  /sync [setup|status|key|off]  Keep chats in step across devices through a folder');
     console.log('  /export [path]  Write the conversation to a .md transcript or a .Modelfile');
     console.log('  /purge <kind>   Shrink the saved chat: thinking, tools (as text), or blobs (images and PDFs)');
     console.log('  /model          Show current model, keep-alive, and host');
@@ -1159,6 +1164,7 @@ export class OllamaChat {
       ['host', this.host],
       ...(this.managesModelLifetime ? [['keep-alive', this.keepAlive], ['stop on exit', onOff(this.stopOnExit)]] : []),
       ...(EXTRA_CA_FILE ? [['extra CA certs', EXTRA_CA_FILE]] : []),
+      ['sync folder', syncFolder() ?? 'off'],
       ['defaults file', CONFIG ? CONFIG_FILE : `none (${CONFIG_FILE})`]
     ];
     const print = (title, rows) => {
@@ -1217,6 +1223,7 @@ export class OllamaChat {
       const file = await this.writeSession(target, { replace: taken });
       if (!file) return; // the conflict prompt said what happened
       if (this.sessionName !== target) return; // and saved it under another name
+      this.pushToSync();
       if (renaming) await deleteLocalSession(previous);
       if (renaming) console.log(`\n✅ Renamed session '${previous}' to '${target}' (${file})`);
       else console.log(`\n✅ Saved session '${target}' to ${file}`);
@@ -1261,18 +1268,192 @@ export class OllamaChat {
       console.log('Not deleted.\n');
       return;
     }
+    let chatId;
     try {
+      chatId = chatIdOf(sessionPath(target));
       await deleteLocalSession(target);
     } catch (error) {
       console.error(`\n❌ Error deleting session: ${error.message}\n`);
       return;
     }
     console.log(`\n🗑️  Deleted session '${target}'.`);
+    const sync = this.syncTarget({ quiet: true });
+    if (sync && chatId) {
+      try {
+        if (deleteSyncedChat({ ...sync, chatId })) console.log('   Removed it from the sync folder too; your other devices delete it at their next sync.');
+      } catch (error) {
+        console.log(`⚠️  Couldn't remove it from the sync folder: ${error.message}`);
+      }
+    }
     if (target === this.sessionName) {
       this.startNewConversation();
       console.log('   Started a new conversation.');
     }
     console.log('');
+  }
+
+  // --- Sync (see sync.js) ---
+
+  // The folder and key to sync with, or null (saying why, unless `quiet`).
+  syncTarget({ quiet = false } = {}) {
+    const folder = syncFolder();
+    if (!folder) {
+      if (!quiet) console.log('\nSync is off. /sync setup <folder> turns it on: a folder your cloud drive (iCloud Drive, Dropbox, ...) already syncs.\n');
+      return null;
+    }
+    const key = loadVaultKey();
+    if (!key) {
+      if (!quiet) console.log(`\n⚠️  Sync is set to ${folder}, but this device has no key for it. /sync setup ${folder} asks for the recovery key.\n`);
+      return null;
+    }
+    return { folder, key };
+  }
+
+  // At startup, before any chat is resumed: a quiet sync that says only what changed.
+  syncAtStartup() {
+    const target = this.syncTarget({ quiet: true });
+    if (!target) return;
+    try {
+      const report = syncChats({ ...target, sessionsDir: SESSION_DIR });
+      const line = describeSync(report);
+      if (line) console.log(`${CHROME_COLOR}🔄 ${line}${ANSI.reset}`);
+      for (const split of report.splits) console.log(`${CHROME_COLOR}   '${split.chat}' continued on two devices; the other line is now '${split.copy}'.${ANSI.reset}`);
+      for (const error of report.errors) console.log(`${CHROME_COLOR}⚠️  Sync: ${error}${ANSI.reset}`);
+    } catch (error) {
+      console.log(`${CHROME_COLOR}⚠️  Sync failed: ${error.message}${ANSI.reset}`);
+    }
+  }
+
+  // After a save: send the chat's new commits, quietly.
+  pushToSync() {
+    const target = this.syncTarget({ quiet: true });
+    if (!target || !this.sessionName || !existsSync(sessionPath(this.sessionName))) return;
+    try {
+      pushChat({ ...target, file: sessionPath(this.sessionName) });
+    } catch (error) {
+      console.log(`${CHROME_COLOR}⚠️  Sync failed: ${error.message}${ANSI.reset}`);
+    }
+  }
+
+  async sync(arg) {
+    const [sub, ...rest] = arg.split(/\s+/).filter(Boolean);
+    switch ((sub ?? '').toLowerCase()) {
+      case '':
+        return this.runSync();
+      case 'setup':
+        return this.syncSetup(arg.replace(/^\S+\s*/, '').replace(/^(['"])(.*)\1$/, '$2'));
+      case 'status': {
+        const folder = syncFolder();
+        console.log(`\nSync folder: ${folder ?? 'off'}`);
+        if (folder) {
+          console.log(`This device's key: ${loadVaultKey() ? (keyMatches(folder, loadVaultKey()) ? 'matches the folder' : 'does not match the folder') : 'missing'}`);
+          console.log(`Vault: ${readVaultInfo(folder)?.vault ?? 'not set up in that folder'}`);
+        }
+        console.log('');
+        return undefined;
+      }
+      case 'key': {
+        const key = loadVaultKey();
+        if (!key) {
+          console.log('\nThis device has no sync key yet. /sync setup <folder> makes one.\n');
+          return undefined;
+        }
+        console.log(`\nRecovery key (anyone with this can read your synced chats):\n\n  ${encodeRecoveryKey(key)}\n`);
+        return undefined;
+      }
+      case 'off':
+        clearSyncFolder();
+        console.log('\nSync is off on this device. Its chats and key are untouched; the folder keeps what was synced.\n');
+        return undefined;
+      default:
+        console.log(`\nUnknown /sync option '${sub}${rest.length ? ' …' : ''}'. Use /sync, /sync setup <folder>, /sync status, /sync key, or /sync off.\n`);
+        return undefined;
+    }
+  }
+
+  // /sync: save the open chat, sync every chat, and bring the open one up to date.
+  async runSync() {
+    const target = this.syncTarget();
+    if (!target) return;
+    try {
+      if (this.autosave && this.sessionName) await this.autosaveSession({ push: false });
+      const before = this.sessionName && existsSync(sessionPath(this.sessionName)) ? await sessionStamp(this.sessionName) : null;
+      const report = syncChats({ ...target, sessionsDir: SESSION_DIR });
+      const line = describeSync(report);
+      console.log(`\n${line ? `🔄 ${line}` : '🔄 Already in sync.'}`);
+      for (const split of report.splits) console.log(`   '${split.chat}' continued on two devices; the other line is now '${split.copy}'.`);
+      for (const error of report.errors) console.log(`⚠️  ${error}`);
+      const after = this.sessionName && existsSync(sessionPath(this.sessionName)) ? await sessionStamp(this.sessionName) : null;
+      if (before && !after) {
+        console.log(`   '${this.sessionName}' was deleted on another device. This conversation is kept here, unsaved.`);
+        this.sessionName = null;
+      } else if (before && after && before !== after) await this.refreshFromSync(report);
+      console.log('');
+    } catch (error) {
+      console.log(`\n❌ Sync failed: ${error.message}\n`);
+    }
+  }
+
+  // The open chat changed in the folder: show the new state of it, and say
+  // where our own last messages went if the chat split.
+  async refreshFromSync(report) {
+    const name = this.sessionName;
+    const ours = this.conversation().at(-1)?.id ?? null;
+    const session = await readLocalSession(name);
+    if (!session) return;
+    this.applySessionState(name, session);
+    const split = report.splits.find((s) => s.chat === name);
+    if (split && ours && !session.messages.some((m) => m.id === ours)) {
+      console.log(`   Your latest messages are in '${split.copy}'; '${name}' now shows the other device's.`);
+    } else {
+      console.log(`   '${name}' now has the changes from your other device (${session.messages.length} messages).`);
+    }
+  }
+
+  // /sync setup <folder>: the first device makes a key and writes it down
+  // for you; later devices ask for it.
+  async syncSetup(arg) {
+    if (!arg) {
+      console.log('\nUsage: /sync setup <folder>   (a folder inside iCloud Drive, Dropbox, or similar, on every device)\n');
+      return;
+    }
+    const folder = path.resolve(arg.replace(/^~(?=\/|$)/, os.homedir()));
+    try {
+      await fs.mkdir(folder, { recursive: true });
+      let key = loadVaultKey();
+      let created = false;
+      if (readVaultInfo(folder)) {
+        if (!key || !keyMatches(folder, key)) {
+          console.log(`\n${folder} already holds synced chats. Enter the recovery key from your other device (/sync key shows it there):`);
+          try {
+            key = decodeRecoveryKey((await this.readTurnInput()) || '');
+          } catch (error) {
+            console.log(`\n❌ ${error.message}\n`);
+            return;
+          }
+          if (!keyMatches(folder, key)) {
+            console.log("\n❌ That key doesn't open the chats in that folder.\n");
+            return;
+          }
+          console.log(`\nKey kept in ${saveVaultKey(key)}.`);
+        }
+      } else {
+        if (!key) {
+          key = generateVaultKey();
+          created = true;
+          console.log(`\nMade a key for your chats, kept in ${saveVaultKey(key)}.`);
+        }
+        initVault(folder, key);
+      }
+      setSyncFolder(folder);
+      console.log(`✅ Syncing through ${folder}.`);
+      if (created) {
+        console.log(`\nWrite down this recovery key and keep it somewhere safe. You need it to add another device, and without it (or this device) synced chats can't be read:\n\n  ${encodeRecoveryKey(key)}\n`);
+      }
+      await this.runSync();
+    } catch (error) {
+      console.log(`\n❌ Couldn't set up sync: ${error.message}\n`);
+    }
   }
 
   // Writes the conversation to a file: a .md transcript, or a .Modelfile
@@ -1890,6 +2071,9 @@ export class OllamaChat {
       case '/delete':
         await this.deleteSession(rest.join(' '));
         return true;
+      case '/sync':
+        await this.sync(trimmed.slice(rawCmd.length).trim());
+        return true;
       case '/export':
         await this.exportChat(trimmed.slice(rawCmd.length).trim());
         return true;
@@ -2252,6 +2436,7 @@ export class OllamaChat {
 
   async start() {
     if (this.debug) await enableDebugLog();
+    this.syncAtStartup();
     await this.prepareStartupSession();
     await this.resolveDefaultModel();
     await this.startMcp(); // before the welcome box, which reports on it

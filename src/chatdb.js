@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { rmSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { deviceInfo } from './device.js';
+import { purgeHistory } from './history.js';
 
 // A saved chat is one SQLite file (.skinny): an append-only log of commits.
 // Messages and state changes are immutable rows, each belonging to a commit;
@@ -119,8 +120,7 @@ function heads(db) {
 }
 
 // Adds a commit that follows every current head, returning its id.
-function addCommit(db, { messages = [], state = [], redactions = [] }) {
-  const device = deviceInfo();
+function addCommit(db, { messages = [], state = [], redactions = [] }, device = deviceInfo()) {
   const tips = heads(db);
   const lamport = tips.reduce((max, c) => Math.max(max, c.lamport), 0) + 1;
   const createdAt = new Date().toISOString();
@@ -263,10 +263,12 @@ function currentState(db) {
 }
 
 function sessionState(session) {
+  const named = session.name ? [['name', session.name]] : [];
   const settings = Object.fromEntries(Object.entries(session.settings ?? {})
     .filter(([, value]) => value !== undefined && value !== '')
     .map(([name, value]) => [name, String(value).replace(/\s+/g, ' ')]));
   return [
+    ...named,
     ['system', session.system ?? ''],
     ['model', session.from ?? ''],
     ['options', JSON.stringify(session.parameters ?? {})],
@@ -280,7 +282,7 @@ function sessionState(session) {
 // ids. `after` is the id of the last message the file already has from this
 // conversation (null for none; the file must then have no messages): only the
 // messages after it are added. `replace` first deletes any existing file.
-export function writeChat(file, session, { after = null, replace = false } = {}) {
+export function writeChat(file, session, { after = null, replace = false, device = deviceInfo() } = {}) {
   if (replace) for (const path of [file, `${file}-journal`]) rmSync(path, { force: true });
   const db = open(file, { create: true });
   try {
@@ -296,7 +298,7 @@ export function writeChat(file, session, { after = null, replace = false } = {})
       const state = sessionState(session).filter(([key, value]) => stored.get(key) !== value);
       let commit = null;
       if (fresh.length || state.length || !getMeta(db, 'chat_id')) {
-        commit = addCommit(db, { messages: fresh.map((m) => m.id), state });
+        commit = addCommit(db, { messages: fresh.map((m) => m.id), state }, device);
         let parent = after;
         for (const message of fresh) {
           insertMessage(db, message, { commit, parent });
@@ -370,6 +372,7 @@ export function readChat(file) {
     const options = JSON.parse(state.get('options') ?? '{}');
     const parameters = Object.entries(options).flatMap(([name, value]) => (Array.isArray(value) ? value : [value]).map((v) => [name, String(v)]));
     return {
+      name: state.get('name') ?? null,
       from: state.get('model') ?? '',
       system: state.get('system') ?? '',
       parameters,
@@ -382,32 +385,70 @@ export function readChat(file) {
   });
 }
 
+// Makes the file's main line match `newLine`: rows for messages not in it
+// are deleted and the others rewritten (text, parts, parent). With
+// `onlyChanged`, a message that is the very object read from the file, with
+// the same parent, is left alone.
+function rewriteLine(db, oldLine, newLine, { onlyChanged = false } = {}) {
+  const keep = new Set(newLine.map((m) => m.id));
+  const before = new Map(oldLine.map((m) => [m.id, m]));
+  for (const old of oldLine) if (!keep.has(old.id)) db.prepare('DELETE FROM messages WHERE uid = ?').run(old.id);
+  let parent = null;
+  for (const message of newLine) {
+    const same = onlyChanged && before.get(message.id) === message && message.link.parent === parent;
+    if (!same) {
+      const row = db.prepare('SELECT id FROM messages WHERE uid = ?').get(message.id);
+      if (!row) throw new Error('the conversation has a message this chat file does not');
+      db.prepare('UPDATE messages SET content = ?, parent_uid = ? WHERE id = ?').run(contentOf(message), parent, row.id);
+      if (!(onlyChanged && before.get(message.id) === message)) {
+        db.prepare('DELETE FROM parts WHERE message_id = ?').run(row.id);
+        insertParts(db, row.id, message);
+      }
+    }
+    parent = message.id;
+  }
+  dropUnusedBlobs(db);
+}
+
 // /purge: `messages` is the conversation after the purge (same ids, minus
 // what was dropped). The file's rows for those messages are rewritten to
-// match, the dropped ones are deleted, and a commit records the operation.
-export function redactChat(file, kind, messages) {
+// match, and a commit records the operation.
+export function redactChat(file, kind, messages, { device = deviceInfo() } = {}) {
   const db = open(file);
   try {
     inTransaction(db, () => {
-      const { line } = mainLine(db, readMessages(db));
-      const keep = new Set(messages.map((m) => m.id));
-      for (const old of line) if (!keep.has(old.id)) db.prepare('DELETE FROM messages WHERE uid = ?').run(old.id);
-      let parent = null;
-      for (const message of messages) {
-        const row = db.prepare('SELECT id FROM messages WHERE uid = ?').get(message.id);
-        if (!row) throw new Error('the conversation has a message this chat file does not');
-        db.prepare('UPDATE messages SET content = ?, parent_uid = ? WHERE id = ?').run(contentOf(message), parent, row.id);
-        db.prepare('DELETE FROM parts WHERE message_id = ?').run(row.id);
-        insertParts(db, row.id, message);
-        parent = message.id;
-      }
-      dropUnusedBlobs(db);
-      addCommit(db, { redactions: [kind] });
+      rewriteLine(db, mainLine(db, readMessages(db)).line, messages);
+      addCommit(db, { redactions: [kind] }, device);
     });
     db.exec('VACUUM');
   } finally {
     db.close();
   }
+}
+
+// Repeats a purge made elsewhere: it applies to the messages that were in
+// the chat when the purge was made (the commit's ancestors), not to ones
+// added since.
+function applyRedaction(db, kind, commitId) {
+  const parents = new Map(db.prepare('SELECT id, parents FROM commits').all().map((c) => [c.id, JSON.parse(c.parents)]));
+  const before = new Set();
+  const pending = [commitId];
+  while (pending.length) {
+    const id = pending.pop();
+    if (before.has(id) || !parents.has(id)) continue;
+    before.add(id);
+    pending.push(...parents.get(id));
+  }
+  const { line } = mainLine(db, readMessages(db));
+  const subset = line.filter((m) => before.has(m.link.commit));
+  if (!subset.length) return;
+  const purged = new Map(purgeHistory(subset, kind).history.map((m) => [m.id, m]));
+  const newLine = [];
+  for (const m of line) {
+    if (!before.has(m.link.commit)) newLine.push(m);
+    else if (purged.has(m.id)) newLine.push(purged.get(m.id));
+  }
+  rewriteLine(db, line, newLine, { onlyChanged: true });
 }
 
 // Checks the log's structure: every commit's parents exist and come
@@ -432,4 +473,189 @@ export function verifyChat(file) {
     }
     return problems;
   });
+}
+
+// --- Syncing: chats as commits that can be exported, and applied elsewhere ---
+
+export function chatIdOf(file) {
+  return withDb(file, (db) => getMeta(db, 'chat_id') ?? null);
+}
+
+export function commitIds(file) {
+  return withDb(file, (db) => db.prepare('SELECT id FROM commits ORDER BY lamport, created_at, id').all().map((c) => c.id));
+}
+
+// A commit as a plain object, for sealing: its messages and parts as they
+// stand now (after any purge), with each attachment named by `nameBlob(sha256)`.
+// Returns { payload, blobs: [{ name, mime, bytes }] }.
+export function exportCommit(file, id, nameBlob) {
+  return withDb(file, (db) => {
+    const commit = db.prepare('SELECT * FROM commits WHERE id = ?').get(id);
+    if (!commit) throw new Error(`no commit ${id}`);
+    const blobs = new Map();
+    const messages = db.prepare('SELECT id, uid, parent_uid, role, content, api, model, meta, created_at FROM messages WHERE commit_id = ? ORDER BY id').all(id).map((row) => ({
+      uid: row.uid,
+      parent_uid: row.parent_uid,
+      role: row.role,
+      content: row.content,
+      api: row.api,
+      model: row.model,
+      meta: row.meta ? JSON.parse(row.meta) : null,
+      created_at: row.created_at,
+      parts: db.prepare('SELECT p.kind, p.text, p.json, b.sha256, b.mime, b.bytes FROM parts p LEFT JOIN blobs b ON b.id = p.blob_id WHERE p.message_id = ? ORDER BY p.idx').all(row.id).map((p) => {
+        let blob = null;
+        if (p.sha256) {
+          blob = { name: nameBlob(p.sha256), mime: p.mime };
+          blobs.set(blob.name, { ...blob, bytes: Buffer.from(p.bytes) });
+        }
+        return { kind: p.kind, text: p.text, json: p.json, blob };
+      })
+    }));
+    return {
+      payload: {
+        v: 1,
+        id: commit.id,
+        chat_id: getMeta(db, 'chat_id'),
+        chat_created_at: getMeta(db, 'created_at'),
+        device: { id: commit.device_id, name: commit.device_name },
+        lamport: commit.lamport,
+        parents: JSON.parse(commit.parents),
+        created_at: commit.created_at,
+        state: db.prepare('SELECT key, value FROM state_log WHERE commit_id = ? ORDER BY id').all(id).map((s) => [s.key, s.value]),
+        messages,
+        redactions: db.prepare('SELECT kind FROM redactions WHERE commit_id = ? ORDER BY id').all(id).map((r) => r.kind)
+      },
+      blobs: [...blobs.values()]
+    };
+  });
+}
+
+// Starts an empty chat file that is the chat `chatId` (for commits to be
+// imported into).
+export function createChat(file, chatId, createdAt) {
+  const db = open(file, { create: true });
+  try {
+    inTransaction(db, () => {
+      setMeta(db, 'chat_id', chatId);
+      setMeta(db, 'created_at', createdAt ?? new Date().toISOString());
+    });
+  } finally {
+    db.close();
+  }
+}
+
+// Applies a commit made elsewhere. `getBlob(ref)` returns an attachment's
+// bytes, or null if they haven't arrived. Returns 'applied', 'present' (it's
+// already here), or 'waiting' (a commit it follows, or an attachment, is
+// missing; try again after more has arrived).
+export function importCommit(file, payload, getBlob) {
+  const db = open(file);
+  try {
+    return inTransaction(db, () => {
+      if (db.prepare('SELECT 1 FROM commits WHERE id = ?').get(payload.id)) return 'present';
+      for (const parent of payload.parents) if (!db.prepare('SELECT 1 FROM commits WHERE id = ?').get(parent)) return 'waiting';
+      const bytes = new Map();
+      for (const message of payload.messages) {
+        for (const part of message.parts) {
+          if (!part.blob || bytes.has(part.blob.name)) continue;
+          const found = getBlob(part.blob);
+          if (!found) return 'waiting';
+          bytes.set(part.blob.name, found);
+        }
+      }
+      db.prepare('INSERT INTO commits (id, device_id, device_name, lamport, parents, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(payload.id, payload.device.id, payload.device.name, payload.lamport, JSON.stringify(payload.parents), payload.created_at);
+      for (const [key, value] of payload.state) db.prepare('INSERT INTO state_log (commit_id, key, value) VALUES (?, ?, ?)').run(payload.id, key, value);
+      for (const message of payload.messages) {
+        if (db.prepare('SELECT 1 FROM messages WHERE uid = ?').get(message.uid)) continue;
+        const rowId = Number(db.prepare('INSERT INTO messages (uid, parent_uid, commit_id, role, content, api, model, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(message.uid, message.parent_uid, payload.id, message.role, message.content, message.api, message.model, message.meta ? JSON.stringify(message.meta) : null, message.created_at).lastInsertRowid);
+        message.parts.forEach((part, idx) => {
+          let blob = null;
+          if (part.blob) {
+            const data = bytes.get(part.blob.name);
+            const sha = createHash('sha256').update(data).digest('hex');
+            blob = db.prepare('SELECT id FROM blobs WHERE sha256 = ?').get(sha)?.id
+              ?? Number(db.prepare('INSERT INTO blobs (sha256, mime, bytes) VALUES (?, ?, ?)').run(sha, part.blob.mime, data).lastInsertRowid);
+          }
+          db.prepare('INSERT INTO parts (message_id, idx, kind, text, json, blob_id) VALUES (?, ?, ?, ?, ?, ?)').run(rowId, idx, part.kind, part.text, part.json, blob);
+        });
+      }
+      for (const kind of payload.redactions) {
+        db.prepare('INSERT INTO redactions (commit_id, kind) VALUES (?, ?)').run(payload.id, kind);
+        applyRedaction(db, kind, payload.id);
+      }
+      setMeta(db, 'updated_at', new Date().toISOString());
+      return 'applied';
+    });
+  } finally {
+    db.close();
+  }
+}
+
+// The lines of conversation that lost out to the one readChat shows (two
+// writers added to the same message), not yet split off. Each has its
+// tip's id, the device that wrote it, and the messages from the root.
+export function losingLines(file) {
+  return withDb(file, (db) => {
+    const all = readMessages(db);
+    if (!all.length) return { name: null, state: [], lines: [] };
+    const commits = new Map(db.prepare('SELECT id, lamport, device_id, device_name, created_at FROM commits').all().map((c) => [c.id, c]));
+    const byUid = new Map(all.map((m) => [m.id, m]));
+    const parents = new Set(all.map((m) => m.link.parent).filter(Boolean));
+    const rank = (m) => commits.get(m.link.commit) ?? { lamport: 0, device_id: '' };
+    const tips = all.filter((m) => !parents.has(m.id)).sort((a, b) => rank(b).lamport - rank(a).lamport || (rank(b).device_id > rank(a).device_id ? 1 : -1) || (b.id > a.id ? 1 : -1));
+    const handled = new Set(JSON.parse(getMeta(db, 'split_tips') ?? '[]'));
+    const state = currentState(db);
+    return {
+      name: state.get('name') ?? null,
+      state: [...state],
+      lines: tips.slice(1).filter((tip) => !handled.has(tip.id)).map((tip) => {
+        const line = [];
+        for (let m = tip; m; m = byUid.get(m.link.parent)) line.unshift(m);
+        const commit = commits.get(tip.link.commit);
+        return { tip: tip.id, deviceName: commit?.device_name ?? 'another device', createdAt: commit?.created_at ?? new Date(0).toISOString(), line };
+      })
+    };
+  });
+}
+
+export function markSplit(file, tipUid) {
+  const db = open(file);
+  try {
+    inTransaction(db, () => setMeta(db, 'split_tips', JSON.stringify([...new Set([...JSON.parse(getMeta(db, 'split_tips') ?? '[]'), tipUid])])));
+  } finally {
+    db.close();
+  }
+}
+
+// The chat id and commit id a split-off line always gets, so every device
+// that splits the same fork makes the same chat with the same commit, and
+// syncing them together adds nothing twice.
+export function splitIds(chatId, tipUid) {
+  const hash = createHash('sha256').update(`split\0${chatId}\0${tipUid}`).digest('hex');
+  return { chatId: `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`, commitId: hash };
+}
+
+// Writes a new chat file holding one line of conversation as a single commit,
+// from fixed values (see splitIds) so it comes out the same everywhere.
+export function writeSplitChat(file, { chatId, commitId, createdAt, state, line }) {
+  const db = open(file, { create: true });
+  try {
+    inTransaction(db, () => {
+      setMeta(db, 'chat_id', chatId);
+      setMeta(db, 'created_at', createdAt);
+      db.prepare('INSERT INTO commits (id, device_id, device_name, lamport, parents, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(commitId, 'split', 'split', 1, '[]', createdAt);
+      for (const [key, value] of state) db.prepare('INSERT INTO state_log (commit_id, key, value) VALUES (?, ?, ?)').run(commitId, key, value);
+      let parent = null;
+      for (const message of line) {
+        const rowId = Number(db.prepare('INSERT INTO messages (uid, parent_uid, commit_id, role, content, api, model, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(message.id, parent, commitId, message.role, contentOf(message), message.origin?.api ?? null, message.origin?.model ?? null, messageMeta(message), createdAt).lastInsertRowid);
+        insertParts(db, rowId, message);
+        parent = message.id;
+      }
+    });
+  } finally {
+    db.close();
+  }
 }
