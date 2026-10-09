@@ -113,6 +113,18 @@ function commitId({ deviceId, lamport, parents, createdAt, messages, state, reda
   return createHash('sha256').update(canonical).digest('hex');
 }
 
+const insertCommitRow = (db, { id, deviceId, deviceName, lamport, parents, createdAt }) =>
+  db.prepare('INSERT INTO commits (id, device_id, device_name, lamport, parents, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(id, deviceId, deviceName, lamport, JSON.stringify(parents), createdAt);
+
+const insertStateRows = (db, commit, state) => {
+  for (const [key, value] of state) db.prepare('INSERT INTO state_log (commit_id, key, value) VALUES (?, ?, ?)').run(commit, key, value);
+};
+
+const insertMessageRow = (db, { uid, parent, commit, role, content, api, model, meta, createdAt }) =>
+  Number(db.prepare('INSERT INTO messages (uid, parent_uid, commit_id, role, content, api, model, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(uid, parent, commit, role, content, api, model, meta, createdAt).lastInsertRowid);
+
 function heads(db) {
   const commits = db.prepare('SELECT id, lamport, parents FROM commits').all();
   const followed = new Set(commits.flatMap((c) => JSON.parse(c.parents)));
@@ -126,9 +138,8 @@ function addCommit(db, { messages = [], state = [], redactions = [] }, device = 
   const createdAt = new Date().toISOString();
   const parents = tips.map((c) => c.id);
   const id = commitId({ deviceId: device.id, lamport, parents, createdAt, messages, state, redactions });
-  db.prepare('INSERT INTO commits (id, device_id, device_name, lamport, parents, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(id, device.id, device.name, lamport, JSON.stringify(parents), createdAt);
-  for (const [key, value] of state) db.prepare('INSERT INTO state_log (commit_id, key, value) VALUES (?, ?, ?)').run(id, key, value);
+  insertCommitRow(db, { id, deviceId: device.id, deviceName: device.name, lamport, parents, createdAt });
+  insertStateRows(db, id, state);
   for (const kind of redactions) db.prepare('INSERT INTO redactions (commit_id, kind) VALUES (?, ?)').run(id, kind);
   setMeta(db, 'updated_at', createdAt);
   return id;
@@ -157,9 +168,8 @@ function migrateV1(db) {
     const device = deviceInfo();
     const createdAt = getMeta(db, 'created_at') ?? new Date().toISOString();
     const id = commitId({ deviceId: device.id, lamport: 1, parents: [], createdAt, messages: uids.map(([, uid]) => uid), state, redactions: [] });
-    db.prepare('INSERT INTO commits (id, device_id, device_name, lamport, parents, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(id, device.id, device.name, 1, '[]', createdAt);
-    for (const [key, value] of state) db.prepare('INSERT INTO state_log (commit_id, key, value) VALUES (?, ?, ?)').run(id, key, value);
+    insertCommitRow(db, { id, deviceId: device.id, deviceName: device.name, lamport: 1, parents: [], createdAt });
+    insertStateRows(db, id, state);
     db.prepare('UPDATE messages SET commit_id = ?').run(id);
     db.exec('PRAGMA user_version = 2');
   });
@@ -246,8 +256,7 @@ const messageMeta = (message) => {
 const contentOf = (message) => (typeof message.content === 'string' ? message.content : JSON.stringify(message.content ?? ''));
 
 function insertMessage(db, message, { commit, parent }) {
-  const rowId = Number(db.prepare('INSERT INTO messages (uid, parent_uid, commit_id, role, content, api, model, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(message.id, parent, commit, message.role, contentOf(message), message.origin?.api ?? null, message.origin?.model ?? null, messageMeta(message), new Date().toISOString()).lastInsertRowid);
+  const rowId = insertMessageRow(db, { uid: message.id, parent, commit, role: message.role, content: contentOf(message), api: message.origin?.api ?? null, model: message.origin?.model ?? null, meta: messageMeta(message), createdAt: new Date().toISOString() });
   insertParts(db, rowId, message);
 }
 
@@ -318,9 +327,13 @@ export function writeChat(file, session, { after = null, replace = false, device
   }
 }
 
-function readMessages(db) {
+// The messages of a file. `attachments: false` leaves the bytes of images and
+// PDFs out (their messages still say which parts they had), for callers that
+// only look at how the messages are linked: reading every picture of a chat to
+// find out whether it forked would be most of the work of a sync.
+function readMessages(db, { attachments = true } = {}) {
   const parts = new Map();
-  for (const row of db.prepare('SELECT p.message_id, p.kind, p.text, p.json, b.mime, b.bytes FROM parts p LEFT JOIN blobs b ON b.id = p.blob_id ORDER BY p.message_id, p.idx').all()) {
+  for (const row of db.prepare(`SELECT p.message_id, p.kind, p.text, p.json, b.mime, ${attachments ? 'b.bytes' : 'NULL AS bytes'} FROM parts p LEFT JOIN blobs b ON b.id = p.blob_id ORDER BY p.message_id, p.idx`).all()) {
     if (!parts.has(row.message_id)) parts.set(row.message_id, []);
     parts.get(row.message_id).push(row);
   }
@@ -330,7 +343,7 @@ function readMessages(db) {
     Object.assign(message, row.meta ? JSON.parse(row.meta) : {});
     const own = parts.get(row.id) ?? [];
     const of = (kind) => own.filter((p) => p.kind === kind);
-    const base64 = (p) => ({ mime: p.mime, data: Buffer.from(p.bytes).toString('base64') });
+    const base64 = (p) => ({ mime: p.mime, data: p.bytes ? Buffer.from(p.bytes).toString('base64') : '' });
     if (of('thinking').length) message.thinkingBlocks = of('thinking').map((p) => JSON.parse(p.json));
     if (of('tool_call').length) {
       message.tool_calls = of('tool_call').map((p) => {
@@ -354,15 +367,22 @@ function readMessages(db) {
 // is latest by (lamport, device). Also says how many other tips there are.
 function mainLine(db, all) {
   if (!all.length) return { line: [], forks: 0 };
-  const commits = new Map(db.prepare('SELECT id, lamport, device_id FROM commits').all().map((c) => [c.id, c]));
-  const byUid = new Map(all.map((m) => [m.id, m]));
-  const parents = new Set(all.map((m) => m.link.parent).filter(Boolean));
-  const tips = all.filter((m) => !parents.has(m.id));
-  const rank = (m) => commits.get(m.link.commit) ?? { lamport: 0, device_id: '' };
-  tips.sort((a, b) => rank(b).lamport - rank(a).lamport || (rank(b).device_id > rank(a).device_id ? 1 : -1) || (b.id > a.id ? 1 : -1));
+  const { tips, byUid } = orderedTips(db, all);
   const line = [];
   for (let m = tips[0]; m; m = byUid.get(m.link.parent)) line.unshift(m);
   return { line, forks: tips.length - 1 };
+}
+
+// The messages nothing follows, the one shown first: the latest by (lamport,
+// device), then by id. Also the messages by uid, and the commits with their device.
+function orderedTips(db, all) {
+  const commits = new Map(db.prepare('SELECT id, lamport, device_id, device_name, created_at FROM commits').all().map((c) => [c.id, c]));
+  const byUid = new Map(all.map((m) => [m.id, m]));
+  const parents = new Set(all.map((m) => m.link.parent).filter(Boolean));
+  const rank = (m) => commits.get(m.link.commit) ?? { lamport: 0, device_id: '' };
+  const tips = all.filter((m) => !parents.has(m.id))
+    .sort((a, b) => rank(b).lamport - rank(a).lamport || (rank(b).device_id > rank(a).device_id ? 1 : -1) || (b.id > a.id ? 1 : -1));
+  return { tips, byUid, commits };
 }
 
 // Reads a chat file back into { from, system, parameters: [[name, value]],
@@ -573,7 +593,22 @@ export function createChat(file, chatId, createdAt, project = null) {
 // bytes, or null if they haven't arrived. Returns 'applied', 'present' (it's
 // already here), or 'waiting' (a commit it follows, or an attachment, is
 // missing; try again after more has arrived).
+// A commit that opened is authentic (it was sealed with the project key) but
+// may still come from a device running other code; check its shape before
+// it touches the file.
+function checkPayload(p) {
+  const text = (v) => typeof v === 'string';
+  const pair = (v) => Array.isArray(v) && v.length === 2 && text(v[0]) && text(v[1]);
+  const ok = p && text(p.id) && Number.isInteger(p.lamport) && text(p.created_at) && p.device && text(p.device.id)
+    && Array.isArray(p.parents) && p.parents.every(text) && Array.isArray(p.state) && p.state.every(pair)
+    && Array.isArray(p.redactions) && p.redactions.every(text)
+    && Array.isArray(p.messages) && p.messages.every((m) => m && text(m.uid) && text(m.role) && text(m.content) && Array.isArray(m.parts)
+      && m.parts.every((part) => part && text(part.kind) && (!part.blob || (text(part.blob.name) && text(part.blob.mime)))));
+  if (!ok) throw new Error('malformed commit');
+}
+
 export function importCommit(file, payload, getBlob) {
+  checkPayload(payload);
   const db = open(file);
   try {
     return inTransaction(db, () => {
@@ -588,13 +623,11 @@ export function importCommit(file, payload, getBlob) {
           bytes.set(part.blob.name, found);
         }
       }
-      db.prepare('INSERT INTO commits (id, device_id, device_name, lamport, parents, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(payload.id, payload.device.id, payload.device.name, payload.lamport, JSON.stringify(payload.parents), payload.created_at);
-      for (const [key, value] of payload.state) db.prepare('INSERT INTO state_log (commit_id, key, value) VALUES (?, ?, ?)').run(payload.id, key, value);
+      insertCommitRow(db, { id: payload.id, deviceId: payload.device.id, deviceName: payload.device.name, lamport: payload.lamport, parents: payload.parents, createdAt: payload.created_at });
+      insertStateRows(db, payload.id, payload.state);
       for (const message of payload.messages) {
         if (db.prepare('SELECT 1 FROM messages WHERE uid = ?').get(message.uid)) continue;
-        const rowId = Number(db.prepare('INSERT INTO messages (uid, parent_uid, commit_id, role, content, api, model, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-          .run(message.uid, message.parent_uid, payload.id, message.role, message.content, message.api, message.model, message.meta ? JSON.stringify(message.meta) : null, message.created_at).lastInsertRowid);
+        const rowId = insertMessageRow(db, { uid: message.uid, parent: message.parent_uid, commit: payload.id, role: message.role, content: message.content, api: message.api, model: message.model, meta: message.meta ? JSON.stringify(message.meta) : null, createdAt: message.created_at });
         message.parts.forEach((part, idx) => {
           let blob = null;
           if (part.blob) {
@@ -623,25 +656,23 @@ export function importCommit(file, payload, getBlob) {
 // tip's id, the device that wrote it, and the messages from the root.
 export function losingLines(file) {
   return withDb(file, (db) => {
-    const all = readMessages(db);
-    if (!all.length) return { name: null, state: [], lines: [] };
-    const commits = new Map(db.prepare('SELECT id, lamport, device_id, device_name, created_at FROM commits').all().map((c) => [c.id, c]));
-    const byUid = new Map(all.map((m) => [m.id, m]));
-    const parents = new Set(all.map((m) => m.link.parent).filter(Boolean));
-    const rank = (m) => commits.get(m.link.commit) ?? { lamport: 0, device_id: '' };
-    const tips = all.filter((m) => !parents.has(m.id)).sort((a, b) => rank(b).lamport - rank(a).lamport || (rank(b).device_id > rank(a).device_id ? 1 : -1) || (b.id > a.id ? 1 : -1));
+    const light = readMessages(db, { attachments: false });
+    if (!light.length) return { name: null, state: [], lines: [] };
     const handled = new Set(JSON.parse(getMeta(db, 'split_tips') ?? '[]'));
     const state = currentState(db);
-    return {
-      name: state.get('name') ?? null,
-      state: [...state],
-      lines: tips.slice(1).filter((tip) => !handled.has(tip.id)).map((tip) => {
-        const line = [];
-        for (let m = tip; m; m = byUid.get(m.link.parent)) line.unshift(m);
-        const commit = commits.get(tip.link.commit);
-        return { tip: tip.id, deviceName: commit?.device_name ?? 'another device', createdAt: commit?.created_at ?? new Date(0).toISOString(), line };
-      })
-    };
+    const losing = orderedTips(db, light).tips.slice(1).filter((tip) => !handled.has(tip.id)).map((tip) => tip.id);
+    const result = { name: state.get('name') ?? null, state: [...state], lines: [] };
+    if (!losing.length) return result;
+    // Only a fork that is really there needs the pictures.
+    const { byUid, commits } = orderedTips(db, readMessages(db));
+    result.lines = losing.map((tipUid) => {
+      const tip = byUid.get(tipUid);
+      const line = [];
+      for (let m = tip; m; m = byUid.get(m.link.parent)) line.unshift(m);
+      const commit = commits.get(tip.link.commit);
+      return { tip: tip.id, deviceName: commit?.device_name ?? 'another device', createdAt: commit?.created_at ?? new Date(0).toISOString(), line };
+    });
+    return result;
   });
 }
 
@@ -672,12 +703,11 @@ export function writeSplitChat(file, { chatId, commitId, createdAt, state, line,
       setMeta(db, 'chat_id', chatId);
       setMeta(db, 'created_at', createdAt);
       if (project) setMeta(db, 'project', project);
-      db.prepare('INSERT INTO commits (id, device_id, device_name, lamport, parents, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(commitId, device.id, device.name, 1, '[]', createdAt);
-      for (const [key, value] of state) db.prepare('INSERT INTO state_log (commit_id, key, value) VALUES (?, ?, ?)').run(commitId, key, value);
+      insertCommitRow(db, { id: commitId, deviceId: device.id, deviceName: device.name, lamport: 1, parents: [], createdAt });
+      insertStateRows(db, commitId, state);
       let parent = null;
       for (const message of line) {
-        const rowId = Number(db.prepare('INSERT INTO messages (uid, parent_uid, commit_id, role, content, api, model, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-          .run(message.id, parent, commitId, message.role, contentOf(message), message.origin?.api ?? null, message.origin?.model ?? null, messageMeta(message), createdAt).lastInsertRowid);
+        const rowId = insertMessageRow(db, { uid: message.id, parent, commit: commitId, role: message.role, content: contentOf(message), api: message.origin?.api ?? null, model: message.origin?.model ?? null, meta: messageMeta(message), createdAt });
         insertParts(db, rowId, message);
         parent = message.id;
       }

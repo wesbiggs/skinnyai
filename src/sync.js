@@ -4,6 +4,7 @@ import path from 'node:path';
 import { chatIdOf, chatProjectOf, chatState, commitIds, createChat, exportCommit, importCommit, losingLines, markSplit, readChat, setChatProject, splitIds, writeSplitChat } from './chatdb.js';
 import { deviceInfo } from './device.js';
 import { projectId } from './keys.js';
+import { SESSION_SUFFIX, sessionFileName } from './sessions.js';
 import { blobName, chatKeys, openBlob, openCommit, openProjectName, sealBlob, sealCommit, sealProjectName } from './seal.js';
 
 // Keeps the chats of a project in step across devices through a folder that
@@ -24,7 +25,7 @@ import { blobName, chatKeys, openBlob, openCommit, openProjectName, sealBlob, se
 // one project, and to read it you need that project's key.
 
 export const SYNC_DIR = 'skinnyai-sync';
-export const SESSION_SUFFIX = '.skinny';
+export { SESSION_SUFFIX, sessionFileName };
 
 const root = (folder) => path.join(folder, SYNC_DIR);
 const projectFile = (folder) => path.join(root(folder), 'project.json');
@@ -39,6 +40,14 @@ function writeOnce(file, data) {
   writeFileSync(temp, data);
   renameSync(temp, file);
   return true;
+}
+
+// Replaces a file (or makes it), the same way: beside it, then renamed.
+function replaceFile(file, data) {
+  mkdirSync(path.dirname(file), { recursive: true });
+  const temp = `${file}.tmp-${randomBytes(4).toString('hex')}`;
+  writeFileSync(temp, data);
+  renameSync(temp, file);
 }
 
 const names = (dir, suffix) => (existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(suffix)).map((f) => f.slice(0, -suffix.length)) : []);
@@ -85,7 +94,6 @@ export function suggestedName(folder, key) {
   }
 }
 
-export const sessionFileName = (name) => encodeURIComponent(name).replace(/%20/g, ' ') + SESSION_SUFFIX;
 export const nameFromFile = (file) => decodeURIComponent(path.basename(file).slice(0, -SESSION_SUFFIX.length));
 
 function uniqueFile(sessionsDir, name) {
@@ -163,7 +171,15 @@ function pull(folder, project, chatId, file, keys, sessionsDir, report) {
   while (pending.size && progress) {
     progress = false;
     for (const [id, payload] of [...pending].sort((a, b) => a[1].lamport - b[1].lamport)) {
-      if (importCommit(incoming, payload, getBlob) !== 'waiting') {
+      let result;
+      try {
+        result = importCommit(incoming, payload, getBlob);
+      } catch (error) {
+        report.errors.push(`commit ${id.slice(0, 8)} of ${chatId.slice(0, 8)}: ${error.message}`);
+        pending.delete(id);
+        continue;
+      }
+      if (result !== 'waiting') {
         pending.delete(id);
         applied++;
         progress = true;
@@ -177,7 +193,7 @@ function pull(folder, project, chatId, file, keys, sessionsDir, report) {
     rmSync(incoming, { force: true });
     return null;
   }
-  const named = readChat(incoming).name || `chat-${chatId.slice(0, 8)}`;
+  const named = new Map(chatState(incoming)).get('name') || `chat-${chatId.slice(0, 8)}`;
   const target = uniqueFile(sessionsDir, named);
   renameSync(incoming, target.file);
   report.newChats.push(target.name);
@@ -227,6 +243,41 @@ export function pushChat({ folder, key, file }) {
   const report = { pushed: 0 };
   push(folder, chatId, file, chatKeys(key, chatId), report);
   return report.pushed;
+}
+
+// After /purge, which rewrites messages in place: seals again every commit
+// already in the folder whose content has changed, and removes the attachments
+// only those commits used, so the folder doesn't keep what was purged. (Other
+// devices repeat the purge on their own copies.) Returns how many commits were
+// sealed again.
+export function resealChat({ folder, key, file }) {
+  if (!keyOpensProject(folder, key)) return 0;
+  const chatId = chatIdOf(file);
+  if (!chatId) return 0;
+  const keys = chatKeys(key, chatId);
+  const dir = chatDir(folder, chatId);
+  const current = new Set();
+  const dropped = new Set();
+  let changed = 0;
+  for (const id of commitIds(file)) {
+    const { payload, blobs } = exportCommit(file, id, (sha) => blobName(keys, sha));
+    for (const blob of blobs) current.add(blob.name);
+    const target = path.join(dir, 'commits', `${id}.c`);
+    if (!existsSync(target)) continue; // not sent yet; the next push sends it as it is now
+    let before = null;
+    try {
+      before = openCommit(keys, chatId, id, readFileSync(target));
+    } catch (error) {
+      // A file that doesn't open is replaced too.
+    }
+    if (before && JSON.stringify(before) === JSON.stringify(payload)) continue;
+    for (const message of before?.messages ?? []) for (const part of message.parts) if (part.blob) dropped.add(part.blob.name);
+    for (const blob of blobs) writeOnce(path.join(dir, 'blobs', `${blob.name}.b`), sealBlob(keys, chatId, blob.name, blob.bytes));
+    replaceFile(target, sealCommit(keys, chatId, id, payload));
+    changed++;
+  }
+  for (const name of dropped) if (!current.has(name)) rmSync(path.join(dir, 'blobs', `${name}.b`), { force: true });
+  return changed;
 }
 
 // Puts every chat that has no project yet into `project`.
@@ -287,6 +338,8 @@ export function syncProject({ project, key, sessionsDir, report = emptyReport() 
     try {
       if (existsSync(tombstone(folder, chatId))) {
         openCommit(keys, chatId, 'deleted', readFileSync(tombstone(folder, chatId)));
+        // Commits another device sent before it saw the deletion.
+        for (const leftover of ['commits', 'blobs']) rmSync(path.join(chatDir(folder, chatId), leftover), { recursive: true, force: true });
         if (file) {
           report.deleted.push({ name: nameFromFile(file), file });
           rmSync(file, { force: true });

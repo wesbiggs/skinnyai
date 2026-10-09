@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chatIdOf, chatProjectOf, commitIds, messageCount, newMessageId, readChat, redactChat, setChatProject as setProject, verifyChat, writeChat } from '../src/chatdb.js';
 import { chatKeys, openCommit, sealCommit } from '../src/seal.js';
-import { adoptUnassigned, copyChat, deleteSyncedChat, describeSync, initProject, keyOpensProject, nameFromFile, pushChat, readProject, sessionFileName, suggestedName, syncProject, syncProjects } from '../src/sync.js';
+import { adoptUnassigned, copyChat, deleteSyncedChat, describeSync, initProject, keyOpensProject, nameFromFile, pushChat, readProject, resealChat, sessionFileName, suggestedName, syncProject, syncProjects } from '../src/sync.js';
 import { decodeProjectKey, encodeProjectKey, generateProjectKey, projectId } from '../src/keys.js';
 import { purgeHistory } from '../src/history.js';
 
@@ -363,5 +363,53 @@ describe('projects', () => {
     expect(fs.readFileSync(path.join(marker, 'deleted')).includes('Work')).toBe(false);
     const gone = sync(b);
     expect(gone.deleted).toEqual([]); // b never had the home chat: nothing to delete there
+  });
+});
+
+describe('what the folder keeps after a purge or a delete', () => {
+  const chatFolder = (d, name) => path.join(folder, 'skinnyai-sync', 'chats', chatIdOf(fileOf(d, name)));
+
+  it('no longer holds a purged attachment, and a new device never receives it', () => {
+    const first = [m('user', 'see', { images: [png] }), m('assistant', 'ok')];
+    save(a, 'Pics', first);
+    sync(a);
+    expect(fs.readdirSync(path.join(chatFolder(a, 'Pics'), 'blobs'))).toHaveLength(1);
+    redactChat(fileOf(a, 'Pics'), 'blobs', purgeHistory(first, 'blobs').history, { device: laptop });
+    expect(resealChat({ folder, key, file: fileOf(a, 'Pics') })).toBe(1);
+    sync(a);
+    expect(fs.readdirSync(path.join(chatFolder(a, 'Pics'), 'blobs'))).toHaveLength(0);
+    sync(b);
+    const line = readChat(fileOf(b, 'Pics')).messages;
+    expect(line.map((x) => x.content)).toEqual(['see\n\n[1 attached image removed]', 'ok']);
+    expect(line[0].images).toBeUndefined();
+    expect(resealChat({ folder, key, file: fileOf(a, 'Pics') })).toBe(0); // nothing left to change
+  });
+
+  it('removes commits another device sent before it saw the deletion', () => {
+    save(a, 'Gone', [m('user', 'one'), m('assistant', 'two')]);
+    sync(a);
+    sync(b);
+    const dir = chatFolder(a, 'Gone');
+    deleteSyncedChat({ folder, key, chatId: chatIdOf(fileOf(a, 'Gone')) });
+    save(b, 'Gone', [...readChat(fileOf(b, 'Gone')).messages, m('user', 'late')], readChat(fileOf(b, 'Gone')).last);
+    pushChat({ folder, key, file: fileOf(b, 'Gone') });
+    expect(fs.existsSync(path.join(dir, 'commits'))).toBe(true);
+    const report = sync(b);
+    expect(report.deleted).toHaveLength(1);
+    expect(fs.existsSync(path.join(dir, 'commits'))).toBe(false);
+  });
+});
+
+describe('a commit with the wrong shape', () => {
+  it('is reported and skipped, and the rest of the chat still arrives', () => {
+    const first = [m('user', 'one'), m('assistant', 'two')];
+    save(a, 'Odd', first);
+    sync(a);
+    const chatId = chatIdOf(fileOf(a, 'Odd'));
+    const commits = path.join(folder, 'skinnyai-sync', 'chats', chatId, 'commits');
+    fs.writeFileSync(path.join(commits, 'bad.c'), sealCommit(chatKeys(key, chatId), chatId, 'bad', { id: 'bad', messages: 'nope' }));
+    const report = sync(b);
+    expect(report.errors.join('\n')).toContain('malformed commit');
+    expect(contents(fileOf(b, 'Odd'))).toEqual(['one', 'two']);
   });
 });

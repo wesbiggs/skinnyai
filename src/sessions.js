@@ -1,7 +1,6 @@
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import './config.js';
 import os from 'node:os';
 import { CONFIG, SKINNY_HOME } from './config.js';
 import { commitCount, messageCount, readChat, redactChat, stampOf, verifyChat, writeChat } from './chatdb.js';
@@ -46,9 +45,8 @@ function requireUnlocked() {
 
 // Names can hold anything a model name can (like 'me/chat:v2'), so they're
 // URL-encoded into safe filenames, except that spaces stay spaces.
-export function sessionPath(name) {
-  return path.join(SESSION_DIR, encodeURIComponent(name).replace(/%20/g, ' ') + SESSION_SUFFIX);
-}
+export const sessionFileName = (name) => encodeURIComponent(name).replace(/%20/g, ' ') + SESSION_SUFFIX;
+export const sessionPath = (name) => path.join(SESSION_DIR, sessionFileName(name));
 
 // The Modelfile an earlier version saved under this name, if there is one.
 // (Earlier versions also wrote spaces as %20; those files are still found.)
@@ -236,10 +234,16 @@ export async function listLocalSessions() {
   if (sessionsLocked()) return [];
   try {
     const files = await fs.readdir(SESSION_DIR);
-    const names = files
-      .filter((f) => f.endsWith(SESSION_SUFFIX) || f.endsWith(LEGACY_SUFFIX))
-      .map((f) => decodeURIComponent(f.slice(0, f.endsWith(SESSION_SUFFIX) ? -SESSION_SUFFIX.length : -LEGACY_SUFFIX.length)));
-    return [...new Set(names)].sort();
+    const names = new Set();
+    for (const f of files) {
+      if (!f.endsWith(SESSION_SUFFIX) && !f.endsWith(LEGACY_SUFFIX)) continue;
+      try {
+        names.add(decodeURIComponent(f.slice(0, f.endsWith(SESSION_SUFFIX) ? -SESSION_SUFFIX.length : -LEGACY_SUFFIX.length)));
+      } catch (error) {
+        // Not a name skinnyai wrote (a stray '%'): one such file mustn't hide the rest.
+      }
+    }
+    return [...names].sort();
   } catch (error) {
     return [];
   }

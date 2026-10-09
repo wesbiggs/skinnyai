@@ -61,7 +61,7 @@ Each device adds its changes to the chat as separate steps, so two devices can b
 
 ## Deleting
 
-`/delete` removes a chat from its project's folder and leaves a small encrypted marker, so your other devices delete their copies the next time they sync. `/purge` is repeated on other devices for the messages that existed when it was run. Renaming a chat is local to the device. Nothing can promise that no one kept a copy of data they already synced.
+`/delete` removes a chat from its project's folder and leaves a small encrypted marker, so your other devices delete their copies the next time they sync. `/purge` is repeated on other devices for the messages that existed when it was run, and the commits in the folder that held the purged content are sealed again without it (attachments only those commits used are removed). Renaming a chat is local to the device. Nothing can promise that no one kept a copy of data they already synced.
 
 ## What is protected
 
