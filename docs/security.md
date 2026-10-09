@@ -23,15 +23,15 @@ Chats in a project folder are sealed before they're written: each save is an AES
 - **Anyone with the project key and the folder** can read, change, and delete every chat in that project. There are no per-person identities; changes are attributed only to a device name. Give the key to people by some route other than the shared folder.
 - **Removing someone** doesn't take back what they already have. To cut someone off, make a new project, copy the chats you want into it, and share that.
 - **Losing the key** loses the project's chats from the folder for good. Save a copy in a password manager. skinnyai keeps the key in the macOS Keychain (this Mac's login keychain), or in `~/.skinny/project-keys` readable only by you.
-- **Deleting** removes a chat's files from the folder, but your cloud service may keep older versions or a trash for a while, and any device that already synced it may have kept a copy (backups included). Nothing can prove that no one kept a copy.
+- **Deleting** removes a chat's files from the folder, but your cloud service may keep older versions of it, or the deleted files in a trash, for a while, and any device that already synced it may have kept a copy (backups included). Nothing can prove that no one kept a copy.
 
 ## On this machine (at rest)
 
-Chats you haven't synced, and the local copy of ones you have, are ordinary files under `~/.skinny`: chats in `sessions/` (SQLite), `config.json` (which can hold API keys), `debug.log` if you turned debugging on, and the files you export or save images to. They are **not encrypted by skinnyai**. skinnyai makes its folders and chat files readable only by you (mode 700 and 600), so other accounts on the Mac can't open them, but anyone who gets at the disk can.
+Chats you haven't synced, and the local copy of ones you have, are ordinary files under `~/.skinny`: chats in `sessions/` (SQLite), `config.json` (which can hold API keys), `debug.log` if you turned debugging on, and the files you export or save images to. They are **not encrypted by skinnyai**. skinnyai makes its folders and chat files readable only by you (mode 700 and 600), so other ordinary accounts on the Mac can't open them. Anyone with administrator (root) access to the Mac can read them anyway, and so can anyone who gets at the disk.
 
 To protect them if the machine is lost or stolen, turn on FileVault (System Settings → Privacy & Security). To keep them encrypted even while you're logged in and the Mac is on, you can store `~/.skinny` on an encrypted disk image you mount yourself (Disk Utility → File → New Image → Blank Image, with 256-bit AES encryption and a sparse bundle format), then start skinnyai with `SKINNY_HOME` pointing into the mounted volume. Keep the image's password in your password manager.
 
-That kind of protection is encryption at rest. While the volume is mounted, or the Mac is unlocked, anything running as you can read the files, and a copy that was made before you encrypted them (a backup, a Time Machine snapshot) is still readable.
+That kind of protection is encryption at rest. While the volume is mounted, or the Mac is unlocked, anything running as you, and anyone with root access, can read the files, and a copy that was made before you encrypted them (a backup, a Time Machine snapshot) is still readable.
 
 ## What no encryption here can protect
 
