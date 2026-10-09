@@ -28,7 +28,7 @@ A chat file is an append-only log: each save adds a *commit* (the new messages, 
 
 ## Autosave
 
-Autosave is **on by default in a terminal**: the session is saved after every reply, so nothing is lost if you close the window. It saves under the session's current name or, if it hasn't been saved yet, a date-and-time name; the file is created at the first reply, and only new messages are appended after that. Piped input and scripts don't autosave unless you ask. Turn it off with `--no-autosave`, `SKINNY_AUTOSAVE=false`, or `/set noautosave`, and on elsewhere with `--autosave` or `/set autosave`. `/save <name>` renames an autosave-named file and autosave carries on under the new name.
+Autosave is **on by default in a terminal**: the session is saved after every reply, so nothing is lost if you close the window. After the first reply skinnyai asks the model, in one short extra request, for a title of at most six words, and names the file from it ("💾 Autosaving to 'Planning a Lisbon trip.skinny'"). If the model gives no usable title within a few seconds, or titles are off (`--no-titles`, `SKINNY_TITLES=false`), the file gets a date-and-time name like `chat-2026-09-30-154907`. The file is created at the first reply, and only new messages are appended after that. The title request counts as a small extra use of the model, on paid APIs too. Piped input and scripts don't autosave unless you ask. Turn it off with `--no-autosave`, `SKINNY_AUTOSAVE=false`, or `/set noautosave`, and on elsewhere with `--autosave` or `/set autosave`. `/save <name>` renames a file that autosave named (by title or by time) and autosave carries on under the new name.
 
 ## Starting over and cleaning up
 

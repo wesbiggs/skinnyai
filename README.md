@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/wesbiggs/skinnyai/actions/workflows/ci.yml/badge.svg)](https://github.com/wesbiggs/skinnyai/actions/workflows/ci.yml)
 
-A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic, plus a small native macOS app that wraps it. Node 22+, no runtime dependencies (raw HTTPS, no SDKs).
+A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic, plus a small native macOS app that wraps it. Node 22.13+, no runtime dependencies (raw HTTPS, no SDKs).
 
 ## Features
 
@@ -18,7 +18,7 @@ A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic
 
 ## Setup
 
-You need **Node.js 22+** and a server, such as Ollama running on your system (check with `curl http://localhost:11434/api/tags`).
+You need **Node.js 22.13+** and a server, such as Ollama running on your system (check with `curl http://localhost:11434/api/tags`).
 
 Download `skinnyai.js` from the latest [release](../../releases/latest) (one minified file, about 90 KB), or build it from a checkout:
 

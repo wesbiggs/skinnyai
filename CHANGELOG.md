@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- New chats are named from a short title the model suggests after the first reply (one small extra request; `--no-titles` or `SKINNY_TITLES=false` turns it off, and the date-and-time name is the fallback). A later `/save <name>` renames the file.
+- The welcome box says whether sync is on and which project the chat is in.
 - Sync chats across devices through folders your cloud drive carries, in projects: a project is a folder plus its own key, and each chat is in one. `/sync setup <folder>` makes the default project (or joins it on another device); `/project new|add|default|key|rename|forget` manage others; `/project move|copy <name>` put the open chat in another project as a new chat sealed under that project's key (a move leaves only a deletion marker behind). Each save becomes an encrypted commit file (AES-256-GCM under keys derived from the project key, which is kept in the macOS Keychain or a protected file and shown once for you to save); attachments are separate sealed files. Syncs at startup and after each autosave; a chat continued on two devices splits into two chats ("Name (from device)"), `/delete` and `/purge` propagate.
 - Chat files are an append-only log: every save is a commit (new messages and changed settings) recording its device, a Lamport counter, and the commits it follows, and every message has an id and a parent, so changes from two devices can later be merged. `~/.skinny/device` holds this installation's id and an editable name. If two writers add to one message, the latest line is shown and the other is kept. `/purge` is recorded as an operation.
 - Chats are saved as SQLite files (`<name>.skinny`, via `node:sqlite`) holding the whole conversation: tool calls and results, thinking blocks, attached images and PDFs (stored once each), and which model wrote each reply. `.Modelfile` sessions from earlier versions still load and are written as `.skinny` the next time they're saved.
@@ -11,6 +13,8 @@
 - Conversations are kept in a provider-neutral form (`src/history.js`) and adapted to each model when a request is sent: tool calls become text when the new model lacks the tools, thinking blocks replay only to the model that wrote them, and PDFs/images a model can't take are noted instead.
 
 ### Changed
+- `/list` help no longer says "locally" available models.
+- The README and `engines` say Node 22.13 or newer.
 - Autosave is on by default when running in a terminal (piped input still doesn't autosave unless asked), and the app's "Autosave conversations" setting defaults to on. Autosave appends new messages instead of rewriting the file.
 - `/share` and Modelfile `/export` are generated from the saved conversation text; Modelfile is no longer the storage format.
 - Requires Node 22.13 or newer (for `node:sqlite`).

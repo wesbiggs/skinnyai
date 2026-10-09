@@ -51,6 +51,7 @@ Highest first: the command line, your shell's environment, the profile, `shared`
 | `SKINNY_MARKDOWN` | `--markdown` / `--no-markdown` |
 | `SKINNY_IMAGES` | `--images` / `--no-images` |
 | `SKINNY_AUTOSAVE` | `--autosave` / `--no-autosave` (on by default in a terminal) |
+| `SKINNY_TITLES` | `--titles` / `--no-titles` (on by default: name new chats from a model-suggested title) |
 | `SKINNY_HIDE_THINKING` | `--hide-thinking` / `--show-thinking` |
 | `SKINNY_STOP_ON_EXIT` | `--stop-on-exit` (`-x`) / `--no-stop-on-exit` |
 | `SKINNY_MCP` | `--mcp` / `--no-mcp` |

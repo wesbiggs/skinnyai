@@ -16,6 +16,7 @@ export const ENV_SETTINGS = {
   SKINNY_DEBUG: ['debug', 'boolean'],
   SKINNY_IMAGES: ['images', 'boolean'],
   SKINNY_AUTOSAVE: ['autosave', 'boolean'],
+  SKINNY_TITLES: ['titles', 'boolean'],
   SKINNY_HIDE_THINKING: ['hideThinking', 'boolean'],
   SKINNY_STOP_ON_EXIT: ['stopOnExit', 'boolean'],
   SKINNY_USER_NORMAL_COLOR: ['userNormalColor', 'string'],
@@ -53,6 +54,7 @@ export const BOOLEAN_FLAGS = {
   '--debug': ['debug', true], '--no-debug': ['debug', false],
   '--images': ['images', true], '--no-images': ['images', false],
   '--autosave': ['autosave', true], '--no-autosave': ['autosave', false],
+  '--titles': ['titles', true], '--no-titles': ['titles', false],
   '--hide-thinking': ['hideThinking', true], '--show-thinking': ['hideThinking', false],
   '-x': ['stopOnExit', true], '--stop-on-exit': ['stopOnExit', true], '--no-stop-on-exit': ['stopOnExit', false]
 };
@@ -129,9 +131,13 @@ Options:
                        fetches whatever image URLs the model writes.
   -x, --stop-on-exit   Unload the model from Ollama when the session ends
                        (same effect as \`ollama stop\`)
-  --autosave           Save the session to a local file after each reply,
-                       named from the date and time; /save <name> renames it
-                       (same as running \`/set autosave\`)
+  --autosave           Save the session to a local file after each reply
+                       (on by default in a terminal; same as running
+                       \`/set autosave\`). The file is named by a title the
+                       model suggests after the first reply, or from the date
+                       and time; /save <name> renames it
+  --no-titles          Don't ask the model for a title to name new chats with
+                       (one extra short request after the first reply)
   --hide-thinking      Don't stream thinking-model reasoning output
                        (shown by default; same as running \`/set hidethinking\`)
   --no-tools           Don't offer the model web_search and

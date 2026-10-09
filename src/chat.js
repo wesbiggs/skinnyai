@@ -17,13 +17,15 @@ import { adaptHistory, describeAdaptation, newCallId, parseArguments, purgeHisto
 import { loadMcpConfig, runTool, startMcpServers, toolDefinitions } from './mcp.js';
 import { pickDefaultModel } from './models.js';
 import { chatIdOf, chatProjectOf, newMessageId } from './chatdb.js';
-import { SESSION_DIR, autosaveName, chatFileExists, deleteLocalSession, formatModelfile, isAutosaveName, legacySessionPath, listLocalSessions, localSessionExists, readLocalSession, redactLocalSession, resumeHint, saveLocalSession, sessionPath, sessionStamp } from './sessions.js';
+import { SESSION_DIR, autosaveName, chatFileExists, deleteLocalSession, formatModelfile, isAutosaveName, legacySessionPath, listLocalSessions, localSessionExists, readLocalSession, redactLocalSession, resumeHint, saveLocalSession, sessionPath, sessionStamp, tidyTitle, uniqueSessionName } from './sessions.js';
 import { formatMarkdown } from './export.js';
 import { adoptUnassigned, copyChat, deleteSyncedChat, describeSync, initProject, keyOpensProject, pushChat, readProject, suggestedName, syncProjects } from './sync.js';
 import { addProject, defaultProject, findProject, loadSyncConfig, removeProject, renameProject, saveSyncConfig, setDefaultProject } from './syncconfig.js';
 import { decodeProjectKey, encodeProjectKey, generateProjectKey, loadProjectKey, projectId, saveProjectKey } from './keys.js';
 import { ANSI, CHROME_COLOR, PROMPT, createWordWrapper, drawBox, graphemeWidth, graphemes, styleLine, styledPrompt, supportsColor, visibleWidth } from './style.js';
 import { MAX_TOOL_ROUNDS, TOOLS, formatToday } from './tools.js';
+
+const TITLE_TIMEOUT_MS = 8000;
 
 // A folder argument as an absolute path (quotes and ~ handled).
 const resolveFolder = (text) => path.resolve(text.replace(/^~(?=\/|$)/, os.homedir()));
@@ -66,6 +68,12 @@ export class OllamaChat {
     // On by default where there is a person to lose a chat (a terminal);
     // piped runs and scripts don't leave files behind unless asked.
     this.autosave = options.autosave ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+    // Name a new chat's file from a title the model suggests (one short extra
+    // request after the first reply); off falls back to the date and time.
+    this.titles = options.titles !== false;
+    // Whether autosave chose this session's name (a title or the date and
+    // time) rather than the user, so a later /save <name> renames the file.
+    this.autoNamed = false;
     // The local session file this conversation is saved in, once it has one:
     // set by autosave, a local /save, or loading a local session; cleared
     // when a new conversation starts (/new, loading a model).
@@ -87,6 +95,7 @@ export class OllamaChat {
     this._sessionName = name;
     this.sessionStamp = null;
     this.savedHead = null;
+    this.autoNamed = false;
     if (process.env.TERM_PROGRAM === 'SkinnyAI' && process.stdout.isTTY) {
       process.stdout.write(`\x1b]2;${name ? `SkinnyAI: ${name}` : 'SkinnyAI'}\x07`);
     }
@@ -663,14 +672,56 @@ export class OllamaChat {
   async autosaveSession({ push = true } = {}) {
     if (!this.autosave || this.savableMessages().length === 0) return;
     if (!this.sessionName) {
-      this.sessionName = await autosaveName();
-      process.stdout.write(`${CHROME_COLOR}💾 Autosaving as '${this.sessionName}' (/save <name> saves it under a new name)${ANSI.reset}\n\n`);
+      const title = await this.suggestTitle();
+      this.sessionName = title ? await uniqueSessionName(title) : await autosaveName();
+      this.autoNamed = true;
+      process.stdout.write(title
+        ? `${CHROME_COLOR}💾 Autosaving to '${this.sessionName}.skinny' (/save <name> renames it)${ANSI.reset}\n\n`
+        : `${CHROME_COLOR}💾 Autosaving as '${this.sessionName}' (/save <name> saves it under a new name)${ANSI.reset}\n\n`);
     }
     try {
       await this.writeSession(this.sessionName);
       if (push) this.pushToSync();
     } catch (error) {
       console.log(`⚠️  Autosave failed: ${error.message}\n`);
+    }
+  }
+
+  // Asks the model for a short title for this conversation, from its first
+  // exchange, in one small request of its own; null on any failure or when
+  // the reply isn't usable (the caller then names the file from the time).
+  async suggestTitle() {
+    if (!this.titles) return null;
+    const exchange = this.conversation().filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content).slice(0, 2);
+    if (exchange.length === 0) return null;
+    const clip = (text) => (text.length > 600 ? `${text.slice(0, 600)}…` : text);
+    const ask = 'Give a short title for this conversation: at most six words, no quotes, no trailing punctuation. Reply with the title only.\n\n' +
+      exchange.map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${clip(m.content)}`).join('\n\n');
+    const messages = [{ role: 'user', content: ask }];
+    const headers = { 'Content-Type': 'application/json', ...this.authHeaders() };
+    let url;
+    let body;
+    if (this.api === 'anthropic') {
+      url = `${this.host}/v1/messages`;
+      body = { model: this.model, max_tokens: 40, messages };
+    } else if (this.api === 'openai') {
+      url = `${this.host}/v1/chat/completions`;
+      body = { model: this.model, stream: false, messages };
+    } else {
+      url = `${this.host}/api/chat`;
+      body = { model: this.model, stream: false, messages, options: { num_predict: 40 }, ...(this.managesModelLifetime && { keep_alive: this.keepAlive }) };
+    }
+    try {
+      const response = await hostFetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(TITLE_TIMEOUT_MS) });
+      if (!response.ok) return null;
+      const json = await response.json();
+      const text = this.api === 'anthropic' ? json.content?.find((b) => b.type === 'text')?.text
+        : this.api === 'openai' ? json.choices?.[0]?.message?.content
+          : json.message?.content;
+      return tidyTitle(text);
+    } catch (error) {
+      debugLog('title-failed', { error: error.message });
+      return null;
     }
   }
 
@@ -1074,9 +1125,21 @@ export class OllamaChat {
       lines.push(`🔧 Tools: ${Object.keys(TOOLS).join(', ')} (${ollamaApiKey() ? 'Ollama web search' : 'DuckDuckGo instant answers'})`);
     }
     lines.push(...(this.mcpLines || []));
+    lines.push(this.syncWelcomeLine());
     if (this.debug) lines.push(`🐞 Debug log: ${DEBUG_LOG}`);
     lines.push('', 'Type /help for commands.', 'Enter sends; Ctrl+J or Shift+Enter adds a new line.');
     console.log('\n' + drawBox(lines, ANSI.assistant.dialogue) + '\n');
+  }
+
+  // The welcome box's line about sync: off, or on and which project this
+  // chat is in (a new chat goes in the default one).
+  syncWelcomeLine() {
+    const config = loadSyncConfig();
+    if (!config.projects.length) return '🔄 Sync: off (/sync setup <folder> turns it on)';
+    const file = this.sessionName ? sessionPath(this.sessionName) : null;
+    const id = file && existsSync(file) ? chatProjectOf(file) : config.default;
+    const project = config.projects.find((p) => p.id === id);
+    return `🔄 Sync: on, project ${project ? `'${project.name}'` : 'not set up on this device'}`;
   }
 
   printCommandList() {
@@ -1092,7 +1155,7 @@ export class OllamaChat {
     console.log('  /export [path]  Write the conversation to a .md transcript or a .Modelfile');
     console.log('  /purge <kind>   Shrink the saved chat: thinking, tools (as text), or blobs (images and PDFs)');
     console.log('  /model          Show current model, keep-alive, and host');
-    console.log('  /list           List locally available models');
+    console.log('  /list           List available models');
     console.log('  /attach <file>  Send a file (image, PDF, or text) with your next message');
     console.log('  /saveimage [path]  Save the latest image in the conversation to a file');
     console.log('  /mcp            Show connected MCP servers and their tools');
@@ -1226,7 +1289,7 @@ export class OllamaChat {
   async save(name) {
     const previous = this.sessionName;
     const target = name || previous || await autosaveName();
-    const renaming = previous && previous !== target && isAutosaveName(previous);
+    const renaming = previous && previous !== target && (isAutosaveName(previous) || this.autoNamed);
     try {
       const taken = target !== previous && await localSessionExists(target);
       if (taken && !await this.confirm(`\nA saved session named '${target}' already exists. Overwrite it?`)) {
@@ -2010,7 +2073,7 @@ export class OllamaChat {
   // The settings a profile decides (the ones ENV_SETTINGS names), which
   // /set profile replaces as a set.
   static PROFILE_FIELDS = ['model', 'modelIsDefault', 'api', 'host', 'keepAlive', 'showThinking', 'stopOnExit', 'toolsEnabled',
-    'mcpEnabled', 'injectDate', 'markdown', 'images', 'autosave'];
+    'mcpEnabled', 'injectDate', 'markdown', 'images', 'autosave', 'titles'];
 
   // /set profile: lists the profiles, or switches to one, as if launched with
   // --profile. The conversation carries over (adapted to the new model, see

@@ -3,9 +3,10 @@
 // message as "You said: **...**", or return `replies[message]` when set.
 import http from 'node:http';
 
-export async function startMockServer({ replies = {}, models = [], canCreate = false, capabilities, anthropicToolCalls = {}, modelMeta = {}, openaiToolCalls = {} } = {}) {
+export async function startMockServer({ replies = {}, models = [], canCreate = false, capabilities, anthropicToolCalls = {}, modelMeta = {}, openaiToolCalls = {}, titleReply } = {}) {
   const created = [];
   const requests = [];
+  const titleRequests = []; // the small non-streamed "give a short title" requests, kept apart from chat turns
   const existing = new Set(models);
 
   const server = http.createServer((req, res) => {
@@ -14,6 +15,17 @@ export async function startMockServer({ replies = {}, models = [], canCreate = f
     req.on('end', async () => {
       const json = body ? JSON.parse(body) : {};
       const url = req.url.split('?')[0];
+      if (!json.stream && JSON.stringify(json.messages ?? []).includes('Give a short title')) {
+        titleRequests.push({ url, body: json, headers: req.headers });
+        if (titleReply === undefined) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          return res.end('{"error":"no title"}');
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        if (url === '/v1/messages') return res.end(JSON.stringify({ content: [{ type: 'text', text: titleReply }] }));
+        if (url === '/v1/chat/completions') return res.end(JSON.stringify({ choices: [{ message: { content: titleReply } }] }));
+        return res.end(JSON.stringify({ message: { role: 'assistant', content: titleReply }, done: true }));
+      }
       requests.push({ url, body: json, headers: req.headers });
       const reply = (messages) => {
         const last = messages.at(-1)?.content ?? '';
@@ -113,6 +125,7 @@ export async function startMockServer({ replies = {}, models = [], canCreate = f
     url: `http://127.0.0.1:${server.address().port}`,
     created,
     requests,
+    titleRequests,
     close: () => new Promise((resolve) => server.close(resolve))
   };
 }

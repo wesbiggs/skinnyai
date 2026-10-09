@@ -1,6 +1,6 @@
 # skinnyai
 
-A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic, plus a small native macOS app that wraps it. Node >= 22, no runtime dependencies by design (raw HTTPS, no SDKs). README.md is the short user-facing overview and `docs/*.md` hold the details; this file is for orientation and the non-obvious decisions.
+A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic, plus a small native macOS app that wraps it. Node >= 22.13 (for `node:sqlite`), no runtime dependencies by design (raw HTTPS, no SDKs). README.md is the short user-facing overview and `docs/*.md` hold the details; this file is for orientation and the non-obvious decisions.
 
 ## Layout
 
@@ -27,6 +27,7 @@ A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic
 ## Behavior decisions worth keeping
 
 - History is provider-neutral (`src/history.js`: tool calls carry ids and object arguments, assistant messages carry `origin: {api, model}`); `adaptHistory` + `wireShape` shape a copy per request (flatten calls to unavailable tools, replay thinking only to its model, drop what a model can't take), so `/set profile` and `/set model` keep the conversation. Never mutate stored history for a target.
+- Autosave names a new chat from a model-suggested title (`suggestTitle`: a separate non-streamed request after the first reply, 8 s timeout, `tidyTitle` cleans it; failure falls back to the timestamp name). Not asked in-band in the first reply: hiding a marker in a stream is fragile and would pollute history. `autoNamed` marks files autosave named, so `/save <name>` renames them.
 - Web search/tools are on by default (`--no-tools`, `SKINNY_TOOLS=false`, `/set notools` to disable); the date line goes into the system message by default.
 - `keep_alive` and unload-on-exit only apply to a self-hosted Ollama (`managesModelLifetime`: api is ollama and host isn't ollama.com); elsewhere they're not sent and their UI is hidden.
 - `--api openai` does not default its host to api.openai.com when a key is set: a stray key must never silently redirect prompts. `OPENAI_API_KEY` is sent as a Bearer token on any host.

@@ -207,3 +207,21 @@ export async function listLocalSessions() {
     return [];
   }
 }
+
+// Turns a model's reply to "give a short title" into a name for a chat, or
+// null if it isn't usable: thinking text, a "Title:" label, quotes, markup
+// and closing punctuation are dropped, and it's kept short.
+export function tidyTitle(text) {
+  let title = String(text ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+  title = title.replace(/^(#+\s*|title\s*:\s*)/i, '').replace(/^["'`*_\s]+|["'`*_\s]+$/g, '').replace(/[.!?:;,\s]+$/, '').replace(/\s+/g, ' ');
+  if (title.length > 60) title = title.slice(0, 60).replace(/\s+\S*$/, '');
+  return title.length >= 2 ? title : null;
+}
+
+// `base` if no saved session has that name, otherwise 'base (2)', 'base (3)', ...
+export async function uniqueSessionName(base) {
+  for (let n = 1; ; n++) {
+    const name = n === 1 ? base : `${base} (${n})`;
+    if (!await localSessionExists(name)) return name;
+  }
+}
