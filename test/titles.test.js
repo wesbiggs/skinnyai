@@ -12,7 +12,7 @@ let capture;
 
 beforeAll(async () => {
   fakeTTY({ columns: 80 });
-  skinnyai = await import('../src/skinnyai.js');
+  skinnyai = await import('./helpers/skinny.js');
   server = await startMockServer({ titleReply: 'Title: "Planning a Lisbon trip."' });
   silent = await startMockServer(); // answers title requests with an error
 });

@@ -1,37 +1,38 @@
 import readline from 'readline';
-import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import './config.js';
 import { INLINE_FILE, extractAttachments, inlineFile } from './attachments.js';
 import { envOptions } from './cli.js';
 import { API_LABELS, API_NAMES, CONFIG, CONFIG_FILE, DEFAULT_ANTHROPIC_HOST, DEFAULT_KEEP_ALIVE, DEFAULT_OLLAMA_HOST, EXTRA_CA_FILE, PROFILE, VERSION, activateProfile, loadConfigFile, resolveProfile } from './config.js';
 import { DEBUG_LOG, IMAGE_DIR, debugLog, enableDebugLog, setDebugEnabled } from './debug.js';
-import { anthropicHeaders, ollamaApiKey, openaiApiKey, hostFetch, isOllamaCom, readErrorBody, streamingPost } from './http.js';
+import { anthropicApiKey, anthropicHeaders, ollamaApiKey, openaiApiKey, hostFetch, isOllamaCom } from './http.js';
 import { IMAGE_PROTOCOL, sniffImage } from './images.js';
-import { decodeCsiU, inputPosition } from './lineedit.js';
 import { createMarkdownRenderer } from './markdown.js';
-import { adaptHistory, describeAdaptation, newCallId, parseArguments, purgeHistory, wireShape } from './history.js';
-import { loadMcpConfig, runTool, startMcpServers, toolDefinitions } from './mcp.js';
+import { adaptHistory, describeAdaptation, purgeHistory } from './history.js';
+import { loadMcpConfig, startMcpServers, toolDefinitions } from './mcp.js';
 import { pickDefaultModel } from './models.js';
 import { chatIdOf, chatProjectOf, newMessageId } from './chatdb.js';
 import { SESSIONS_ENCRYPTED, SESSION_DIR, autosaveName, chatFileExists, deleteLocalSession, formatModelfile, isAutosaveName, LOCKED_MESSAGE, legacySessionPath, listLocalSessions, localSessionExists, readLocalSession, redactLocalSession, resumeHint, saveLocalSession, sessionPath, sessionStamp, sessionsLocked, tidyTitle, uniqueSessionName } from './sessions.js';
+import { lineEditor } from './editor.js';
+import { requestBuilders } from './requests.js';
+import { streaming } from './stream.js';
 import { formatMarkdown } from './export.js';
-import { adoptUnassigned, copyChat, deleteSyncedChat, describeSync, initProject, keyOpensProject, pushChat, readProject, suggestedName, syncProjects } from './sync.js';
-import { addProject, defaultProject, findProject, loadSyncConfig, removeProject, renameProject, saveSyncConfig, setDefaultProject } from './syncconfig.js';
-import { decodeProjectKey, encodeProjectKey, generateProjectKey, loadProjectKey, projectId, saveProjectKey } from './keys.js';
-import { ANSI, CHROME_COLOR, PROMPT, createWordWrapper, drawBox, graphemeWidth, graphemes, styleLine, styledPrompt, supportsColor, visibleWidth } from './style.js';
-import { MAX_TOOL_ROUNDS, TOOLS, formatToday } from './tools.js';
+import { deleteSyncedChat } from './sync.js';
+import { syncCommands } from './syncCommands.js';
+import { defaultProject, loadSyncConfig } from './syncconfig.js';
+import { ANSI, CHROME_COLOR, PROMPT, drawBox, styledPrompt, supportsColor } from './style.js';
+import { MAX_TOOL_ROUNDS, TOOLS } from './tools.js';
 
 const TITLE_TIMEOUT_MS = 8000;
+// Request parameters a saved session may set when it's loaded. A session file
+// can come from someone else (or another device), and its parameters end up in
+// the request body, so anything else is ignored.
+const SESSION_PARAMETERS = new Set(['temperature', 'top_p', 'top_k', 'min_p', 'seed', 'stop', 'num_ctx', 'num_predict', 'num_gpu', 'max_tokens',
+  'repeat_penalty', 'repeat_last_n', 'presence_penalty', 'frequency_penalty']);
 // Commands that read or write saved sessions, refused while an encrypted volume is locked.
 const SESSION_COMMANDS = new Set(['/save', '/new', '/delete', '/purge', '/sync', '/project', '/share']);
-
-// A folder argument as an absolute path (quotes and ~ handled).
-const resolveFolder = (text) => path.resolve(text.replace(/^~(?=\/|$)/, os.homedir()));
-const unquote = (text) => text.trim().replace(/^(['"])(.*)\1$/, '$2');
 
 // For /show settings: how sync is set up.
 function syncSummary() {
@@ -213,72 +214,6 @@ export class OllamaChat {
     return `${lines.join('\n')}\n`;
   }
 
-  // Models only know their training cutoff (llama3.2's template even states
-  // "Cutting Knowledge Date: December 2023"), so they assume it's still then.
-  // The date goes into the outgoing system message rather than into history,
-  // so it's always current and never ends up in /save or /show system.
-  requestMessages(today) {
-    let messages = this.history;
-    // JSON mode is also asked for in words: not every server honors the
-    // format field (and OpenAI's refuses unless the messages mention JSON).
-    const notes = [today && `Today's date is ${today}.`, this.format === 'json' && 'Respond only with a valid JSON object.'].filter(Boolean).join(' ');
-    if (notes) {
-      const system = this.getSystemMessage();
-      const rest = system ? this.history.slice(1) : this.history;
-      messages = [{ role: 'system', content: system ? `${notes}\n\n${system}` : notes }, ...rest];
-    }
-    // The history is provider-neutral; shape it for this model and API.
-    messages = wireShape(adaptHistory(messages, this.adaptTarget()).messages, this.api);
-    // A tool result's images are relayed as they were returned. Anthropic takes
-    // them inside the tool_result (buildAnthropicChatBody). OpenAI-style servers
-    // get the result's parts as a content array, with each image as an image_url
-    // part (a data: URL); Ollama's tool messages are plain text, so there the
-    // data: URLs sit in the text.
-    return messages.map((m) => {
-      if (m.role !== 'tool') return this.wireMessage(m);
-      if (this.api === 'anthropic') return m;
-      const text = { ...m };
-      delete text.images;
-      delete text.parts;
-      const { parts } = m;
-      if (!parts) return text;
-      const url = (p) => `data:${p.mime};base64,${p.data}`;
-      if (this.api === 'openai') {
-        return { ...text, content: parts.map((p) => (p.type === 'image' ? { type: 'image_url', image_url: { url: url(p) } } : p)) };
-      }
-      return { ...text, content: parts.map((p) => (p.type === 'image' ? url(p) : p.text)).join('\n') };
-    });
-  }
-
-  // History keeps attached images as { mime, data } and PDFs as { name, mime,
-  // data } (base64); each API wants them differently: Ollama a plain list of base64 strings on the message,
-  // OpenAI-style servers content parts with data: URLs.
-  wireMessage(message) {
-    const { images = [], documents = [], ...rest } = message;
-    if (!images.length && !documents.length) return message;
-    if (this.api === 'anthropic') {
-      return {
-        ...rest,
-        content: [
-          ...images.map((i) => ({ type: 'image', source: { type: 'base64', media_type: i.mime, data: i.data } })),
-          ...documents.map((d) => ({ type: 'document', title: d.name, source: { type: 'base64', media_type: d.mime, data: d.data } })),
-          ...(message.content ? [{ type: 'text', text: message.content }] : [])
-        ]
-      };
-    }
-    if (this.api === 'openai') {
-      return {
-        ...rest,
-        content: [
-          ...(message.content ? [{ type: 'text', text: message.content }] : []),
-          ...images.map((i) => ({ type: 'image_url', image_url: { url: `data:${i.mime};base64,${i.data}` } })),
-          ...documents.map((d) => ({ type: 'file', file: { filename: d.name, file_data: `data:${d.mime};base64,${d.data}` } }))
-        ]
-      };
-    }
-    return { ...rest, ...(images.length && { images: images.map((i) => i.data) }) };
-  }
-
   // Ollama lists what a model can do (vision, tools, ...) in /api/show.
   // Returns false only when the server says the model can't see images;
   // anywhere that can't tell (OpenAI-style servers, older Ollama), it
@@ -381,8 +316,23 @@ export class OllamaChat {
   // values are ignored.
   applySavedSettings(saved) {
     const bool = (v) => (v === 'true' ? true : v === 'false' ? false : undefined);
-    if (API_NAMES.includes(saved.api)) this.api = saved.api;
-    if (/^https?:\/\//.test(saved.host || '')) this.host = saved.host;
+    // Where the session was saved. Switching to it is automatic unless an API
+    // key would then go to a server this chat wasn't already talking to: a
+    // session file can come from someone else, so that needs a yes (see
+    // confirmSessionTarget).
+    this.untrustedTarget = null;
+    const api = API_NAMES.includes(saved.api) ? saved.api : this.api;
+    const host = /^https?:\/\//.test(saved.host || '') ? saved.host : this.host;
+    if (api !== this.api || host !== this.host) {
+      const official = host.replace(/\/+$/, '') === DEFAULT_ANTHROPIC_HOST || new URL(host).hostname === 'api.openai.com';
+      const sendsKey = !official && ((api === 'anthropic' && anthropicApiKey()) || (api === 'openai' && openaiApiKey()));
+      if (sendsKey) {
+        this.untrustedTarget = { api, host };
+      } else {
+        this.api = api;
+        this.host = host;
+      }
+    }
     if (saved['keep-alive']) this.keepAlive = saved['keep-alive'];
     if (bool(saved['show thinking']) !== undefined) this.showThinking = bool(saved['show thinking']);
     if (bool(saved.tools) !== undefined) this.toolsEnabled = bool(saved.tools);
@@ -400,19 +350,36 @@ export class OllamaChat {
   // FROM model, system message, parameters, and conversation. Quiet, so
   // startup can do it before the welcome box (which reports the result).
   applySessionState(name, session) {
-    this.applySavedSettings(session.settings || {}, true);
+    this.applySavedSettings(session.settings || {});
     this.model = session.from || this.model;
     this.history = session.system ? [{ role: 'system', content: session.system }] : [];
     this.history.push(...session.messages);
     this.options = {};
-    for (const [param, value] of session.parameters) this.setParameter(param, [value]);
+    for (const [param, value] of session.parameters) if (SESSION_PARAMETERS.has(param)) this.setParameter(param, [value]);
     this.sessionName = name; // autosave keeps updating the same file
     this.sessionStamp = session.stamp ?? null;
     this.savedHead = session.persistedHead ?? null;
   }
 
+  // After applying a session: if it was saved against another server and an
+  // API key would be sent there, say so and ask first.
+  async confirmSessionTarget() {
+    const target = this.untrustedTarget;
+    this.untrustedTarget = null;
+    if (!target) return;
+    const keyName = target.api === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY';
+    const allowed = await this.confirm(`\nThis session was saved with ${API_LABELS[target.api]} at ${target.host}, not ${this.host}. Switching sends your ${keyName} there. Use it?`);
+    if (allowed) {
+      this.api = target.api;
+      this.host = target.host;
+    } else {
+      console.log(`${CHROME_COLOR}Staying on ${this.host}.${ANSI.reset}`);
+    }
+  }
+
   async applyLocalSession(name, session) {
     this.applySessionState(name, session);
+    await this.confirmSessionTarget();
     await this.showRestoredSession(name);
   }
 
@@ -434,6 +401,7 @@ export class OllamaChat {
       if (session) {
         this.startupSession = this.model;
         this.applySessionState(this.model, session);
+        await this.confirmSessionTarget();
       }
     } catch (error) {
       // Non-fatal: just start with an empty session.
@@ -478,111 +446,6 @@ export class OllamaChat {
     await renderer.write(text);
     await renderer.end();
     process.stdout.write(ANSI.reset);
-  }
-
-  startSpinner() {
-    if (!supportsColor) return null;
-    const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-    let i = 0;
-    process.stdout.write(`${frames[0]} waiting for ${this.model}...`);
-    return setInterval(() => {
-      i = (i + 1) % frames.length;
-      readline.cursorTo(process.stdout, 0);
-      process.stdout.write(`${frames[i]} waiting for ${this.model}...`);
-    }, 80);
-  }
-
-  stopSpinner(timer) {
-    if (!timer) return;
-    clearInterval(timer);
-    readline.clearLine(process.stdout, 0);
-    readline.cursorTo(process.stdout, 0);
-  }
-
-  buildOllamaChatBody() {
-    const today = this.shouldInjectDate() ? formatToday() : '';
-    const body = {
-      model: this.model,
-      messages: this.requestMessages(today),
-      stream: true
-    };
-    if (this.managesModelLifetime) body.keep_alive = this.keepAlive;
-    if (Object.keys(this.options).length > 0) body.options = this.options;
-    if (this.format) body.format = this.format;
-    if (this.think !== undefined) body.think = this.think;
-    const tools = this.toolDefinitions(today);
-    if (tools.length) body.tools = tools;
-    return body;
-  }
-
-  // OpenAI-compatible servers apply sampling params (temperature, top_p, stop, ...)
-  // directly at the top level rather than nested under 'options' - and several
-  // llama.cpp/vLLM-style servers additionally accept Ollama-style extras
-  // (top_k, min_p, repeat_penalty) the same way, so passing this.options
-  // through as top-level fields is the most broadly compatible option.
-  // stream_options.include_usage asks for a trailing token-count chunk, used
-  // for /set verbose stats; servers that don't support it just ignore it.
-  buildOpenAIChatBody() {
-    const today = this.shouldInjectDate() ? formatToday() : '';
-    const body = {
-      model: this.model,
-      messages: this.requestMessages(today),
-      stream: true,
-      stream_options: { include_usage: true },
-      ...this.options
-    };
-    if (this.format === 'json') body.response_format = { type: 'json_object' };
-    const tools = this.toolDefinitions(today);
-    if (tools.length) body.tools = tools;
-    return body;
-  }
-
-  // The Messages API takes the system prompt separately, wants tool calls
-  // and results as content blocks, and needs a turn's thinking blocks (with
-  // their signatures) handed back while it's still using tools.
-  buildAnthropicChatBody() {
-    const today = this.shouldInjectDate() ? formatToday() : '';
-    const all = this.requestMessages(today);
-    const system = all.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
-    const messages = [];
-    const push = (role, content) => {
-      const last = messages.at(-1);
-      if (last && last.role === role) last.content.push(...content);
-      else messages.push({ role, content });
-    };
-    for (const m of all) {
-      if (m.role === 'system') continue;
-      const blocks = typeof m.content === 'string' ? (m.content ? [{ type: 'text', text: m.content }] : []) : m.content;
-      if (m.role === 'tool') {
-        const result = m.images?.length
-          ? [{ type: 'text', text: m.content }, ...m.images.map((i) => ({ type: 'image', source: { type: 'base64', media_type: i.mime, data: i.data } }))]
-          : m.content;
-        push('user', [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: result, ...(m.content.startsWith('Error:') && { is_error: true }) }]);
-      } else if (m.role === 'assistant') {
-        const calls = (m.tool_calls || []).map((c) => {
-          let input = c.function.arguments;
-          if (typeof input === 'string') {
-            try { input = input ? JSON.parse(input) : {}; } catch (e) { input = {}; }
-          }
-          return { type: 'tool_use', id: c.id, name: c.function.name, input };
-        });
-        push('assistant', [...(m.thinkingBlocks || []), ...blocks, ...calls]);
-      } else {
-        push('user', blocks);
-      }
-    }
-    const { max_tokens, num_predict, stop, ...sampling } = this.options;
-    const body = { model: this.model, max_tokens: max_tokens ?? num_predict ?? 16000, stream: true, messages };
-    if (system) body.system = system;
-    for (const key of ['temperature', 'top_p', 'top_k']) if (sampling[key] !== undefined) body[key] = sampling[key];
-    if (stop) body.stop_sequences = stop;
-    if (this.think !== undefined && this.think !== false) {
-      body.thinking = { type: 'adaptive', display: this.showThinking ? 'summarized' : 'omitted' };
-      if (typeof this.think === 'string') body.output_config = { effort: this.think };
-    }
-    const tools = this.toolDefinitions(today);
-    if (tools.length) body.tools = tools.map((t) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters }));
-    return body;
   }
 
   // `attached` holds files the line editor already attached (and showed) as
@@ -797,321 +660,6 @@ export class OllamaChat {
     }
     console.log('Not saved.\n');
     return null;
-  }
-
-  async runToolCalls(toolCalls) {
-    for (const call of toolCalls) {
-      const { name } = call.function;
-      let args = call.function.arguments;
-      // OpenAI-style APIs send arguments as a JSON string; Ollama sends an object.
-      if (typeof args === 'string') {
-        try {
-          args = args ? JSON.parse(args) : {};
-        } catch (e) {
-          args = null;
-        }
-      }
-      const tools = this.activeTools();
-      const tool = tools.get(name);
-      const label = args && tool?.describe ? tool.describe(args) : name;
-      process.stdout.write(`${ANSI.assistant.narration}🔧 ${label}${ANSI.reset}\n`);
-
-      // MCP tools can do anything their server can, and a web page the model
-      // read could try to steer it, so they ask first unless the server is trusted.
-      let declined = false;
-      if (args !== null && tool?.needsApproval?.()) {
-        const answer = await this.choose('   Allow this tool call?', '[y/N/a(lways)]', 'ya');
-        declined = answer === 'n';
-        if (answer === 'a') {
-          const saved = tool.trustAlways();
-          console.log(`${CHROME_COLOR}   ${saved ? `Saved: this tool is now trusted in ${CONFIG_FILE}` : `Couldn't update ${CONFIG_FILE}; trusted for this session only`}${ANSI.reset}`);
-        }
-      }
-      const outcome = args === null
-        ? `Error: couldn't parse arguments for '${name}' as JSON`
-        : declined
-          ? 'Error: the user declined this tool call'
-          : await runTool(tools, name, args);
-      // A tool may return images along with its text (MCP image content);
-      // they go to the model as received (see requestMessages).
-      const result = typeof outcome === 'string' ? outcome : outcome.text;
-      const images = typeof outcome === 'string' ? [] : outcome.images;
-      debugLog('tool-call', { name, known: tools.has(name), arguments: args, declined, result, images: images.length });
-      if (result.startsWith('Error:')) {
-        process.stdout.write(`${ANSI.assistant.narration}   ${result}${ANSI.reset}\n`);
-      }
-
-      const message = { id: newMessageId(), role: 'tool', tool_call_id: call.id, tool_name: name, content: result };
-      if (images.length) {
-        message.images = images;
-        message.parts = outcome.parts;
-      }
-      this.history.push(message);
-    }
-    process.stdout.write('\n');
-  }
-
-  // Streams one model response to the terminal and records it in history.
-  // Returns any tool calls the model made (empty if it just answered).
-  async streamTurn(allowTools = true) {
-    let spinner = this.startSpinner();
-
-    try {
-      // "isOpenAI" covers every server-sent-events API; Anthropic's events
-      // are translated into OpenAI-style chunks below.
-      const isOpenAI = this.api !== 'ollama';
-      const isAnthropic = this.api === 'anthropic';
-      const body = isAnthropic ? this.buildAnthropicChatBody()
-        : isOpenAI ? this.buildOpenAIChatBody() : this.buildOllamaChatBody();
-      if (!allowTools) delete body.tools;
-      const path = isAnthropic ? '/v1/messages' : isOpenAI ? '/v1/chat/completions' : '/api/chat';
-
-      debugLog('request', {
-        api: this.api, url: `${this.host}${path}`, authenticated: Object.keys(this.authHeaders()).length > 0 || (this.api === 'ollama' && Boolean(ollamaApiKey()) && isOllamaCom(this.host)),
-        offeredTools: (body.tools || []).map((t) => t.function?.name ?? t.name), body
-      });
-      const response = await streamingPost(`${this.host}${path}`, body, this.authHeaders());
-      debugLog('response', { status: response.status, statusText: response.statusText });
-
-      if (!response.ok) {
-        const detail = await readErrorBody(response.body);
-        let message = `API error: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ''}`;
-        if (this.toolsEnabled && /tool/i.test(detail)) {
-          message += "\n   (this model may not support tools - try '/set notools')";
-        }
-        throw new Error(message);
-      }
-
-      // Ollama sends each tool call whole; OpenAI-style servers stream them
-      // as fragments keyed by index, with the arguments string split up.
-      const toolCalls = [];
-      const collectOpenAIToolCalls = (deltas) => {
-        for (const delta of deltas) {
-          const i = delta.index ?? toolCalls.length;
-          toolCalls[i] ??= { id: '', type: 'function', function: { name: '', arguments: '' } };
-          if (delta.id) toolCalls[i].id = delta.id;
-          if (delta.function?.name) toolCalls[i].function.name += delta.function.name;
-          if (delta.function?.arguments) toolCalls[i].function.arguments += delta.function.arguments;
-        }
-      };
-
-      let fullResponse = '';
-      let lineBuffer = '';
-      let started = false;
-      let thinkingStarted = false;
-      let thinkingEnded = false;
-      let stats = null;
-      const decoder = new TextDecoder();
-      const renderer = createMarkdownRenderer('assistant', 0, this.renderOptions());
-      // Thinking text is the model's raw internal monologue, so it's wrapped
-      // plain (no markdown rendering) in a constant dim color.
-      const thinkingWrapper = createWordWrapper((t) => t);
-
-      // `truncated` is set when the stream ended (done_reason !== 'stop')
-      // before any answer content ever arrived - i.e. the model ran out of
-      // its token/context budget mid-thought, not because it finished
-      // reasoning. Otherwise "...done thinking." would print even though
-      // the visible thinking text was really just chopped off mid-sentence.
-      const endThinking = (truncated) => {
-        if (thinkingStarted && !thinkingEnded) {
-          thinkingWrapper.end();
-          if (truncated) {
-            process.stdout.write(`${ANSI.reset}\n⚠️  cut off - ran out of tokens while still thinking (raise num_predict/num_ctx with /set parameter)\n\n`);
-          } else {
-            process.stdout.write(`${ANSI.reset}\n...done thinking.\n\n`);
-          }
-          thinkingEnded = true;
-        }
-      };
-
-      // OpenAI-compatible servers stream Server-Sent Events: 'data: {...}'
-      // lines (one JSON chunk per event) terminated by a literal 'data: [DONE]'
-      // line, rather than Ollama's bare-NDJSON-per-line format.
-      let openaiFinishReason = null;
-      let openaiUsage = null;
-      const parseSSEChunk = (line) => {
-        if (!line.startsWith('data:')) return null;
-        const data = line.slice(5).trim();
-        if (!data || data === '[DONE]') return null;
-        try {
-          return JSON.parse(data);
-        } catch (e) {
-          return null;
-        }
-      };
-
-      // Anthropic streams typed events (content_block_delta, message_delta,
-      // ...); this maps each onto the OpenAI chunk shape handled below.
-      const thinkingBlocks = [];
-      const anthropicUsage = { prompt_tokens: 0, completion_tokens: 0 };
-      const adaptAnthropicEvent = (event) => {
-        const delta = (fields) => ({ choices: [{ delta: fields }] });
-        switch (event.type) {
-          case 'message_start':
-            anthropicUsage.prompt_tokens = (event.message?.usage?.input_tokens ?? 0) +
-              (event.message?.usage?.cache_read_input_tokens ?? 0) + (event.message?.usage?.cache_creation_input_tokens ?? 0);
-            return null;
-          case 'content_block_start': {
-            const block = event.content_block;
-            if (block.type === 'tool_use') return delta({ tool_calls: [{ index: event.index, id: block.id, function: { name: block.name } }] });
-            if (block.type === 'thinking' || block.type === 'redacted_thinking') thinkingBlocks[event.index] = { ...block };
-            return null;
-          }
-          case 'content_block_delta': {
-            const d = event.delta;
-            if (d.type === 'text_delta') return delta({ content: d.text });
-            if (d.type === 'input_json_delta') return delta({ tool_calls: [{ index: event.index, function: { arguments: d.partial_json } }] });
-            if (d.type === 'thinking_delta') {
-              thinkingBlocks[event.index].thinking += d.thinking;
-              return delta({ reasoning_content: d.thinking });
-            }
-            if (d.type === 'signature_delta') thinkingBlocks[event.index].signature = d.signature;
-            return null;
-          }
-          case 'message_delta': {
-            anthropicUsage.completion_tokens = event.usage?.output_tokens ?? anthropicUsage.completion_tokens;
-            const reason = { end_turn: 'stop', stop_sequence: 'stop', tool_use: 'tool_calls' }[event.delta?.stop_reason] ?? event.delta?.stop_reason;
-            return {
-              choices: [{ delta: {}, finish_reason: reason }],
-              usage: { ...anthropicUsage, total_tokens: anthropicUsage.prompt_tokens + anthropicUsage.completion_tokens }
-            };
-          }
-          case 'error':
-            throw new Error(`API error: ${event.error?.message || 'stream failed'}`);
-          default:
-            return null;
-        }
-      };
-
-      const handleLine = async (line) => {
-        if (!line.trim()) return;
-        let json;
-        if (isOpenAI) {
-          json = parseSSEChunk(line);
-          if (json && isAnthropic) json = adaptAnthropicEvent(json);
-          if (!json) return;
-        } else {
-          try {
-            json = JSON.parse(line);
-          } catch (e) {
-            return; // Incomplete/malformed line; skip it.
-          }
-        }
-        const choice = isOpenAI ? json.choices?.[0] : null;
-        // reasoning_content is a de facto extension some OpenAI-compatible
-        // servers (e.g. vLLM serving DeepSeek-R1-style models) use to stream
-        // reasoning; there's no standardized field for it.
-        const thinking = isOpenAI ? choice?.delta?.reasoning_content : json.message?.thinking;
-        if (thinking && this.showThinking) {
-          if (!thinkingStarted) {
-            this.stopSpinner(spinner);
-            spinner = null;
-            process.stdout.write(`${ANSI.assistant.narration}Thinking...\n`);
-            thinkingStarted = true;
-          }
-          thinkingWrapper.write(thinking);
-        }
-        const content = isOpenAI ? choice?.delta?.content : json.message?.content;
-        if (content) {
-          endThinking(false);
-          if (!started) {
-            this.stopSpinner(spinner);
-            spinner = null;
-            process.stdout.write(ANSI.assistant.dialogue);
-            started = true;
-          }
-          await renderer.write(content);
-          fullResponse += content;
-        }
-        if (isOpenAI) {
-          if (choice?.delta?.tool_calls) collectOpenAIToolCalls(choice.delta.tool_calls);
-        } else if (json.message?.tool_calls) {
-          toolCalls.push(...json.message.tool_calls);
-        }
-        if (isOpenAI) {
-          if (choice?.finish_reason) openaiFinishReason = choice.finish_reason;
-          if (json.usage) openaiUsage = json.usage;
-        } else if (json.done) {
-          stats = json;
-        }
-      };
-
-      // Stream the response. Chunks are raw bytes and don't align with NDJSON
-      // line boundaries, so decode incrementally and buffer partial lines.
-      for await (const chunk of response.body) {
-        lineBuffer += decoder.decode(chunk, { stream: true });
-        const lines = lineBuffer.split('\n');
-        lineBuffer = lines.pop();
-        for (const line of lines) {
-          await handleLine(line);
-        }
-      }
-      if (lineBuffer) {
-        await handleLine(lineBuffer);
-      }
-      if (isOpenAI) {
-        stats = { done_reason: openaiFinishReason || 'stop', usage: openaiUsage };
-      }
-      const doneReason = stats?.done_reason;
-      if (doneReason === 'refusal') process.stdout.write(`${ANSI.reset}\n⚠️  The model declined to answer this request.\n`);
-      endThinking(Boolean(doneReason && doneReason !== 'stop' && doneReason !== 'tool_calls'));
-      await renderer.end();
-
-      if (started) {
-        process.stdout.write(ANSI.reset);
-      }
-
-      // Add assistant response to history (raw, asterisks intact)
-      const calls = toolCalls.filter(Boolean);
-      for (const call of calls) {
-        call.id ||= newCallId();
-        call.function.arguments = parseArguments(call.function.arguments);
-      }
-      const message = { id: newMessageId(), role: 'assistant', content: fullResponse, origin: { api: this.api, model: this.model } };
-      if (calls.length > 0) message.tool_calls = calls;
-      const kept = thinkingBlocks.filter(Boolean);
-      if (kept.length > 0) message.thinkingBlocks = kept;
-      this.history.push(message);
-
-      // A tool-calling turn continues right away, so skip the blank-line
-      // spacing (and stats) that close off a finished response.
-      if (calls.length > 0) {
-        if (started) process.stdout.write('\n');
-        return calls;
-      }
-
-      process.stdout.write('\n');
-      if (this.verbose && stats) {
-        this.printStats(stats);
-      }
-      process.stdout.write('\n');
-      return [];
-    } finally {
-      this.stopSpinner(spinner);
-    }
-  }
-
-  printStats(stats) {
-    if (this.api !== 'ollama') {
-      if (!stats.usage) {
-        console.log('  (token stats unavailable - server did not return usage data)');
-        return;
-      }
-      console.log(`  prompt tokens:      ${stats.usage.prompt_tokens ?? 0}`);
-      console.log(`  completion tokens:  ${stats.usage.completion_tokens ?? 0}`);
-      console.log(`  total tokens:       ${stats.usage.total_tokens ?? 0}`);
-      return;
-    }
-    const secs = (ns) => ((ns || 0) / 1e9).toFixed(2);
-    const rate = (count, ns) => (ns ? (count / (ns / 1e9)).toFixed(2) : '0.00');
-    console.log(`  total duration:       ${secs(stats.total_duration)}s`);
-    console.log(`  load duration:        ${secs(stats.load_duration)}s`);
-    console.log(`  prompt eval count:    ${stats.prompt_eval_count ?? 0} token(s)`);
-    console.log(`  prompt eval duration: ${secs(stats.prompt_eval_duration)}s`);
-    console.log(`  prompt eval rate:     ${rate(stats.prompt_eval_count, stats.prompt_eval_duration)} tokens/s`);
-    console.log(`  eval count:           ${stats.eval_count ?? 0} token(s)`);
-    console.log(`  eval duration:        ${secs(stats.eval_duration)}s`);
-    console.log(`  eval rate:            ${rate(stats.eval_count, stats.eval_duration)} tokens/s`);
   }
 
   printWelcome() {
@@ -1348,17 +896,17 @@ export class OllamaChat {
       return;
     }
     let chatId;
-    let projectId_;
+    let chatProject;
     try {
       chatId = chatIdOf(sessionPath(target));
-      projectId_ = chatProjectOf(sessionPath(target));
+      chatProject = chatProjectOf(sessionPath(target));
       await deleteLocalSession(target);
     } catch (error) {
       console.error(`\n❌ Error deleting session: ${error.message}\n`);
       return;
     }
     console.log(`\n🗑️  Deleted session '${target}'.`);
-    const home = projectId_ ? this.projectFor(projectId_) : null;
+    const home = chatProject ? this.projectFor(chatProject) : null;
     if (home && chatId) {
       try {
         if (deleteSyncedChat({ folder: home.project.folder, key: home.key, chatId })) console.log("   Removed it from the project's sync folder too; your other devices delete it at their next sync.");
@@ -1371,354 +919,6 @@ export class OllamaChat {
       console.log('   Started a new conversation.');
     }
     console.log('');
-  }
-
-  // --- Sync and projects (see sync.js) ---
-
-  // A project from the sync config with its key, or null (no such project
-  // here, or no key for it on this device).
-  projectFor(id) {
-    const project = loadSyncConfig().projects.find((p) => p.id === id);
-    const key = project ? loadProjectKey(id) : null;
-    return project && key ? { project, key } : null;
-  }
-
-  // The project the open chat is in, as { project, key }, or null.
-  currentProject() {
-    if (!this.sessionName || !existsSync(sessionPath(this.sessionName))) return null;
-    const id = chatProjectOf(sessionPath(this.sessionName));
-    return id ? this.projectFor(id) : null;
-  }
-
-  printSyncResult(report, { quiet = false } = {}) {
-    const line = describeSync(report);
-    const dim = (text) => (quiet ? `${CHROME_COLOR}${text}${ANSI.reset}` : text);
-    if (line) console.log(dim(`🔄 ${line}`));
-    else if (!quiet) console.log('🔄 Already in sync.');
-    for (const split of report.splits) console.log(dim(`   '${split.chat}' continued on two devices; the other line is now '${split.copy}'.`));
-    for (const error of report.errors) console.log(dim(`⚠️  Sync: ${error}`));
-  }
-
-  // At startup, before any chat is resumed: a quiet sync that says only what changed.
-  syncAtStartup() {
-    const config = loadSyncConfig();
-    if (!config.projects.length) return;
-    try {
-      this.printSyncResult(syncProjects({ config, sessionsDir: SESSION_DIR, keyFor: loadProjectKey }), { quiet: true });
-    } catch (error) {
-      console.log(`${CHROME_COLOR}⚠️  Sync failed: ${error.message}${ANSI.reset}`);
-    }
-  }
-
-  // After a save: send the chat's new commits to its project, quietly.
-  pushToSync() {
-    const home = this.currentProject();
-    if (!home) return;
-    try {
-      pushChat({ folder: home.project.folder, key: home.key, file: sessionPath(this.sessionName) });
-    } catch (error) {
-      console.log(`${CHROME_COLOR}⚠️  Sync failed: ${error.message}${ANSI.reset}`);
-    }
-  }
-
-  // /sync: syncs every project. (Global.)
-  async sync(arg) {
-    const [sub] = arg.split(/\s+/).filter(Boolean);
-    switch ((sub ?? '').toLowerCase()) {
-      case '':
-        return this.runSync();
-      case 'setup':
-        return this.syncSetup(unquote(arg.replace(/^\S+\s*/, '')));
-      case 'status':
-        return this.printProjects();
-      case 'off':
-        saveSyncConfig({ default: null, projects: [] });
-        console.log("\nSync is off on this device. Chats and keys are untouched, and the folders keep what was synced. /sync setup or /project add turns it back on.\n");
-        return undefined;
-      default:
-        console.log(`\nUnknown /sync option '${sub}'. Use /sync, /sync setup <folder>, /sync status, or /sync off.\n`);
-        return undefined;
-    }
-  }
-
-  // Saves the open chat, syncs every project, and brings the open chat up
-  // to date with what arrived.
-  async runSync() {
-    const config = loadSyncConfig();
-    if (!config.projects.length) {
-      console.log('\nSync is off. /sync setup <folder> turns it on: a folder your cloud drive (iCloud Drive, Dropbox, ...) already syncs.\n');
-      return;
-    }
-    try {
-      if (this.autosave && this.sessionName) await this.autosaveSession({ push: false });
-      const before = this.sessionName && existsSync(sessionPath(this.sessionName)) ? await sessionStamp(this.sessionName) : null;
-      console.log('');
-      const report = syncProjects({ config, sessionsDir: SESSION_DIR, keyFor: loadProjectKey });
-      this.printSyncResult(report);
-      const after = this.sessionName && existsSync(sessionPath(this.sessionName)) ? await sessionStamp(this.sessionName) : null;
-      if (before && !after) {
-        console.log(`   '${this.sessionName}' was deleted or moved on another device. This conversation is kept here, unsaved.`);
-        this.sessionName = null;
-      } else if (before && after && before !== after) await this.refreshFromSync(report);
-      console.log('');
-    } catch (error) {
-      console.log(`\n❌ Sync failed: ${error.message}\n`);
-    }
-  }
-
-  // The open chat changed in the folder: show the new state of it, and say
-  // where our own last messages went if the chat split.
-  async refreshFromSync(report) {
-    const name = this.sessionName;
-    const ours = this.conversation().at(-1)?.id ?? null;
-    const session = await readLocalSession(name);
-    if (!session) return;
-    this.applySessionState(name, session);
-    const split = report.splits.find((s) => s.chat === name);
-    if (split && ours && !session.messages.some((m) => m.id === ours)) {
-      console.log(`   Your latest messages are in '${split.copy}'; '${name}' now shows the other device's.`);
-    } else {
-      console.log(`   '${name}' now has the changes from your other device (${session.messages.length} messages).`);
-    }
-  }
-
-  // /sync setup <folder>: turns sync on with a default project in that folder.
-  async syncSetup(arg) {
-    if (!arg) {
-      console.log('\nUsage: /sync setup <folder>   (a folder inside iCloud Drive, Dropbox, or similar, on every device)\n');
-      return;
-    }
-    const config = loadSyncConfig();
-    if (config.default) {
-      console.log(`\nSync is already set up: the default project is '${defaultProject(config).name}'. /project add <folder> or /project new <name> <folder> adds more.\n`);
-      return;
-    }
-    const folder = resolveFolder(arg);
-    if (readProject(folder)) await this.joinProject(folder);
-    else await this.createProject('Default', folder);
-  }
-
-  // Makes a project: a folder, and a new key that is kept here and shown once.
-  async createProject(name, folder) {
-    const config = loadSyncConfig();
-    if (findProject(config, name)) {
-      console.log(`\nYou already have a project called '${name}'.\n`);
-      return;
-    }
-    if (readProject(folder)) {
-      console.log(`\n${folder} is already a project. /project add ${folder} joins it.\n`);
-      return;
-    }
-    try {
-      await fs.mkdir(folder, { recursive: true });
-      const key = generateProjectKey();
-      const where = saveProjectKey(key);
-      initProject(folder, key, name);
-      const first = !config.default;
-      addProject({ id: projectId(key), folder, name });
-      console.log(`\n✅ Project '${name}' syncs through ${folder}. Its key is kept in ${where}.`);
-      if (first) {
-        const adopted = adoptUnassigned(SESSION_DIR, projectId(key));
-        console.log(`   It's the default project: new chats go in it${adopted ? `, and so did your ${adopted} existing chat${adopted === 1 ? '' : 's'}` : ''}.`);
-      }
-      console.log(`\nKeep a copy of this project key somewhere safe, such as your password manager. You need it to add another device, and without it (or a device that has it) the project's chats can't be read:\n\n  ${encodeProjectKey(key)}\n`);
-      await this.runSync();
-    } catch (error) {
-      console.log(`\n❌ Couldn't make the project: ${error.message}\n`);
-    }
-  }
-
-  // Joins the project in a folder, asking for its key if this device doesn't have it.
-  async joinProject(folder, alias) {
-    const info = readProject(folder);
-    if (!info) {
-      console.log(`\n${folder} isn't a project folder (no ${path.join('skinnyai-sync', 'project.json')}). If another device just set it up, wait for the folder to finish syncing.\n`);
-      return;
-    }
-    const config = loadSyncConfig();
-    const existing = config.projects.find((p) => p.id === info.project);
-    if (existing) {
-      console.log(`\nThat folder is already your project '${existing.name}'.\n`);
-      return;
-    }
-    try {
-      let key = loadProjectKey(info.project);
-      if (!key) {
-        console.log(`\nThis project's key isn't on this device. Enter the project key (/project key on a device that has it shows it):`);
-        try {
-          key = decodeProjectKey((await this.readTurnInput()) || '');
-        } catch (error) {
-          console.log(`\n❌ ${error.message}\n`);
-          return;
-        }
-        if (!keyOpensProject(folder, key)) {
-          console.log("\n❌ That key doesn't open the project in that folder.\n");
-          return;
-        }
-        console.log(`\nKey kept in ${saveProjectKey(key)}.`);
-      }
-      const suggested = suggestedName(folder, key);
-      let name = alias || suggested || path.basename(folder);
-      for (let n = 2; findProject(config, name); n++) name = `${alias || suggested || path.basename(folder)} (${n})`;
-      addProject({ id: info.project, folder, name });
-      console.log(`✅ Joined project '${name}'${suggested && suggested !== name ? ` (its creator calls it '${suggested}')` : ''}.`);
-      if (!config.default) {
-        const adopted = adoptUnassigned(SESSION_DIR, info.project);
-        console.log(`   It's the default project: new chats go in it${adopted ? `, and so did your ${adopted} existing chat${adopted === 1 ? '' : 's'}` : ''}.`);
-      }
-      await this.runSync();
-    } catch (error) {
-      console.log(`\n❌ Couldn't join the project: ${error.message}\n`);
-    }
-  }
-
-  printProjects() {
-    const config = loadSyncConfig();
-    if (!config.projects.length) {
-      console.log('\nNo projects yet. /sync setup <folder> makes the default one; /project new <name> <folder> makes another.\n');
-      return;
-    }
-    const current = this.sessionName && existsSync(sessionPath(this.sessionName)) ? chatProjectOf(sessionPath(this.sessionName)) : null;
-    console.log('\nProjects:');
-    for (const project of config.projects) {
-      const marks = [project.id === config.default ? 'default' : '', project.id === current ? 'this chat' : '', loadProjectKey(project.id) ? '' : 'no key on this device', existsSync(project.folder) ? '' : 'folder not found'].filter(Boolean);
-      console.log(`  ${project.name}${marks.length ? ` (${marks.join(', ')})` : ''}\n    ${project.folder}`);
-    }
-    console.log('');
-  }
-
-  // /project: global operations (list, new, add, default, key, rename,
-  // forget) and operations on the open chat (move, copy).
-  async project(arg) {
-    const [sub, ...rest] = arg.split(/\s+/).filter(Boolean);
-    const config = loadSyncConfig();
-    const named = (text) => {
-      const found = findProject(config, text);
-      if (!found) console.log(`\nNo project called '${text}'. /project lists them.\n`);
-      return found;
-    };
-    switch ((sub ?? '').toLowerCase()) {
-      case '':
-        return this.printProjects();
-      case 'new': {
-        const match = /^new\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s+(.+)$/.exec(arg);
-        if (!match) {
-          console.log('\nUsage: /project new <name> <folder>\n');
-          return undefined;
-        }
-        return this.createProject(match[1] ?? match[2] ?? match[3], resolveFolder(unquote(match[4])));
-      }
-      case 'add':
-        if (!rest.length) {
-          console.log('\nUsage: /project add <folder> [name]   (name: what you want to call it here)\n');
-          return undefined;
-        }
-        return this.joinFolderArg(arg.replace(/^\S+\s*/, ''));
-      case 'default': {
-        const found = named(rest.join(' '));
-        if (found) {
-          setDefaultProject(found.id);
-          console.log(`\n'${found.name}' is now the default project: new chats go in it.\n`);
-        }
-        return undefined;
-      }
-      case 'key': {
-        const found = rest.length ? named(rest.join(' ')) : defaultProject(config);
-        if (!found) {
-          if (!rest.length) console.log('\nNo default project yet. /sync setup <folder> makes one.\n');
-          return undefined;
-        }
-        const key = loadProjectKey(found.id);
-        console.log(key
-          ? `\nProject key for '${found.name}'. Anyone who has this and can open the folder can read and change every chat in the project; give it to people only by some route other than the folder:\n\n  ${encodeProjectKey(key)}\n`
-          : `\nThis device has no key for '${found.name}'.\n`);
-        return undefined;
-      }
-      case 'rename': {
-        const match = /^rename\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s+(.+)$/.exec(arg);
-        const found = match && findProject(config, match[1] ?? match[2] ?? match[3]);
-        if (!found) {
-          console.log('\nUsage: /project rename <project> <new name>   (a local label; the folder keeps its own suggestion)\n');
-          return undefined;
-        }
-        if (findProject(config, unquote(match[4]))) {
-          console.log(`\nYou already have a project called '${unquote(match[4])}'.\n`);
-          return undefined;
-        }
-        renameProject(found.id, unquote(match[4]));
-        console.log(`\nRenamed '${found.name}' to '${unquote(match[4])}'.\n`);
-        return undefined;
-      }
-      case 'forget': {
-        const found = named(rest.join(' '));
-        if (found) {
-          removeProject(found.id);
-          console.log(`\nStopped syncing '${found.name}' on this device. Its chats stay here, unsynced, and the folder and key are untouched.\n`);
-        }
-        return undefined;
-      }
-      case 'move':
-      case 'copy': {
-        const found = named(rest.join(' '));
-        return found ? this.moveOrCopyChat(found, sub.toLowerCase() === 'move') : undefined;
-      }
-      default:
-        console.log(`\nUnknown /project option '${sub}'. Global: /project, new, add, default, key, rename, forget. This chat: move, copy.\n`);
-        return undefined;
-    }
-  }
-
-  // "/project add <folder> [name]": the folder may contain spaces, so a
-  // trailing quoted name is the only way to give one.
-  async joinFolderArg(text) {
-    const quoted = /^(.*\S)\s+(?:"([^"]+)"|'([^']+)')$/.exec(text);
-    const folder = resolveFolder(unquote(quoted ? quoted[1] : text));
-    return this.joinProject(folder, quoted ? (quoted[2] ?? quoted[3]) : undefined);
-  }
-
-  // /project move|copy <project>: puts this chat in another project as a
-  // chat of its own (new id, sealed under that project's key). A move
-  // removes it from the old project, leaving only a deletion marker there.
-  async moveOrCopyChat(target, move) {
-    const targetKey = loadProjectKey(target.id);
-    if (!targetKey) {
-      console.log(`\nThis device has no key for '${target.name}'.\n`);
-      return;
-    }
-    try {
-      if (this.conversation().length === 0) {
-        console.log('\nThis chat has no messages yet.\n');
-        return;
-      }
-      const name = this.sessionName ?? await autosaveName();
-      if (!await this.writeSession(name)) return; // a conflict was skipped
-      const file = sessionPath(name);
-      const fromId = chatProjectOf(file);
-      if (fromId === target.id) {
-        console.log(`\nThis chat is already in '${target.name}'.\n`);
-        return;
-      }
-      const previous = fromId ? this.projectFor(fromId) : null;
-      const oldChatId = chatIdOf(file);
-      if (!move) {
-        const copy = copyChat({ file, sessionsDir: SESSION_DIR, project: target.id });
-        pushChat({ folder: target.folder, key: targetKey, file: copy.file });
-        console.log(`\n✅ Copied to '${target.name}' as '${copy.name}'. This chat is unchanged.\n`);
-        return;
-      }
-      // Build the copy beside the original, then swap, so nothing is lost if this stops half way.
-      const copy = copyChat({ file, sessionsDir: SESSION_DIR, project: target.id, name, to: path.join(SESSION_DIR, `${randomUUID()}.incoming`) });
-      pushChat({ folder: target.folder, key: targetKey, file: copy.file });
-      await deleteLocalSession(name);
-      await fs.rename(copy.file, file);
-      if (previous) deleteSyncedChat({ folder: previous.project.folder, key: previous.key, chatId: oldChatId });
-      this.sessionName = name;
-      this.sessionStamp = await sessionStamp(name);
-      this.savedHead = this.conversation().at(-1)?.id ?? null;
-      console.log(`\n✅ Moved to '${target.name}'.${previous ? ` Other devices in '${previous.project.name}' remove it at their next sync.` : ''}\n`);
-    } catch (error) {
-      console.log(`\n❌ Couldn't ${move ? 'move' : 'copy'} the chat: ${error.message}\n`);
-    }
   }
 
   // Writes the conversation to a file: a .md transcript, or a .Modelfile
@@ -1740,7 +940,7 @@ export class OllamaChat {
         ? formatModelfile({ ...this.sessionSnapshot(), messages: this.savableMessages() })
         : formatMarkdown({ title: this.sessionName || 'Chat', system: this.getSystemMessage(), messages: this.conversation() });
       await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, text);
+      await fs.writeFile(file, text, { mode: 0o600 }); // it's your conversation; others on the machine needn't read it
       console.log(`\n✅ Exported to ${file}\n`);
     } catch (error) {
       console.error(`\n❌ Error exporting: ${error.message}\n`);
@@ -1773,6 +973,7 @@ export class OllamaChat {
         redactLocalSession(name, kinds[kind], this.conversation());
         this.sessionStamp = await sessionStamp(name);
         this.savedHead = this.conversation().at(-1)?.id ?? null;
+        this.purgeSyncFolder(name);
       }
       console.log(`\n🧹 Purged ${removed} ${kinds[kind] === 'tools' ? 'tool call' : kinds[kind] === 'blobs' ? 'attachment' : 'thinking block'}${removed === 1 ? '' : 's'}.\n`);
     } catch (error) {
@@ -2184,7 +1385,7 @@ export class OllamaChat {
     console.log(`\n${this.carryOverNote(`Switched to model '${this.model}'`)}`);
   }
 
-  handleSet(args) {
+  handleSet(args, raw = args.join(' ')) {
     const [sub, ...rest] = args;
     switch (sub) {
       case 'profile': {
@@ -2202,7 +1403,7 @@ export class OllamaChat {
           console.log('\nUsage:\n  /set system <string>\n');
           break;
         }
-        this.setSystemMessage(rest.join(' '));
+        this.setSystemMessage(raw.replace(/^system\s+/, '')); // as typed, not with its spacing collapsed
         console.log('Set system message.\n');
         break;
       case 'parameter': {
@@ -2385,7 +1586,7 @@ export class OllamaChat {
         await this.show(rest);
         return true;
       case '/set':
-        await this.handleSet(rest);
+        await this.handleSet(rest, trimmed.slice(rawCmd.length).trim());
         return true;
       case '/help':
       case '/?':
@@ -2467,247 +1668,6 @@ export class OllamaChat {
     });
   }
 
-  // A small line editor. Enter submits; Ctrl+J (and Shift+Enter, if the
-  // terminal sends a distinguishable sequence for it - most don't) inserts a
-  // newline. Supports cursor movement (arrows, Home/End, Ctrl+A/E, word jumps
-  // with Ctrl/Alt+arrows or Alt+B/F), deletion (Backspace, Delete, Ctrl+W,
-  // Ctrl+U, Ctrl+K), history recall with Up/Down (from the first/last line of
-  // a multi-line message), and bracketed paste, so pasted line breaks become
-  // part of the message instead of submitting it. The whole input is redrawn
-  // after each change, which keeps wrapping and wide characters simple.
-  async editLine() {
-    return new Promise((resolve) => {
-      const stdin = process.stdin;
-      const history = this.inputHistory;
-      let buffer = '';
-      let cursor = 0; // UTF-16 index into buffer, always on a grapheme boundary
-      let cursorRow = 0; // terminal row the cursor is on, relative to the prompt's
-      let historyIndex = history.length;
-      let draft = ''; // unsent input, kept while browsing history
-      let pasting = false;
-      // Files dragged in (their paths are recognized as they arrive) are
-      // taken out of the text and shown as chips on a line above the prompt.
-      const attached = [];
-
-      const chipLine = () => {
-        let text = attached.map((file) => `📎 ${file.name}`).join('  ');
-        const room = (process.stdout.columns || 80) - 1;
-        if (visibleWidth(text) > room) {
-          const kept = [];
-          let used = 1;
-          for (const { segment } of graphemes.segment(text)) {
-            used += graphemeWidth(segment);
-            if (used > room) break;
-            kept.push(segment);
-          }
-          text = kept.join('') + '…';
-        }
-        return `${CHROME_COLOR}${text}${ANSI.reset}\r\n`;
-      };
-
-      const render = () => {
-        const end = inputPosition(buffer);
-        const target = inputPosition(buffer.slice(0, cursor));
-        const chips = attached.length > 0;
-        let out = cursorRow > 0 ? `\x1b[${cursorRow}A` : '';
-        // Raw mode disables automatic CR-on-LF, so embedded newlines need an explicit \r.
-        out += '\r\x1b[J' + (chips ? chipLine() : '') + styledPrompt() + buffer.replace(/\n/g, '\r\n');
-        if (end.pending) out += ' \r'; // move off the right edge onto the next row
-        if (end.row > target.row) out += `\x1b[${end.row - target.row}A`;
-        out += '\r' + (target.col > 0 ? `\x1b[${target.col}C` : '');
-        cursorRow = target.row + (chips ? 1 : 0);
-        process.stdout.write(out);
-      };
-
-      // Moves any complete file path in the text into `attached`. Run when a
-      // paste ends (a drag-and-drop arrives like one) and after each space, so
-      // a path typed or dropped without bracketed paste is caught too.
-      // Any kind of file counts when it came in as a paste, since that's what
-      // a drop is; typed text only attaches images.
-      const attachImages = (pasted) => {
-        if (!buffer.includes('/')) return;
-        const found = extractAttachments(buffer, { complete: false, allowEnd: pasted, anyFile: pasted });
-        if (found.attachments.length === 0) return;
-        const atEnd = cursor >= buffer.length;
-        attached.push(...found.attachments);
-        buffer = found.text;
-        cursor = atEnd ? buffer.length : Math.min(cursor, buffer.length);
-      };
-
-      // Cursor steps and deletes whole grapheme clusters, so an emoji like ⚠️
-      // or 👩‍💻 behaves as the single character it looks like.
-      const boundaries = () => [...Array.from(graphemes.segment(buffer), (g) => g.index), buffer.length];
-      const prev = (i) => boundaries().filter((b) => b < i).pop() ?? 0;
-      const next = (i) => boundaries().find((b) => b > i) ?? buffer.length;
-      const snap = (i) => boundaries().filter((b) => b <= i).pop() ?? 0;
-      const lineStart = (i) => buffer.lastIndexOf('\n', i - 1) + 1;
-      const lineEnd = (i) => (buffer.indexOf('\n', i) === -1 ? buffer.length : buffer.indexOf('\n', i));
-      const wordLeft = (i) => {
-        while (i > 0 && /\s/.test(buffer[i - 1])) i--;
-        while (i > 0 && !/\s/.test(buffer[i - 1])) i--;
-        return i;
-      };
-      const wordRight = (i) => {
-        while (i < buffer.length && /\s/.test(buffer[i])) i++;
-        while (i < buffer.length && !/\s/.test(buffer[i])) i++;
-        return i;
-      };
-
-      const insert = (text) => {
-        buffer = buffer.slice(0, cursor) + text + buffer.slice(cursor);
-        cursor += text.length;
-      };
-      const remove = (from, to) => {
-        buffer = buffer.slice(0, from) + buffer.slice(to);
-        cursor = from;
-      };
-      const recall = (index) => {
-        if (historyIndex === history.length) draft = buffer;
-        historyIndex = index;
-        buffer = index === history.length ? draft : history[index];
-        cursor = buffer.length;
-      };
-
-      const cleanup = () => {
-        process.stdout.write('\x1b[?2004l\x1b[<u'); // bracketed paste off; back to the usual key reporting
-        stdin.removeListener('keypress', onKeypress);
-        stdin.setRawMode(false);
-        stdin.pause();
-      };
-
-      const onKeypress = async (str, key) => {
-        key = key || {};
-        const decoded = decodeCsiU(key.sequence ?? str);
-        if (decoded) {
-          key = decoded.key;
-          str = decoded.text;
-        }
-
-        if (key.name === 'paste-start') {
-          pasting = true;
-          return;
-        }
-        if (key.name === 'paste-end') {
-          pasting = false;
-          attachImages(true);
-          render();
-          return;
-        }
-        if (pasting) {
-          // Terminals send pasted line breaks as \r; keep them as newlines.
-          if (key.name === 'return' || key.name === 'enter') insert('\n');
-          else if (str && !/[\x00-\x08\x0b-\x1f\x7f]/.test(str)) insert(str);
-          return;
-        }
-
-        if (key.ctrl && key.name === 'c') {
-          cleanup();
-          process.stdout.write('\n');
-          if (this.stopOnExit) {
-            await this.stopModel();
-          }
-          this.mcp?.close();
-          process.exit(0);
-          return;
-        }
-
-        if (key.ctrl && key.name === 'd' && buffer.length === 0) {
-          cleanup();
-          process.stdout.write('\n');
-          resolve(null);
-          return;
-        }
-
-        // Enter sends \r ('return'); Ctrl+J sends a bare \n, which Node names 'enter'.
-        const isNewlineInsert =
-          key.name === 'enter' ||
-          (key.name === 'return' && (key.shift || key.meta)); // Shift+Enter, where the terminal reports it
-        if (isNewlineInsert) {
-          insert('\n');
-        } else if (key.name === 'return') {
-          cursor = buffer.length;
-          render();
-          cleanup();
-          process.stdout.write('\r\n');
-          if (buffer.trim() && buffer !== history[history.length - 1]) history.push(buffer);
-          this.pendingFiles = attached;
-          resolve(buffer);
-          return;
-        } else if (key.name === 'backspace') {
-          if (key.meta) remove(wordLeft(cursor), cursor);
-          else if (cursor > 0) remove(prev(cursor), cursor);
-          else if (buffer.length === 0) attached.pop(); // nothing left to delete: drop the last image
-        } else if (key.name === 'delete' || (key.ctrl && key.name === 'd')) {
-          if (cursor < buffer.length) remove(cursor, next(cursor));
-        } else if (key.ctrl && key.name === 'w') {
-          remove(wordLeft(cursor), cursor);
-        } else if (key.ctrl && key.name === 'u') {
-          remove(lineStart(cursor), cursor);
-        } else if (key.ctrl && key.name === 'k') {
-          const end = lineEnd(cursor);
-          buffer = buffer.slice(0, cursor) + buffer.slice(end === cursor && end < buffer.length ? end + 1 : end);
-        } else if ((key.name === 'left' && (key.ctrl || key.meta)) || (key.meta && key.name === 'b')) {
-          cursor = wordLeft(cursor);
-        } else if ((key.name === 'right' && (key.ctrl || key.meta)) || (key.meta && key.name === 'f')) {
-          cursor = wordRight(cursor);
-        } else if (key.name === 'left' || (key.ctrl && key.name === 'b')) {
-          cursor = prev(cursor);
-        } else if (key.name === 'right' || (key.ctrl && key.name === 'f')) {
-          cursor = next(cursor);
-        } else if (key.name === 'home' || (key.ctrl && key.name === 'a')) {
-          cursor = lineStart(cursor);
-        } else if (key.name === 'end' || (key.ctrl && key.name === 'e')) {
-          cursor = lineEnd(cursor);
-        } else if (key.name === 'up' || (key.ctrl && key.name === 'p')) {
-          const start = lineStart(cursor);
-          if (start > 0) {
-            const above = lineStart(start - 1);
-            cursor = snap(Math.min(above + (cursor - start), start - 1));
-          } else if (historyIndex > 0) {
-            recall(historyIndex - 1);
-          }
-        } else if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
-          const end = lineEnd(cursor);
-          if (end < buffer.length) {
-            const below = end + 1;
-            cursor = snap(Math.min(below + (cursor - lineStart(cursor)), lineEnd(below)));
-          } else if (historyIndex < history.length) {
-            recall(historyIndex + 1);
-          }
-        } else if (str && !key.ctrl && !key.meta && !/[\x00-\x1f\x7f]/.test(str)) {
-          insert(str);
-          if (/\s/.test(str)) attachImages(false);
-        } else {
-          return; // Unhandled key (Tab, Escape, function keys, ...)
-        }
-        render();
-      };
-
-      // Bracketed paste on, and (where supported) Shift+Enter reported as such;
-      // other terminals ignore the second sequence.
-      process.stdout.write(styledPrompt() + '\x1b[?2004h\x1b[>1u');
-      readline.emitKeypressEvents(stdin);
-      stdin.setRawMode(true);
-      stdin.resume();
-      stdin.on('keypress', onKeypress);
-    });
-  }
-
-  // Overwrites the raw (unstyled) lines the user just typed with the styled
-  // version. Handles input that spans multiple terminal rows, whether from
-  // wrapping or embedded newlines (Ctrl+J), by erasing the whole block and
-  // rewriting it rather than assuming a single row.
-  rewriteInputLine(input) {
-    if (!supportsColor || !process.stdin.isTTY || !process.stdout.isTTY) return;
-
-    const rows = inputPosition(input).row + 1;
-
-    process.stdout.moveCursor(0, -rows);
-    process.stdout.cursorTo(0);
-    process.stdout.clearScreenDown();
-    process.stdout.write(`${styledPrompt()}${styleLine('user', input)}`.replace(/\n/g, '\r\n') + '\r\n');
-  }
-
   async start() {
     if (sessionsLocked()) {
       this.autosave = false;
@@ -2770,3 +1730,5 @@ export class OllamaChat {
     this.mcp?.close();
   }
 }
+
+Object.assign(OllamaChat.prototype, syncCommands, lineEditor, requestBuilders, streaming);

@@ -38,10 +38,12 @@ That kind of protection is encryption at rest. While the volume is mounted, or t
 - **The model you talk to.** What you send goes to the server you chose, in the clear as far as that server is concerned. With OpenAI, Anthropic, Ollama's cloud models, or any other hosted model, that company receives your messages, attachments, and the tool results you send back, and its privacy policy decides what happens next. A server reached over plain `http://` also exposes them on the network between you and it. Only a model running on your own machine, such as local Ollama, keeps your conversation off the network. (Some hosted services run models inside hardware-protected enclaves that the operator can't read. skinnyai doesn't check for that; it treats every server the same.)
 - **Titles.** When a new chat gets a title, the first exchange is sent to the same model in one more request. `--no-titles` turns it off.
 - **Web search and pages.** With an Ollama API key, search queries and fetched URLs go to Ollama's hosted search. Without one, searches go to DuckDuckGo's Instant Answer API. `fetch_page` contacts whichever site the model asks for.
-- **MCP servers.** Tools you connect receive the arguments the model passes them, and a remote (HTTP) server receives them over the network.
+- **MCP servers.** Tools you connect receive the arguments the model passes them, and a remote (HTTP) server receives them over the network. A local server doesn't inherit skinnyai's API keys; it gets a small environment plus the `env` you give it. Each call shows its arguments and asks first, unless you trust the tool.
+- **Saved sessions from elsewhere.** A chat file can name the server it was saved with. If loading it would send an API key to a server you weren't already using, skinnyai asks first. Only known sampling parameters are taken from it.
+- **Text from the model.** Escape sequences in replies, pages and tool results are stripped before they reach the terminal, so they can't retitle the window or write the clipboard.
 - **Someone on your unlocked Mac.** A program running as you can read your files and may be able to ask the Keychain for your keys.
 - **Your screen and terminal.** Scrollback, screenshots, and recordings keep what was on screen. The macOS app and the command line behave the same.
-- **Exports.** `/export` writes a readable file; `/saveimage` writes images to your Pictures folder.
+- **Exports.** `/export` writes a readable file (readable only by you); `/saveimage` writes images to your Pictures folder.
 
 ## Keys, in short
 

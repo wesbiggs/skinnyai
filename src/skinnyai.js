@@ -3,21 +3,16 @@
 import './quiet-warnings.js';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { classifyFile, extractAttachments } from './attachments.js';
-import { tightenDir } from './home.js';
 import { OllamaChat } from './chat.js';
-import { envOptions, parseArgs, printUsage } from './cli.js';
-import { API_NAMES, CONFIG_FILE, SKINNY_HOME, VERSION, loadConfigFile, requestedProfile, resolveProfile } from './config.js';
-import { anthropicApiKey, isOllamaCom } from './http.js';
-import { imageSequence, loadImage, sniffImage } from './images.js';
-import { inputPosition } from './lineedit.js';
-import { createMarkdownRenderer } from './markdown.js';
-import { pickDefaultModel } from './models.js';
-import { SESSIONS_ENCRYPTED, SESSION_DIR, VOLUME_MARKER, autosaveName, chatFileExists, commitCount, formatModelfile, isAutosaveName, legacySessionPath, listLocalSessions, localSessionExists, messageCount, parseModelfile, readLocalSession, redactLocalSession, resumeHint, saveLocalSession, sessionPath, sessionsLocked, tidyTitle, uniqueSessionName, verifyChat } from './sessions.js';
-import { PROMPT, applyColorOverrides, charWidth, createInlineStyler, createWordWrapper, drawBox, graphemeWidth, renderTable, splitTableRow, styleLine, visibleWidth, wrapStyled } from './style.js';
+import { tightenDir } from './home.js';
+import { printUsage, parseArgs } from './cli.js';
+import { API_NAMES, CONFIG_FILE, SKINNY_HOME } from './config.js';
+import { anthropicApiKey } from './http.js';
+import { applyColorOverrides } from './style.js';
+import { SESSION_DIR } from './sessions.js';
 
 // Main
-async function main() {
+export async function main() {
   const { model, options } = parseArgs();
 
   if (!model) {
@@ -61,14 +56,9 @@ function invokedDirectly() {
   }
 }
 
-if (invokedDirectly()) main().catch(console.error);
-
-export {
-  charWidth, graphemeWidth, visibleWidth, createInlineStyler, styleLine, createWordWrapper,
-  splitTableRow, wrapStyled, renderTable, createMarkdownRenderer, inputPosition,
-  drawBox, VERSION, sniffImage, imageSequence, loadImage, pickDefaultModel, extractAttachments, classifyFile,
-  formatModelfile, parseModelfile, saveLocalSession, readLocalSession, listLocalSessions,
-  localSessionExists, isAutosaveName, autosaveName, sessionPath, legacySessionPath, chatFileExists, commitCount, redactLocalSession, verifyChat, sessionsLocked, SESSIONS_ENCRYPTED, VOLUME_MARKER, tidyTitle, uniqueSessionName, tightenDir, messageCount, resumeHint,
-  loadConfigFile, resolveProfile, requestedProfile, envOptions, parseArgs, isOllamaCom, OllamaChat, main,
-  PROMPT, SESSION_DIR, CONFIG_FILE
-};
+if (invokedDirectly()) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

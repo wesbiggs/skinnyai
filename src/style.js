@@ -76,6 +76,12 @@ export const CODE_COLOR = supportsColor ? '\x1b[38;5;117m' : '';
 export const CODE_BG = supportsColor ? '\x1b[48;5;236m' : ''; // dark grey behind fenced code, across the whole width
 export const CHROME_COLOR = supportsColor ? '\x1b[38;5;244m' : '';
 
+// Text that came from a model, a web page, or a tool is data, never terminal
+// commands: ESC (and the C1 controls some terminals read as ESC [ or ESC ])
+// would let it set the title, write the clipboard (OSC 52), or clear the screen.
+// Newlines and tabs stay; a carriage return only as part of CRLF.
+export const stripControls = (text) => String(text).replace(/\r\n/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
+
 export const SGR_PATTERN = /\x1b\[[0-9;]*m/g;
 // SGR styles plus OSC 8 hyperlink open/close - everything that takes no columns.
 export const ESCAPE_PATTERN = /\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*\x1b\\/g;

@@ -1,6 +1,5 @@
 import http from 'node:http';
 import https from 'node:https';
-import './config.js';
 import { ANTHROPIC_VERSION } from './config.js';
 
 // ollama.com (cloud models, web search/fetch) needs an API key. It's only
@@ -30,13 +29,14 @@ export function hostFetch(url, init = {}) {
 // can go quiet for longer than that before emitting a token, so the
 // long-lived streaming chat request uses plain http/https instead, which has
 // no such default idle timeout.
-export function streamingPost(url, body, extraHeaders = {}) {
+export function streamingPost(url, body, extraHeaders = {}, signal) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const transport = target.protocol === 'https:' ? https : http;
     const payload = JSON.stringify(body);
     const req = transport.request(target, {
       method: 'POST',
+      signal,
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),

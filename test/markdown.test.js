@@ -5,7 +5,7 @@ let skinnyai;
 
 beforeAll(async () => {
   fakeTTY({ columns: 60 });
-  skinnyai = await import('../src/skinnyai.js');
+  skinnyai = await import('./helpers/skinny.js');
 });
 
 // What a 60-column terminal shows after `markdown` is rendered.
@@ -185,5 +185,21 @@ describe('styleLine', () => {
     const styled = skinnyai.styleLine('user', 'hi *there*\nline **two**');
     expect(stripAnsi(styled)).toBe('hi there\nline two');
     expect(styled).toMatch(/\x1b\[0;38;5;136;3mthere/);
+  });
+});
+
+describe('terminal escapes in model text', () => {
+  it('stripControls removes ESC and C1 controls but keeps newlines and tabs', async () => {
+    const { stripControls } = await import('../src/style.js');
+    expect(stripControls('a\x1b]52;c;QQ==\x07b\x1b[2J\u009b31mc\r\nd\te')).toBe('a]52;c;QQ==b[2J31mc\nd\te');
+  });
+});
+
+describe('rendered output', () => {
+  it('never carries a model-written escape sequence to the terminal', async () => {
+    const output = await render(skinnyai, 'hi \x1b]52;c;ZXZpbA==\x07 \x1b]2;x\x07\n\n```\ncode \x1b[2J\n```\n');
+    expect(output).not.toMatch(/\x1b\](?!8;;)/);
+    expect(output).not.toContain('\x1b[2J');
+    expect(output).not.toContain('\x07');
   });
 });

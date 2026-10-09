@@ -1,4 +1,3 @@
-import './config.js';
 import { CONFIG, CONFIG_FILE } from './config.js';
 import { DEBUG_LOG } from './debug.js';
 
@@ -65,26 +64,36 @@ export function parseArgs() {
   const { model: defaultModel, ...options } = envOptions();
   let model = null;
 
+  const fail = (message) => {
+    console.error(`❌ Error: ${message} (--help lists the options)\n`);
+    process.exit(1);
+  };
+  // The value after a flag that takes one.
+  const valueOf = (i) => {
+    if (args[i + 1] === undefined || (args[i + 1].startsWith('-') && args[i + 1] !== '-')) fail(`${args[i]} needs a value`);
+    return args[i + 1];
+  };
+
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--model' || args[i] === '-m') {
-      model = args[++i];
+      model = valueOf(i++);
     } else if (args[i] === '--keep-alive' || args[i] === '-k') {
-      options.keepAlive = args[++i];
+      options.keepAlive = valueOf(i++);
     } else if (args[i] === '--host' || args[i] === '-h') {
-      options.host = args[++i];
+      options.host = valueOf(i++);
     } else if (args[i] === '--user-italic-color' || args[i] === '--user-emphasis-color') {
-      options.userEmphasisColor = args[++i];
+      options.userEmphasisColor = valueOf(i++);
     } else if (args[i] === '--user-normal-color') {
-      options.userNormalColor = args[++i];
+      options.userNormalColor = valueOf(i++);
     } else if (args[i] === '--model-italic-color' || args[i] === '--model-emphasis-color') {
-      options.modelEmphasisColor = args[++i];
+      options.modelEmphasisColor = valueOf(i++);
     } else if (args[i] === '--model-normal-color') {
-      options.modelNormalColor = args[++i];
+      options.modelNormalColor = valueOf(i++);
     } else if (BOOLEAN_FLAGS[args[i]]) {
       const [key, value] = BOOLEAN_FLAGS[args[i]];
       options[key] = value;
     } else if (args[i] === '--api') {
-      options.api = args[++i];
+      options.api = valueOf(i++);
     } else if (args[i] === '--profile') {
       i++; // already applied when the module loaded
     } else if (args[i].startsWith('--profile=')) {
@@ -92,9 +101,13 @@ export function parseArgs() {
     } else if (args[i] === '--help') {
       printUsage();
       process.exit(0);
-    } else if (!model && !args[i].startsWith('-')) {
+    } else if (args[i].startsWith('-')) {
+      fail(`unknown option ${args[i]}`);
+    } else if (!model) {
       // First non-flag argument is the model
       model = args[i];
+    } else {
+      fail(`unexpected argument '${args[i]}' (the model is '${model}')`);
     }
   }
 

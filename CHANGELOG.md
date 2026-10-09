@@ -14,6 +14,15 @@
 - `/set model <name>` switches model on the same server, keeping the conversation.
 - Conversations are kept in a provider-neutral form (`src/history.js`) and adapted to each model when a request is sent: tool calls become text when the new model lacks the tools, thinking blocks replay only to the model that wrote them, and PDFs/images a model can't take are noted instead.
 
+### Fixed and hardened
+- Escape sequences in replies, fetched pages, and tool results are stripped before they reach the terminal (no more title changes, clipboard writes, or screen clears from model text).
+- A saved session can no longer quietly send your API key to another server (it asks first), and only known sampling parameters are loaded from it.
+- Ctrl+C while a reply streams stops that reply and keeps what arrived, instead of ending the chat.
+- Local MCP servers no longer inherit skinnyai's API keys; the approval prompt shows the call's arguments.
+- `fetch_page` and image fetches check the address actually connected to (DNS rebinding), and block more reserved ranges.
+- `/purge` reaches the sync folder; deleted chats' late commits are cleaned up; malformed synced commits are skipped and reported.
+- Unknown command-line options and missing values are errors (a typo no longer becomes the model name); one oddly named file no longer empties `/list`; empty assistant messages aren't sent to Anthropic; `/project move` swaps in one step; secrets go to the Keychain on stdin, not in arguments; exports and edited configs are written privately.
+
 ### Changed
 - Chat files are created readable only by you (mode 600), and the folders skinnyai makes are mode 700; the default `~/.skinny` and its `sessions/` folder are tightened to 700 at startup if an earlier version made them world-readable.
 - `/list` help no longer says "locally" available models.

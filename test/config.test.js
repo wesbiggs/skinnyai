@@ -5,7 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 let skinnyai;
 
 beforeAll(async () => {
-  skinnyai = await import('../src/skinnyai.js');
+  skinnyai = await import('./helpers/skinny.js');
 });
 
 describe('Modelfile format', () => {

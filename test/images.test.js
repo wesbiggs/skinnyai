@@ -9,7 +9,7 @@ let skinnyai;
 beforeAll(async () => {
   fakeTTY({ columns: 60, rows: 40 });
   process.env.TERM_PROGRAM = 'iTerm.app'; // image support is detected at load
-  skinnyai = await import('../src/skinnyai.js');
+  skinnyai = await import('./helpers/skinny.js');
 });
 
 // Just enough of each format for sniffImage: the signature and the size.

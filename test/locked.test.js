@@ -21,7 +21,7 @@ beforeAll(async () => {
     encryptedSessions: { mountPoint: mount },
     profiles: { Default: { env: {} } }
   }));
-  skinnyai = await import('../src/skinnyai.js');
+  skinnyai = await import('./helpers/skinny.js');
   server = await startMockServer();
 });
 afterAll(() => server.close());

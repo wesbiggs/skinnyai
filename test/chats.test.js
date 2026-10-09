@@ -16,7 +16,7 @@ let capture;
 
 beforeAll(async () => {
   fakeTTY({ columns: 80 });
-  skinnyai = await import('../src/skinnyai.js');
+  skinnyai = await import('./helpers/skinny.js');
   server = await startMockServer();
 });
 afterAll(() => server.close());

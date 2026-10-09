@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import './config.js';
 import { IMAGE_PROTOCOL, localImagePath, showImages } from './images.js';
-import { ANSI, CHROME_COLOR, CODE_BG, CODE_COLOR, LINK_CLOSE, createInlineStyler, createWordWrapper, linkOpen, renderTable, visibleWidth } from './style.js';
+import { ANSI, CHROME_COLOR, CODE_BG, CODE_COLOR, LINK_CLOSE, createInlineStyler, createWordWrapper, linkOpen, renderTable, stripControls, visibleWidth } from './style.js';
 import { MAX_FETCH_BYTES } from './tools.js';
 
 // Streams markdown to the terminal as it arrives: inline styling (see
@@ -18,7 +18,7 @@ import { MAX_FETCH_BYTES } from './tools.js';
 // wait for images to load; await them.
 export function createMarkdownRenderer(role, startColumn = 0, { markdown = true, images = false } = {}) {
   if (!markdown || !process.stdout.isTTY) {
-    return { write: async (text) => { process.stdout.write(text); }, async end() {} };
+    return { write: async (text) => { process.stdout.write(stripControls(text)); }, async end() {} };
   }
 
   let out = '';
@@ -265,7 +265,7 @@ export function createMarkdownRenderer(role, startColumn = 0, { markdown = true,
 
   return {
     async write(text) {
-      for (const ch of text) {
+      for (const ch of stripControls(text)) {
         handle(ch);
         if (queuedImages.length && mode === 'start') await drawQueuedImages();
       }
