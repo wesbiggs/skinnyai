@@ -94,6 +94,7 @@ The file may hold API keys, so `chmod 600` it. [Configuration](docs/configuratio
 - [Commands](docs/commands.md): `/set`, `/show`, thinking output
 - [Sessions](docs/sessions.md): saved chats, autosave, `/new`, `/export`, `/share`
 - [Sync](docs/sync.md): the same chats on every device, end-to-end encrypted
+- [Encrypted chats](docs/encrypted-sessions.md) (macOS): keep saved chats on an encrypted disk image
 - [Security](docs/security.md): what the encryption protects and what it doesn't
 - [Tools](docs/tools.md): web search, `fetch_page`, MCP, hosted search, the date line
 - [Servers and APIs](docs/apis.md): Ollama, Ollama cloud, OpenAI-compatible, Anthropic

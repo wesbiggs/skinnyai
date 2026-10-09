@@ -9,7 +9,7 @@ The sync encryption is built from standard parts (AES-256-GCM, HKDF, and HMAC fr
 | Where your chats are | Encrypted? | Who can read it |
 |----------------------|------------|-----------------|
 | In a synced cloud folder | Yes, end to end | People with the project key |
-| On this machine, in `~/.skinny/sessions` | No (see [at rest](#on-this-machine-at-rest)) | You, and anything running as you or with access to the disk |
+| On this machine, in `~/.skinny/sessions` | No, unless you turn on [encrypted chats](encrypted-sessions.md) (macOS) | You, and anything running as you or with access to the disk |
 | In the model server you chat with | Up to that server | Its operator, whatever its privacy policy says |
 | In files you export, in terminal scrollback | No | Whoever can see them |
 
@@ -29,7 +29,7 @@ Chats in a project folder are sealed before they're written: each save is an AES
 
 Chats you haven't synced, and the local copy of ones you have, are ordinary files under `~/.skinny`: chats in `sessions/` (SQLite), `config.json` (which can hold API keys), `debug.log` if you turned debugging on, and the files you export or save images to. They are **not encrypted by skinnyai**. skinnyai makes its folders and chat files readable only by you (mode 700 and 600), so other ordinary accounts on the Mac can't open them. Anyone with administrator (root) access to the Mac can read them anyway, and so can anyone who gets at the disk.
 
-To protect them if the machine is lost or stolen, turn on FileVault (System Settings → Privacy & Security). To keep them encrypted even while you're logged in and the Mac is on, you can store `~/.skinny` on an encrypted disk image you mount yourself (Disk Utility → File → New Image → Blank Image, with 256-bit AES encryption and a sparse bundle format), then start skinnyai with `SKINNY_HOME` pointing into the mounted volume. Keep the image's password in your password manager.
+To protect them if the machine is lost or stolen, turn on FileVault (System Settings → Privacy & Security). To keep the saved chats encrypted even while you're logged in and the Mac is on, skinnyai can keep them on an encrypted disk image that's mounted only while you use it: see [encrypted chats](encrypted-sessions.md). That covers the chats and the debug log, not `config.json` (with your API keys) or files you export.
 
 That kind of protection is encryption at rest. While the volume is mounted, or the Mac is unlocked, anything running as you, and anyone with root access, can read the files, and a copy that was made before you encrypted them (a backup, a Time Machine snapshot) is still readable.
 

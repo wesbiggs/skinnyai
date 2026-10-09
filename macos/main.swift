@@ -17,7 +17,16 @@ let homeDirectory: URL = {
     return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".skinny")
 }()
 let configFileURL = homeDirectory.appendingPathComponent("config.json")
-let sessionsURL = homeDirectory.appendingPathComponent("sessions")
+/// Where chats are: ~/.skinny/sessions, or the mount point config.json names under "encryptedSessions".
+let sessionsURL: URL = {
+    if let data = try? Data(contentsOf: configFileURL),
+       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+       let encrypted = object["encryptedSessions"] as? [String: Any],
+       let mount = encrypted["mountPoint"] as? String, !mount.isEmpty {
+        return URL(fileURLWithPath: (mount as NSString).expandingTildeInPath)
+    }
+    return homeDirectory.appendingPathComponent("sessions")
+}()
 /// The running chat's process id, written by the launcher script (which then execs the chat, keeping the pid).
 let chatPidURL = homeDirectory.appendingPathComponent("app-chat.pid")
 
@@ -53,6 +62,12 @@ struct ConfigFile {
     }
 
     mutating func setDefault(_ name: String) { root["defaultProfile"] = name }
+
+    /// Whether config.json says saved chats live on an encrypted volume ("encryptedSessions": true, or an
+    /// object that names its mount point), which makes skinnyai refuse to save while it is locked.
+    mutating func setEncryptedSessions(_ on: Bool) {
+        if on { if root["encryptedSessions"] == nil { root["encryptedSessions"] = true } } else { root["encryptedSessions"] = nil }
+    }
 
     /// Alphabetical.
     var profileNames: [String] {
@@ -127,6 +142,176 @@ func activeProfileName() -> String {
     let config = ConfigFile()
     let saved = UserDefaults.standard.string(forKey: "profile") ?? ""
     return config.has(saved) ? saved : config.defaultProfile
+}
+
+// MARK: - Encrypted sessions
+// Saved chats can live on an encrypted disk image mounted over the sessions folder. The work is done by
+// scripts/sessions-volume.sh (bundled in Resources, and usable by hand); this is only the app's wrapper:
+// unlock at launch, lock when the app quits, and a Settings section to turn it on and off.
+
+enum SessionsVolume {
+    enum State { case off, locked, unlocked }
+    struct Output { let status: Int32; let out: String; let err: String }
+
+    static var script: URL? { Bundle.main.url(forResource: "sessions-volume", withExtension: "sh") }
+
+    /// Runs the script with no terminal, so it never waits for a prompt (it exits 5 if it has no passphrase).
+    static func run(_ arguments: [String]) -> Output {
+        guard let script else { return Output(status: 1, out: "", err: "The volume script is missing from this app.") }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [script.path] + arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["SKINNY_HOME"] = homeDirectory.path
+        environment["SKINNY_SESSIONS_MOUNT"] = sessionsURL.path
+        process.environment = environment
+        let out = Pipe(), err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        process.standardInput = FileHandle.nullDevice
+        do { try process.run() } catch { return Output(status: 1, out: "", err: error.localizedDescription) }
+        let outData = out.fileHandleForReading.readDataToEndOfFile()
+        let errData = err.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return Output(status: process.terminationStatus, out: String(decoding: outData, as: UTF8.self), err: String(decoding: errData, as: UTF8.self))
+    }
+
+    static var state: State {
+        switch run(["status"]).status {
+        case 0: return .unlocked
+        case 3: return .locked
+        default: return .off
+        }
+    }
+
+    /// The text after a marker line like "PASSPHRASE: " in the script's output.
+    static func value(_ marker: String, in output: String) -> String? {
+        output.split(separator: "\n").first { $0.hasPrefix(marker) }.map { String($0.dropFirst(marker.count)) }
+    }
+
+    static var plainOriginals: [URL] {
+        let parent = sessionsURL.deletingLastPathComponent()
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: parent.path)) ?? []
+        return names.filter { $0.hasPrefix(sessionsURL.lastPathComponent + ".plain-") }.map { parent.appendingPathComponent($0) }
+    }
+}
+
+/// Mounts the encrypted sessions if they're set up and locked. Says why if that fails, and offers a retry.
+@discardableResult
+func ensureSessionsUnlocked() -> Bool {
+    guard SessionsVolume.state == .locked else { return true }
+    let result = SessionsVolume.run(["unlock"])
+    if result.status == 0 { return true }
+    let alert = NSAlert()
+    alert.messageText = "Couldn't unlock your encrypted chats"
+    alert.informativeText = result.err.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\nUntil they're unlocked, chats can't be saved or opened."
+    alert.addButton(withTitle: "Try Again")
+    alert.addButton(withTitle: "Continue")
+    return alert.runModal() == .alertFirstButtonReturn ? ensureSessionsUnlocked() : false
+}
+
+func presentPassphrase(_ passphrase: String, title: String) {
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = "Keep a copy in a password manager. Without it (and the Keychain item) your encrypted chats can't be read.\n\n\(passphrase)"
+    alert.addButton(withTitle: "Done")
+    alert.addButton(withTitle: "Copy Passphrase")
+    if alert.runModal() == .alertSecondButtonReturn {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(passphrase, forType: .string)
+    }
+}
+
+@MainActor
+final class VolumeModel: ObservableObject {
+    @Published var state: SessionsVolume.State = .off
+    @Published var busy = false
+    @Published var hasOriginals = false
+
+    func refresh() {
+        state = SessionsVolume.state
+        hasOriginals = !SessionsVolume.plainOriginals.isEmpty
+    }
+
+    private func fail(_ output: SessionsVolume.Output) {
+        refresh()
+        alert(output.err.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "That didn't work." : output.err.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    func turnOn() {
+        let confirm = NSAlert()
+        confirm.messageText = "Encrypt your saved chats?"
+        confirm.informativeText = "Your chats will be kept on an encrypted disk image, unlocked only while SkinnyAI is open. Existing chats are copied into it and checked. A passphrase is made and kept in your Keychain, and shown once for you to save elsewhere. Close any open chats first."
+        confirm.addButton(withTitle: "Encrypt")
+        confirm.addButton(withTitle: "Cancel")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        busy = true
+        Task.detached {
+            let result = SessionsVolume.run(["setup", "--keep-originals"])
+            await MainActor.run { self.finishSetup(result) }
+        }
+    }
+
+    private func finishSetup(_ result: SessionsVolume.Output) {
+        busy = false
+        guard result.status == 0 else { fail(result); return }
+        var config = ConfigFile()
+        config.setEncryptedSessions(true)
+        try? config.write()
+        refresh()
+        if let passphrase = SessionsVolume.value("PASSPHRASE: ", in: result.out) {
+            presentPassphrase(passphrase, title: "Your chats are encrypted")
+        }
+        if !SessionsVolume.plainOriginals.isEmpty { offerToDeleteOriginals() }
+    }
+
+    func offerToDeleteOriginals() {
+        let ask = NSAlert()
+        ask.messageText = "Delete the unencrypted copies?"
+        ask.informativeText = "Your chats are in the encrypted volume, and the old unencrypted folder is still on disk. Deleting it doesn't guarantee the contents are gone from backups or snapshots; FileVault covers that."
+        ask.addButton(withTitle: "Delete")
+        ask.addButton(withTitle: "Keep for Now")
+        guard ask.runModal() == .alertFirstButtonReturn else { return }
+        _ = SessionsVolume.run(["delete-originals", "--yes"])
+        refresh()
+    }
+
+    func unlock() {
+        if !ensureSessionsUnlocked() { refresh() }
+        refresh()
+    }
+
+    func lock() {
+        let result = SessionsVolume.run(["lock"])
+        if result.status != 0 { fail(result) } else { refresh() }
+    }
+
+    func showPassphrase() {
+        let result = SessionsVolume.run(["passphrase"])
+        if result.status == 0 { presentPassphrase(result.out.trimmingCharacters(in: .whitespacesAndNewlines), title: "Passphrase for your encrypted chats") } else { fail(result) }
+    }
+
+    func turnOff() {
+        let confirm = NSAlert()
+        confirm.messageText = "Stop encrypting your saved chats?"
+        confirm.informativeText = "Your chats are copied back out to the sessions folder, unencrypted. The encrypted image and its Keychain passphrase are left for you to delete. Close any open chats first."
+        confirm.addButton(withTitle: "Decrypt")
+        confirm.addButton(withTitle: "Cancel")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        busy = true
+        Task.detached {
+            let result = SessionsVolume.run(["off"])
+            await MainActor.run {
+                self.busy = false
+                if result.status == 0 {
+                    var config = ConfigFile()
+                    config.setEncryptedSessions(false)
+                    try? config.write()
+                    self.refresh()
+                } else { self.fail(result) }
+            }
+        }
+    }
 }
 
 // MARK: - Settings model
@@ -444,6 +629,7 @@ final class SettingsModel: ObservableObject {
 
 struct SettingsView: View {
     @ObservedObject var model: SettingsModel
+    @StateObject private var volume = VolumeModel()
     var onSave: (Bool) -> Void
     var onCancel: () -> Void
 
@@ -540,6 +726,28 @@ struct SettingsView: View {
                         }
                     }
                 }
+                Section("Encrypted chats") {
+                    switch volume.state {
+                    case .off:
+                        Text("Keep saved chats on an encrypted disk image that is unlocked only while SkinnyAI is open.").font(.caption).foregroundStyle(.secondary)
+                        Button("Encrypt Saved Chats…") { volume.turnOn() }.disabled(volume.busy)
+                    case .locked:
+                        Text("Locked: saved chats can't be read or written until they're unlocked.").font(.caption).foregroundStyle(.secondary)
+                        HStack {
+                            Button("Unlock") { volume.unlock() }
+                            Button("Turn Off Encryption…") { volume.turnOff() }.disabled(volume.busy)
+                        }
+                    case .unlocked:
+                        Text("Unlocked. The volume is ejected when you quit SkinnyAI.").font(.caption).foregroundStyle(.secondary)
+                        HStack {
+                            Button("Lock Now") { volume.lock() }
+                            Button("Show Passphrase…") { volume.showPassphrase() }
+                            Button("Turn Off Encryption…") { volume.turnOff() }.disabled(volume.busy)
+                        }
+                    }
+                    if volume.hasOriginals { Button("Delete Unencrypted Originals…") { volume.offerToDeleteOriginals() } }
+                    if volume.busy { ProgressView().controlSize(.small) }
+                }
                 Section("App") {
                     Picker("Open chats in", selection: $model.terminal) {
                         Text("SkinnyAI window").tag("builtin")
@@ -566,6 +774,7 @@ struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            .onAppear { volume.refresh() }
             .onChange(of: model.host) { _ in model.scheduleRefresh() }
             .onChange(of: model.provider) { _ in model.scheduleRefresh() }
             .onChange(of: model.apiKey) { _ in if model.isOllamaCom { model.scheduleRefresh() } }
@@ -825,6 +1034,7 @@ func openChatWindow(binary: URL, arguments: [String] = [], savedName: String? = 
 /// without the Automation permission prompt that scripting the terminal would need.
 @MainActor
 func startChat(session: String? = nil) {
+    ensureSessionsUnlocked()
     // Chats use the profile picked in Settings.
     let profile = activeProfileName()
     let profileArgs = ["--profile", profile] + (session.map { [$0] } ?? [])
@@ -919,7 +1129,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         NSApp.activate(ignoringOtherApps: true)
+        ensureSessionsUnlocked()
         showStartOrDefaultChat()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Eject the encrypted volume (if there is one, and nothing is holding it open).
+        if SessionsVolume.state == .unlocked { _ = SessionsVolume.run(["lock"]) }
     }
 
     /// With "Skip profile selection at start" on, opens a chat with the default profile (or Settings, if that
@@ -985,6 +1201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Lets the user pick a saved chat (from ~/.skinny/sessions) and resumes it.
     @objc func openSavedChat(_ sender: Any?) {
         guard settings.isConfigured else { showSettings(); return }
+        ensureSessionsUnlocked()
         try? FileManager.default.createDirectory(at: sessionsURL, withIntermediateDirectories: true)
         let panel = NSOpenPanel()
         panel.title = "Open Chat"

@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Encrypted chats on macOS: `scripts/sessions-volume.sh` (set up, unlock, lock, run, off) keeps saved chats on an encrypted sparse disk image mounted over `~/.skinny/sessions`, with a random passphrase in the Keychain. The app unlocks it at launch, ejects it on quit, and has a Settings section to turn it on and off. With `"encryptedSessions": true` in `config.json`, skinnyai refuses to read or write sessions (and the debug log goes inside the volume) while it is locked, so nothing is saved in plain text beside it. See `docs/encrypted-sessions.md`.
 - `docs/security.md`: what the encryption protects and what it doesn't, including what model providers, search, and MCP servers can see.
 - New chats are named from a short title the model suggests after the first reply (one small extra request; `--no-titles` or `SKINNY_TITLES=false` turns it off, and the date-and-time name is the fallback). A later `/save <name>` renames the file.
 - The welcome box says whether sync is on and which project the chat is in.

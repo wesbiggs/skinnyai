@@ -2,7 +2,8 @@ import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import './config.js';
-import { SKINNY_HOME } from './config.js';
+import os from 'node:os';
+import { CONFIG, SKINNY_HOME } from './config.js';
 import { commitCount, messageCount, readChat, redactChat, stampOf, verifyChat, writeChat } from './chatdb.js';
 
 // Sessions saved on this machine, one SQLite file per name (see chatdb.js),
@@ -11,9 +12,37 @@ import { commitCount, messageCount, readChat, redactChat, stampOf, verifyChat, w
 // PARAMETER, MESSAGE) is what /share sends to an Ollama server and what
 // /export can write; sessions saved as .Modelfile by earlier versions still
 // load, and are written as .skinny files the next time they're saved.
-export const SESSION_DIR = path.join(SKINNY_HOME, 'sessions');
+//
+// Sessions can live on an encrypted volume mounted over the sessions folder
+// (docs/encrypted-sessions.md). config.json then says so ("encryptedSessions":
+// true, or { "mountPoint": "/path" } to put the folder elsewhere), and
+// skinnyai refuses to read or write sessions unless the volume is mounted:
+// the marker file only exists inside it. That keeps a locked volume from
+// turning into chats quietly saved in plain text next to it.
+const encrypted = CONFIG?.encryptedSessions;
+export const SESSIONS_ENCRYPTED = Boolean(encrypted);
+export const SESSION_DIR = typeof encrypted === 'object' && encrypted?.mountPoint
+  ? path.resolve(String(encrypted.mountPoint).replace(/^~(?=\/|$)/, os.homedir()))
+  : path.join(SKINNY_HOME, 'sessions');
+export const VOLUME_MARKER = '.skinny-encrypted';
 export const SESSION_SUFFIX = '.skinny';
 export const LEGACY_SUFFIX = '.Modelfile';
+
+export const LOCKED_MESSAGE = `Encrypted sessions are locked, so chats can't be saved, listed, or opened. Unlock them with the SkinnyAI app or scripts/sessions-volume.sh unlock (see docs/encrypted-sessions.md).`;
+
+export class SessionsLockedError extends Error {
+  constructor() {
+    super(LOCKED_MESSAGE);
+    this.name = 'SessionsLockedError';
+  }
+}
+
+// Whether sessions are set up to be encrypted but the volume isn't mounted.
+export const sessionsLocked = () => SESSIONS_ENCRYPTED && !existsSync(path.join(SESSION_DIR, VOLUME_MARKER));
+
+function requireUnlocked() {
+  if (sessionsLocked()) throw new SessionsLockedError();
+}
 
 // Names can hold anything a model name can (like 'me/chat:v2'), so they're
 // URL-encoded into safe filenames, except that spaces stay spaces.
@@ -115,6 +144,7 @@ export function parseModelfile(text) {
 // chat can tell whether another process saved over it: the chat file's
 // revision, or for a Modelfile from an earlier version its mtime and size.
 export async function sessionStamp(name) {
+  requireUnlocked();
   if (existsSync(sessionPath(name))) return stampOf(sessionPath(name));
   try {
     const { mtimeMs, size } = await fs.stat(legacySessionPath(name));
@@ -130,6 +160,7 @@ export async function sessionStamp(name) {
 // already has from this conversation, so only the ones after it are added;
 // `replace` discards an existing chat file of that name first (see writeChat).
 export async function saveLocalSession(name, session, { after = null, replace = false } = {}) {
+  requireUnlocked();
   await fs.mkdir(SESSION_DIR, { recursive: true, mode: 0o700 });
   const file = sessionPath(name);
   writeChat(file, session, { after, replace });
@@ -140,6 +171,7 @@ export async function saveLocalSession(name, session, { after = null, replace = 
 // `persistedHead`, the id of its last message), or null if none is saved
 // under that name. A Modelfile from an earlier version is read as text only.
 export async function readLocalSession(name) {
+  requireUnlocked();
   try {
     const stamp = await sessionStamp(name);
     if (existsSync(sessionPath(name))) {
@@ -156,22 +188,26 @@ export async function readLocalSession(name) {
 
 // Whether the name is taken, by a chat file or an old Modelfile.
 export async function localSessionExists(name) {
+  requireUnlocked();
   return existsSync(sessionPath(name)) || existsSync(legacySessionPath(name));
 }
 
 // Whether there is a chat file by that name (what /delete can remove).
 export async function chatFileExists(name) {
+  requireUnlocked();
   return existsSync(sessionPath(name));
 }
 
 // Removes the chat file only: a Modelfile from an earlier version is left
 // alone, like any exported copy.
 export async function deleteLocalSession(name) {
+  requireUnlocked();
   await fs.rm(sessionPath(name), { force: true });
 }
 
 // /purge in a saved chat: `messages` is the conversation after the purge.
 export function redactLocalSession(name, kind, messages) {
+  requireUnlocked();
   redactChat(sessionPath(name), kind, messages);
 }
 
@@ -197,6 +233,7 @@ export async function autosaveName() {
 }
 
 export async function listLocalSessions() {
+  if (sessionsLocked()) return [];
   try {
     const files = await fs.readdir(SESSION_DIR);
     const names = files

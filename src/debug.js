@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import './config.js';
 import { SKINNY_HOME } from './config.js';
+import { SESSIONS_ENCRYPTED, SESSION_DIR, sessionsLocked } from './sessions.js';
 
 // --- Debug log (--debug / SKINNY_DEBUG=true) ---
 //
@@ -13,7 +14,9 @@ import { SKINNY_HOME } from './config.js';
 // the MCP servers' tools. API keys are never written, and big strings (images,
 // PDFs, long tool output) are cut down to a size note.
 
-export const DEBUG_LOG = path.join(SKINNY_HOME, 'debug.log');
+// With encrypted sessions the log goes inside the volume, since it holds the
+// text of your conversations.
+export const DEBUG_LOG = SESSIONS_ENCRYPTED ? path.join(SESSION_DIR, '.debug.log') : path.join(SKINNY_HOME, 'debug.log');
 // Where /saveimage puts an image when given no path.
 export const IMAGE_DIR = process.env.SKINNY_IMAGE_DIR || path.join(os.homedir(), 'Pictures', 'skinnyai');
 export let debugEnabled = false;
@@ -21,11 +24,14 @@ export function setDebugEnabled(value) {
   debugEnabled = value;
 }
 
+// Returns false (and logs nothing) if the log would be in a locked volume.
 export async function enableDebugLog() {
+  if (sessionsLocked()) return false;
   debugEnabled = true;
   await fs.mkdir(SKINNY_HOME, { recursive: true, mode: 0o700 });
   await fs.appendFile(DEBUG_LOG, '', { mode: 0o600 });
   await fs.chmod(DEBUG_LOG, 0o600);
+  return true;
 }
 
 export function abbreviate(value) {

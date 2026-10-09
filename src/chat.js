@@ -17,7 +17,7 @@ import { adaptHistory, describeAdaptation, newCallId, parseArguments, purgeHisto
 import { loadMcpConfig, runTool, startMcpServers, toolDefinitions } from './mcp.js';
 import { pickDefaultModel } from './models.js';
 import { chatIdOf, chatProjectOf, newMessageId } from './chatdb.js';
-import { SESSION_DIR, autosaveName, chatFileExists, deleteLocalSession, formatModelfile, isAutosaveName, legacySessionPath, listLocalSessions, localSessionExists, readLocalSession, redactLocalSession, resumeHint, saveLocalSession, sessionPath, sessionStamp, tidyTitle, uniqueSessionName } from './sessions.js';
+import { SESSIONS_ENCRYPTED, SESSION_DIR, autosaveName, chatFileExists, deleteLocalSession, formatModelfile, isAutosaveName, LOCKED_MESSAGE, legacySessionPath, listLocalSessions, localSessionExists, readLocalSession, redactLocalSession, resumeHint, saveLocalSession, sessionPath, sessionStamp, sessionsLocked, tidyTitle, uniqueSessionName } from './sessions.js';
 import { formatMarkdown } from './export.js';
 import { adoptUnassigned, copyChat, deleteSyncedChat, describeSync, initProject, keyOpensProject, pushChat, readProject, suggestedName, syncProjects } from './sync.js';
 import { addProject, defaultProject, findProject, loadSyncConfig, removeProject, renameProject, saveSyncConfig, setDefaultProject } from './syncconfig.js';
@@ -26,6 +26,8 @@ import { ANSI, CHROME_COLOR, PROMPT, createWordWrapper, drawBox, graphemeWidth, 
 import { MAX_TOOL_ROUNDS, TOOLS, formatToday } from './tools.js';
 
 const TITLE_TIMEOUT_MS = 8000;
+// Commands that read or write saved sessions, refused while an encrypted volume is locked.
+const SESSION_COMMANDS = new Set(['/save', '/new', '/delete', '/purge', '/sync', '/project', '/share']);
 
 // A folder argument as an absolute path (quotes and ~ handled).
 const resolveFolder = (text) => path.resolve(text.replace(/^~(?=\/|$)/, os.homedir()));
@@ -670,7 +672,7 @@ export class OllamaChat {
   // With autosave on, writes the conversation to its local session file
   // after each model turn, naming it from the date and time the first time.
   async autosaveSession({ push = true } = {}) {
-    if (!this.autosave || this.savableMessages().length === 0) return;
+    if (!this.autosave || this.savableMessages().length === 0 || sessionsLocked()) return;
     if (!this.sessionName) {
       const title = await this.suggestTitle();
       this.sessionName = title ? await uniqueSessionName(title) : await autosaveName();
@@ -1125,6 +1127,7 @@ export class OllamaChat {
       lines.push(`🔧 Tools: ${Object.keys(TOOLS).join(', ')} (${ollamaApiKey() ? 'Ollama web search' : 'DuckDuckGo instant answers'})`);
     }
     lines.push(...(this.mcpLines || []));
+    if (SESSIONS_ENCRYPTED) lines.push(sessionsLocked() ? '🔒 Chats: encrypted volume, locked' : '🔒 Chats: encrypted volume, unlocked');
     lines.push(this.syncWelcomeLine());
     if (this.debug) lines.push(`🐞 Debug log: ${DEBUG_LOG}`);
     lines.push('', 'Type /help for commands.', 'Enter sends; Ctrl+J or Shift+Enter adds a new line.');
@@ -1976,6 +1979,7 @@ export class OllamaChat {
       console.log(`\n❌ Error: ${error.message}`);
     }
 
+    if (sessionsLocked()) console.log(`\n🔒 ${LOCKED_MESSAGE}`);
     const sessions = await listLocalSessions();
     if (sessions.length > 0) {
       console.log(`\nSaved sessions (${SESSION_DIR}):`);
@@ -2321,6 +2325,11 @@ export class OllamaChat {
     const trimmed = input.trim();
     const [rawCmd, ...rest] = trimmed.split(/\s+/);
     const cmd = rawCmd.toLowerCase();
+
+    if (SESSION_COMMANDS.has(cmd) && sessionsLocked()) {
+      console.log(`\n🔒 ${LOCKED_MESSAGE}\n`);
+      return true;
+    }
 
     switch (cmd) {
       case '/exit':
@@ -2700,8 +2709,15 @@ export class OllamaChat {
   }
 
   async start() {
-    if (this.debug) await enableDebugLog();
-    this.syncAtStartup();
+    if (sessionsLocked()) {
+      this.autosave = false;
+      console.log(`${CHROME_COLOR}🔒 ${LOCKED_MESSAGE}${ANSI.reset}\n`);
+    }
+    if (this.debug && !await enableDebugLog()) {
+      this.debug = false;
+      console.log(`${CHROME_COLOR}🐞 Debug logging is off while encrypted sessions are locked.${ANSI.reset}\n`);
+    }
+    if (!sessionsLocked()) this.syncAtStartup();
     await this.prepareStartupSession();
     await this.resolveDefaultModel();
     await this.startMcp(); // before the welcome box, which reports on it

@@ -46,6 +46,8 @@ swiftterm_license=".build/checkouts/SwiftTerm/LICENSE"
 for f in "$node_license" "$swiftterm_license"; do
   [ -f "$f" ] || { echo "Missing license file for the notices: $f" >&2; exit 1; }
 done
+cp scripts/sessions-volume.sh "$app/Contents/Resources/sessions-volume.sh"
+chmod +x "$app/Contents/Resources/sessions-volume.sh"
 cp LICENSE "$app/Contents/Resources/LICENSE.txt"
 {
   echo "SkinnyAI is licensed under the Apache License 2.0 (see LICENSE.txt)."
