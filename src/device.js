@@ -26,7 +26,7 @@ export function deviceInfo() {
   }
   cached = { id: randomUUID(), name: os.hostname().replace(/\.local$/, '') || 'this device' };
   try {
-    mkdirSync(SKINNY_HOME, { recursive: true });
+    mkdirSync(SKINNY_HOME, { recursive: true, mode: 0o700 });
     writeFileSync(DEVICE_FILE, `${JSON.stringify(cached, null, 2)}\n`);
   } catch (error) {
     // Read-only home: the id lasts for this run.

@@ -130,7 +130,7 @@ export async function sessionStamp(name) {
 // already has from this conversation, so only the ones after it are added;
 // `replace` discards an existing chat file of that name first (see writeChat).
 export async function saveLocalSession(name, session, { after = null, replace = false } = {}) {
-  await fs.mkdir(SESSION_DIR, { recursive: true });
+  await fs.mkdir(SESSION_DIR, { recursive: true, mode: 0o700 });
   const file = sessionPath(name);
   writeChat(file, session, { after, replace });
   return file;

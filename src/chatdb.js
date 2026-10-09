@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { rmSync } from 'node:fs';
+import { chmodSync, existsSync, rmSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { deviceInfo } from './device.js';
 import { purgeHistory } from './history.js';
@@ -166,7 +166,9 @@ function migrateV1(db) {
 }
 
 function open(file, { create = false } = {}) {
+  const existed = existsSync(file);
   const db = new DatabaseSync(file);
+  if (!existed && create) chmodSync(file, 0o600); // chats are for you alone
   db.exec('PRAGMA foreign_keys = ON');
   let version = db.prepare('PRAGMA user_version').get().user_version;
   if (version === 0 && create) {

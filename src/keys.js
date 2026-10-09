@@ -88,7 +88,7 @@ function readKeyFile() {
 }
 
 function writeKeyFile(keys) {
-  mkdirSync(path.dirname(KEYS_FILE), { recursive: true });
+  mkdirSync(path.dirname(KEYS_FILE), { recursive: true, mode: 0o700 });
   const temp = `${KEYS_FILE}.tmp-${randomBytes(4).toString('hex')}`;
   writeFileSync(temp, `${JSON.stringify(keys, null, 2)}\n`, { mode: 0o600 });
   chmodSync(temp, 0o600);

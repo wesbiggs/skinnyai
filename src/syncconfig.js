@@ -20,7 +20,7 @@ export function loadSyncConfig() {
 }
 
 export function saveSyncConfig(config) {
-  mkdirSync(path.dirname(SYNC_CONFIG_FILE), { recursive: true });
+  mkdirSync(path.dirname(SYNC_CONFIG_FILE), { recursive: true, mode: 0o700 });
   writeFileSync(SYNC_CONFIG_FILE, `${JSON.stringify(config, null, 2)}\n`);
 }
 

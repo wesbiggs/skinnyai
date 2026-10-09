@@ -4,9 +4,10 @@ import './quiet-warnings.js';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { classifyFile, extractAttachments } from './attachments.js';
+import { tightenDir } from './home.js';
 import { OllamaChat } from './chat.js';
 import { envOptions, parseArgs, printUsage } from './cli.js';
-import { API_NAMES, CONFIG_FILE, VERSION, loadConfigFile, requestedProfile, resolveProfile } from './config.js';
+import { API_NAMES, CONFIG_FILE, SKINNY_HOME, VERSION, loadConfigFile, requestedProfile, resolveProfile } from './config.js';
 import { anthropicApiKey, isOllamaCom } from './http.js';
 import { imageSequence, loadImage, sniffImage } from './images.js';
 import { inputPosition } from './lineedit.js';
@@ -35,6 +36,10 @@ async function main() {
   }
 
   applyColorOverrides(options);
+  if (!process.env.SKINNY_HOME) {
+    tightenDir(SKINNY_HOME);
+    tightenDir(SESSION_DIR);
+  }
 
   const chat = new OllamaChat(model, options);
   
@@ -63,7 +68,7 @@ export {
   splitTableRow, wrapStyled, renderTable, createMarkdownRenderer, inputPosition,
   drawBox, VERSION, sniffImage, imageSequence, loadImage, pickDefaultModel, extractAttachments, classifyFile,
   formatModelfile, parseModelfile, saveLocalSession, readLocalSession, listLocalSessions,
-  localSessionExists, isAutosaveName, autosaveName, sessionPath, legacySessionPath, chatFileExists, commitCount, redactLocalSession, verifyChat, tidyTitle, uniqueSessionName, messageCount, resumeHint,
+  localSessionExists, isAutosaveName, autosaveName, sessionPath, legacySessionPath, chatFileExists, commitCount, redactLocalSession, verifyChat, tidyTitle, uniqueSessionName, tightenDir, messageCount, resumeHint,
   loadConfigFile, resolveProfile, requestedProfile, envOptions, parseArgs, isOllamaCom, OllamaChat, main,
   PROMPT, SESSION_DIR, CONFIG_FILE
 };

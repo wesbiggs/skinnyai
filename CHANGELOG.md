@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- `docs/security.md`: what the encryption protects and what it doesn't, including what model providers, search, and MCP servers can see.
 - New chats are named from a short title the model suggests after the first reply (one small extra request; `--no-titles` or `SKINNY_TITLES=false` turns it off, and the date-and-time name is the fallback). A later `/save <name>` renames the file.
 - The welcome box says whether sync is on and which project the chat is in.
 - Sync chats across devices through folders your cloud drive carries, in projects: a project is a folder plus its own key, and each chat is in one. `/sync setup <folder>` makes the default project (or joins it on another device); `/project new|add|default|key|rename|forget` manage others; `/project move|copy <name>` put the open chat in another project as a new chat sealed under that project's key (a move leaves only a deletion marker behind). Each save becomes an encrypted commit file (AES-256-GCM under keys derived from the project key, which is kept in the macOS Keychain or a protected file and shown once for you to save); attachments are separate sealed files. Syncs at startup and after each autosave; a chat continued on two devices splits into two chats ("Name (from device)"), `/delete` and `/purge` propagate.
@@ -13,6 +14,7 @@
 - Conversations are kept in a provider-neutral form (`src/history.js`) and adapted to each model when a request is sent: tool calls become text when the new model lacks the tools, thinking blocks replay only to the model that wrote them, and PDFs/images a model can't take are noted instead.
 
 ### Changed
+- Chat files are created readable only by you (mode 600), and the folders skinnyai makes are mode 700; the default `~/.skinny` and its `sessions/` folder are tightened to 700 at startup if an earlier version made them world-readable.
 - `/list` help no longer says "locally" available models.
 - The README and `engines` say Node 22.13 or newer.
 - Autosave is on by default when running in a terminal (piped input still doesn't autosave unless asked), and the app's "Autosave conversations" setting defaults to on. Autosave appends new messages instead of rewriting the file.

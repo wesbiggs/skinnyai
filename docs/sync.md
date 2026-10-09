@@ -65,6 +65,8 @@ Each device adds its changes to the chat as separate steps, so two devices can b
 
 ## What is protected
 
+(The full picture, including what encryption can't cover, is in [security](security.md).)
+
 Chats are sealed with AES-256-GCM under keys derived from the project key and each chat's random id, so a file moved to another chat or renamed fails to open. Attachments are separate sealed files whose names don't reveal what they hold. A project's name is sealed in its folder, and the project id in `project.json` is a keyed hash that doesn't reveal the key. The folder's owner can see: how many chats there are, a random id for each, how many files each has and how big, and when files were added. Message text, titles, model names, device names, and attachments are inside the encrypted files.
 
 Not covered yet: attributing changes to people, removing a member's access to what they already have, and Windows or Linux key storage beyond a protected file. The macOS Keychain path has only been checked in a scratch keychain.

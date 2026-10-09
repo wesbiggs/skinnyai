@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -435,5 +436,26 @@ describe('/purge', () => {
     expect(output()).toContain('Nothing to purge');
     await chat.handleCommand('/purge');
     expect(output()).toContain('Usage: /purge');
+  });
+});
+
+describe('who can read the files', () => {
+  it('makes chat files and the folders around them private to you', async () => {
+    fs.rmSync(skinnyai.SESSION_DIR, { recursive: true, force: true });
+    await chatOf('q', 'a').save('Private');
+    expect(fs.statSync(skinnyai.sessionPath('Private')).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(skinnyai.SESSION_DIR).mode & 0o777).toBe(0o700);
+  });
+
+  it('tightens a folder that was made looser, and leaves a private one alone', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skinnyai-perm-'));
+    fs.chmodSync(dir, 0o755);
+    expect(skinnyai.tightenDir(dir)).toBe(true);
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+    fs.chmodSync(dir, 0o500);
+    skinnyai.tightenDir(dir);
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o500); // no group/other bits, so untouched
+    expect(skinnyai.tightenDir(path.join(dir, 'nope'))).toBe(false);
+    fs.chmodSync(dir, 0o700);
   });
 });
