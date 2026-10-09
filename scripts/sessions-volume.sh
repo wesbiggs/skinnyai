@@ -96,6 +96,18 @@ passphrase() {
   return 1
 }
 
+# Stores a passphrase in the Keychain: account $1, passphrase $2. It goes to
+# `security -i` on stdin, not in an argument, which any program running as you
+# could read with `ps` while it runs. (`security -i` reports failures only in
+# its text, not its exit status, so the item is read back.)
+keychain_add() {
+  local acct="${1//\\/\\\\}" keychain=""
+  acct="${acct//\"/\\\"}"
+  [ ${#KEYCHAIN[@]} -eq 0 ] || keychain=" \"${KEYCHAIN[0]}\""
+  printf 'add-generic-password -U -a "%s" -s "%s" -w "%s"%s\n' "$acct" "$SERVICE" "$2" "$keychain" | security -i >/dev/null 2>&1
+  [ "$(security find-generic-password -a "$1" -s "$SERVICE" -w ${KEYCHAIN[@]+"${KEYCHAIN[@]}"} 2>/dev/null)" = "$2" ]
+}
+
 # `diskutil image` replaced hdiutil's image options; use whichever exists.
 has_diskutil_image() {
   diskutil image 2>&1 | grep -q 'diskutil image'
@@ -213,7 +225,7 @@ do_setup() {
   local pass plain=""
   pass="$(new_passphrase)"
   create_image "$pass" || { rm -rf "$IMAGE"; die "couldn't create the encrypted image" 1; }
-  if ! security add-generic-password -U -a "$IMAGE" -s "$SERVICE" -w "$pass" ${KEYCHAIN[@]+"${KEYCHAIN[@]}"} >/dev/null 2>&1; then
+  if ! keychain_add "$IMAGE" "$pass"; then
     rm -rf "$IMAGE"
     die "couldn't store the passphrase in the Keychain, so nothing was set up" 1
   fi
@@ -281,7 +293,7 @@ do_off() {
   # overwrite the passphrase it needs): the image and its Keychain item are
   # renamed together, and are the user's to keep or delete.
   mv "$IMAGE" "$IMAGE.disabled" || die "the chats are back in $MOUNT, but couldn't rename the image $IMAGE" 1
-  if security add-generic-password -U -a "$IMAGE.disabled" -s "$SERVICE" -w "$pass" ${KEYCHAIN[@]+"${KEYCHAIN[@]}"} >/dev/null 2>&1; then
+  if keychain_add "$IMAGE.disabled" "$pass"; then
     security delete-generic-password -a "$IMAGE" -s "$SERVICE" ${KEYCHAIN[@]+"${KEYCHAIN[@]}"} >/dev/null 2>&1
   fi
   echo "OK: the chats are back in $MOUNT, unencrypted. The old encrypted image is now $IMAGE.disabled (its passphrase is in the Keychain under that name); delete both when you're done with them."

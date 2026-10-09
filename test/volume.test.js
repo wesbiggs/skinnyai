@@ -58,6 +58,7 @@ while read -r line; do echo "/dev/disk99 on $line (apfs, local, nobrowse)"; done
 `,
   security: `#!/bin/bash
 S="$SHIM_STATE/keychain"; mkdir -p "$S"
+if [ "$1" = -i ]; then read -r line; eval "set -- $line"; fi
 verb="$1"; shift; a=""; pass=""
 while [ $# -gt 0 ]; do case "$1" in -a) a="$2"; shift ;; -w) pass="$2"; shift ;; -s) shift ;; esac; shift; done
 key="$(printf '%s' "$a" | tr '/ ' '__')"

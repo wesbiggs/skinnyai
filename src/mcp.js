@@ -1,7 +1,6 @@
 import readline from 'readline';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
-import './config.js';
 import { CONFIG_FILE, PROFILE, VERSION } from './config.js';
 
 // --- MCP servers (the active profile's mcpServers in $SKINNY_HOME/config.json) ---
@@ -21,6 +20,13 @@ export const MCP_PROTOCOL_VERSION = '2025-06-18';
 export const MCP_TIMEOUT_MS = 30000;
 export const MCP_CALL_TIMEOUT_MS = 120000;
 export const MCP_MAX_RESULT_CHARS = 20000;
+
+// What a stdio server inherits from the environment. Not the rest: skinnyai's
+// own API keys (ANTHROPIC_API_KEY, OLLAMA_API_KEY, ...) have no business in a
+// third-party process. A server that needs a secret gets it from its "env"
+// block, which can name one with ${VAR}.
+const INHERITED_ENV = /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|TERM|TZ|TMPDIR|TEMP|TMP|SYSTEMROOT|COMSPEC|PATHEXT|APPDATA|LOCALAPPDATA|USERPROFILE|PROGRAMFILES|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|(HTTPS?|ALL|NO)_PROXY|LC_\w+|XDG_\w+|npm_config_\w+|NPM_CONFIG_\w+)$/i;
+export const serverEnv = (env = process.env) => Object.fromEntries(Object.entries(env).filter(([name]) => INHERITED_ENV.test(name)));
 
 export const expandVars = (value) => (typeof value === 'string' ? value.replace(/\$\{(\w+)\}/g, (_, name) => process.env[name] ?? '') : value);
 
@@ -69,7 +75,7 @@ export class McpServer {
     const { command, args = [], env = {}, cwd } = this.config;
     const child = spawn(expandVars(command), args.map(expandVars), {
       cwd: cwd ? expandVars(cwd) : undefined,
-      env: { ...process.env, ...Object.fromEntries(Object.entries(env).map(([k, v]) => [k, expandVars(String(v))])) },
+      env: { ...serverEnv(), ...Object.fromEntries(Object.entries(env).map(([k, v]) => [k, expandVars(String(v))])) },
       stdio: ['pipe', 'pipe', 'pipe']
     });
     this.child = child;
@@ -214,7 +220,10 @@ export class McpServer {
         .map((p) => (p?.mcpServers ?? p?.servers)?.[this.name]).find(Boolean);
       if (!entry) return false;
       entry.trust = this.trust;
-      writeFileSync(CONFIG_FILE, `${JSON.stringify(json, null, 2)}\n`);
+      // Beside it and renamed, so a crash can't leave a half-written config (it holds API keys).
+      const temp = `${CONFIG_FILE}.tmp-${process.pid}`;
+      writeFileSync(temp, `${JSON.stringify(json, null, 2)}\n`, { mode: statSync(CONFIG_FILE).mode & 0o777 });
+      renameSync(temp, CONFIG_FILE);
       return true;
     } catch (error) {
       return false;
@@ -259,7 +268,7 @@ export async function startMcpServers(configs) {
       tools.set(name, {
         description: `[${server.name}] ${tool.description || tool.name}`,
         parameters: tool.inputSchema?.type === 'object' ? tool.inputSchema : { type: 'object', properties: {} },
-        describe: () => `${server.name}: ${tool.name}`, // just the name: arguments can be long, and --debug logs them
+        describe: () => `${server.name}: ${tool.name}`, // just the name; the approval prompt shows the arguments
         needsApproval: () => !server.isTrusted(tool.name),
         trustAlways: () => server.trustTool(tool.name),
         run: (args) => server.callTool(tool.name, args)

@@ -119,7 +119,15 @@ export function loadProjectKey(id) {
 export function saveProjectKey(key) {
   const id = projectId(key);
   if (useKeychain()) {
-    execFileSync(SECURITY, ['add-generic-password', '-U', '-a', account(id), '-s', KEYCHAIN_SERVICE, '-w', encodeProjectKey(key)], { stdio: 'ignore' });
+    // The key goes to `security` on stdin, not in its arguments, which any
+    // program running as you can read with `ps` while it runs. (`security -i`
+    // reports failures only in its text, not its exit status, so read it back.)
+    const quoted = (text) => `"${text.replace(/(["\\])/g, '\\$1')}"`;
+    execFileSync(SECURITY, ['-i'], {
+      input: `add-generic-password -U -a ${quoted(account(id))} -s ${quoted(KEYCHAIN_SERVICE)} -w ${quoted(encodeProjectKey(key))}\n`,
+      stdio: ['pipe', 'ignore', 'ignore']
+    });
+    if (!loadProjectKey(id)) throw new Error("the Keychain didn't keep the project key");
     return 'the macOS Keychain';
   }
   writeKeyFile({ ...readKeyFile(), [id]: encodeProjectKey(key) });

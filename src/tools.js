@@ -1,5 +1,9 @@
+import dnsCallbacks from 'node:dns';
 import dns from 'node:dns/promises';
+import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
+import zlib from 'node:zlib';
 import { VERSION } from './config.js';
 import { ollamaApiKey, ollamaAuthHeaders } from './http.js';
 import { ANSI } from './style.js';
@@ -144,9 +148,10 @@ export const MAX_PAGE_CHARS = 6000;
 export const PRIVATE_ADDRESSES = new net.BlockList();
 for (const [prefix, bits] of [
   ['0.0.0.0', 8], ['10.0.0.0', 8], ['127.0.0.0', 8], ['169.254.0.0', 16],
-  ['172.16.0.0', 12], ['192.168.0.0', 16], ['100.64.0.0', 10] // last: carrier-grade NAT
+  ['172.16.0.0', 12], ['192.168.0.0', 16], ['100.64.0.0', 10], // carrier-grade NAT
+  ['224.0.0.0', 4], ['240.0.0.0', 4] // multicast; reserved, with broadcast
 ]) PRIVATE_ADDRESSES.addSubnet(prefix, bits, 'ipv4');
-for (const [prefix, bits] of [['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10]]) {
+for (const [prefix, bits] of [['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8], ['64:ff9b::', 96], ['2002::', 16]]) { // last two: addresses that embed an IPv4 one
   PRIVATE_ADDRESSES.addSubnet(prefix, bits, 'ipv6');
 }
 
@@ -175,23 +180,68 @@ export async function assertPublicUrl(url) {
   }
 }
 
+// The address check again, at the moment of connecting: assertPublicUrl
+// resolves the name first, but fetch() would resolve it a second time, and a
+// name that answers differently the second time (DNS rebinding) could point at
+// this network. Resolving once, here, and checking what is actually used
+// closes that.
+export function guardedLookup(hostname, options, callback) {
+  dnsCallbacks.lookup(hostname, options, (error, address, family) => {
+    if (error) return callback(error, address, family);
+    const found = Array.isArray(address) ? address : [{ address, family }];
+    if (!isTrustedHost(hostname.toLowerCase()) && found.some((entry) => isPrivateAddress(entry.address))) {
+      return callback(new Error(`refusing to fetch ${hostname}: it resolves to a local or private network address (add it to SKINNY_TRUSTED_HOSTS to allow it)`));
+    }
+    return callback(null, address, family);
+  });
+}
+
+const DECODERS = { gzip: zlib.createGunzip, 'x-gzip': zlib.createGunzip, deflate: zlib.createInflate, br: zlib.createBrotliDecompress };
+
+// One GET, answered like the part of fetch()'s Response used here: ok, status,
+// headers.get(), body (async iterable of bytes), and cancel().
+function guardedGet(target, headers) {
+  return new Promise((resolve, reject) => {
+    const transport = target.protocol === 'https:' ? https : http;
+    const request = transport.request(target, {
+      method: 'GET',
+      headers: { ...headers, 'Accept-Encoding': 'gzip, deflate, br' },
+      lookup: guardedLookup,
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+    }, (incoming) => {
+      const decoder = DECODERS[String(incoming.headers['content-encoding'] || '').toLowerCase()];
+      const body = decoder ? incoming.pipe(decoder()) : incoming;
+      if (decoder) body.on('error', () => incoming.destroy());
+      resolve({
+        ok: incoming.statusCode >= 200 && incoming.statusCode < 300,
+        status: incoming.statusCode,
+        headers: { get: (name) => [incoming.headers[name.toLowerCase()]].flat().join(', ') || null },
+        body,
+        cancel: () => { incoming.destroy(); body.destroy(); }
+      });
+    });
+    request.on('error', reject);
+    request.end();
+  });
+}
+
 // Fetches a public URL, following redirects by hand so each hop gets the
 // private-address check.
 export async function fetchPublic(target, accept) {
   let res;
   for (let hop = 0; ; hop++) {
     await assertPublicUrl(target);
-    res = await fetch(target, {
-      headers: { ...APP_HEADERS, 'Accept': accept },
-      redirect: 'manual',
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
-    });
+    res = await guardedGet(target, { ...APP_HEADERS, 'Accept': accept });
     const location = res.headers.get('location');
     if (res.status < 300 || res.status >= 400 || !location) break;
+    res.cancel();
     if (hop >= MAX_REDIRECTS) throw new Error('too many redirects');
     target = new URL(location, target);
   }
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${target.href}`);
+  if (!res.ok) {
+    res.cancel();
+    throw new Error(`HTTP ${res.status} fetching ${target.href}`);
+  }
   return { res, url: target };
 }
 
@@ -204,6 +254,7 @@ export async function readCappedBytes(res) {
     total += chunk.length;
     if (total >= MAX_FETCH_BYTES) break;
   }
+  res.cancel?.();
   return { bytes: Buffer.concat(chunks).subarray(0, MAX_FETCH_BYTES), truncated: total >= MAX_FETCH_BYTES };
 }
 
