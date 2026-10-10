@@ -13,7 +13,7 @@
 
 ## Building
 
-Building needs Xcode with its Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`); the Swift part is built with SwiftPM (`Package.swift`). Both builds are for the architecture of the Mac they run on; an Intel build needs an x64 Node binary.
+Building needs Xcode with its Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`); the Swift part is built with SwiftPM (`macos/Package.swift`). Both builds are for the architecture of the Mac they run on; an Intel build needs an x64 Node binary.
 
 ```bash
 npm run build:app      # ad-hoc signed: runs on this Mac only

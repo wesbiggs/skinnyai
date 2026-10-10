@@ -6,7 +6,7 @@ A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic
 
 - `src/`: the CLI as ES modules. `skinnyai.js` is the entry (`main`, run-when-invoked check; tests import everything through `test/helpers/skinny.js`); `config.js` (profiles, loaded at import, so every module imports it first), `http.js` (hosts, auth, streaming POST), `debug.js`, `tools.js` (web search/fetch), `mcp.js`, `style.js` (ANSI, widths, inline markdown, wrapping, tables, boxes), `images.js`, `markdown.js`, `lineedit.js`, `attachments.js`, `sessions.js` (session names, files, legacy Modelfile format), `chatdb.js` (SQLite chat files: an append-only commit log, `commits`/`state_log`/`messages`/`parts`/`blobs`), `device.js`, `history.js` (provider-neutral history, adaptation, purge), `export.js` (markdown transcript), `seal.js` (AES-GCM commit/blob formats, key derivation), `keys.js` (per-project keys in Keychain/`project-keys`, project id, key as text), `sync.js` (folder sync engine: push, causal pull, fork split, deletion markers, copy) and `syncconfig.js` (`sync.json`: projects and default), `home.js` (tightens the default ~/.skinny to 0700; new dirs are 0700 and chat files 0600), `quiet-warnings.js` (hides Node 22's SQLite notice; must be the entry's first import), `models.js`, `chat.js` (`OllamaChat`: the REPL and commands; `requests.js`, `stream.js`, `syncCommands.js` and `editor.js` add the request builders, streaming/tool loop, `/sync` + `/project`, and the line editor to its prototype), `cli.js` (flags/env). Tests and `npm run ollama` run `src/skinnyai.js` directly.
 - `bin/skinnyai.js`: generated (gitignored) by `npm run build` (`scripts/build-cli.mjs`, esbuild bundle + minify, ~150 KB); it's the npm `bin` (built on `prepack`) and the release's smallest artifact. Set `SKINNYAI_SCRIPT` to run `test/cli.test.js` against it.
-- `macos/main.swift`: the whole app (AppKit + SwiftUI + SwiftTerm): start window, Settings, built-in chat windows. `Package.swift` builds it.
+- `macos/main.swift`: the whole app (AppKit + SwiftUI + SwiftTerm): start window, Settings, built-in chat windows. `macos/Package.swift` builds it.
 - `scripts/`: `build-cli.mjs` (minified single file), `build-sea.mjs` (single-executable CLI, bundled into the app as `skinnyai-cli`), `build-app.sh` (builds, signs, bundles the app), `make-icon.swift` (regenerates the icon).
 - `test/`: vitest. Tests use a temporary `SKINNY_HOME` and a mock server speaking the Ollama, OpenAI, and Anthropic APIs; they never touch the real `~/.skinny`.
 
@@ -14,7 +14,7 @@ A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic
 
 - `npm test`: run the suite (keep it green; add tests with behavior changes).
 - `npm run build:sea` / `npm run build:app`: build the CLI binary / the app.
-- `swift build`: quick compile check of the app. The app's UI and terminal behavior can't be exercised by tests; say so when unverified.
+- `swift build --package-path macos`: quick compile check of the app. The app's UI and terminal behavior can't be exercised by tests; say so when unverified.
 
 ## Configuration
 
@@ -44,7 +44,7 @@ A thin terminal chat client for Ollama, OpenAI-compatible servers, and Anthropic
 
 - Launch shows a start window (profile picker pre-selected to the last used, summary line, New Chat / Settings... / Open Chat...); it does not open a chat directly unless the app-wide `UserDefaults` flag `skipStart` (Settings > App > "Skip profile selection at start", off by default) is set, in which case launch and a Dock click with nothing open start a chat with the config's `defaultProfile`; File > New Chat still shows the start window. Dock click focuses the running chat, else shows the start window; File > New Chat shows it too. File > Save / Save As… type `/save [name]` into the front built-in chat; the program announces its session name in the window title (`SkinnyAI: <name>`, set by the `sessionName` setter when `TERM_PROGRAM=SkinnyAI`), which the app reads to know if Save needs a name (autosave-style names don't count). Open Chat resumes a file from `~/.skinny/sessions` via `skinnyai-cli <name>`.
 - Built-in chats are SwiftTerm views running `skinnyai-cli` with `TERM_PROGRAM=SkinnyAI` (treated as an iTerm-protocol image terminal). Closing a window kills its chat; a clean exit closes the window; a failed exit stays open with the code in the title. Terminal/iTerm launching (via a `.command` file plus the pid file, to avoid an Automation permission prompt) remains as an option.
-- SwiftTerm is pinned to main commit 4d5eeea (`revision:` in `Package.swift`) for the wide-character reflow fix; go back to `from:` once a release includes it.
+- SwiftTerm is pinned to main commit 4d5eeea (`revision:` in `macos/Package.swift`) for the wide-character reflow fix; go back to `from:` once a release includes it.
 - Settings' model drop-down queries `/api/tags` (Ollama), `/v1/models` (OpenAI), `/v1/models?limit=100` (Anthropic) shortly after server/provider/key edits, falling back to a text field with the reason.
 - Icon: white SKINNY over green AI; regenerate with `scripts/make-icon.swift`.
 

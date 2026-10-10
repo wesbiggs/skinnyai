@@ -6,6 +6,6 @@ export default defineConfig({
     // Each file imports skinnyai.js fresh, after faking the terminal it needs.
     isolate: true,
     // SwiftPM checkouts in .build carry their own test files.
-    exclude: [...configDefaults.exclude, '.build/**']
+    exclude: [...configDefaults.exclude, '**/.build/**']
   }
 });

@@ -29,9 +29,9 @@ node scripts/build-sea.mjs --out build/skinnyai
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
-swift package resolve
-swift build -c release --arch "$(uname -m)"
-bin="$(swift build -c release --arch "$(uname -m)" --show-bin-path)"
+swift package --package-path macos resolve
+swift build --package-path macos -c release --arch "$(uname -m)"
+bin="$(swift build --package-path macos -c release --arch "$(uname -m)" --show-bin-path)"
 cp "$bin/SkinnyAI" "$app/Contents/MacOS/SkinnyAI"
 # SwiftTerm looks for its shader bundle in Contents/Resources.
 cp -R "$bin/SwiftTerm_SwiftTerm.bundle" "$app/Contents/Resources/"
@@ -42,7 +42,7 @@ sed "s/@VERSION@/$version/g" macos/Info.plist > "$app/Contents/Info.plist"
 # License texts for what the app embeds (Node via the SEA binary, SwiftTerm)
 # plus our own, so the notices travel with the binaries.
 node_license="$(dirname "$(dirname "$(node -p process.execPath)")")/LICENSE"
-swiftterm_license=".build/checkouts/SwiftTerm/LICENSE"
+swiftterm_license="macos/.build/checkouts/SwiftTerm/LICENSE"
 for f in "$node_license" "$swiftterm_license"; do
   [ -f "$f" ] || { echo "Missing license file for the notices: $f" >&2; exit 1; }
 done
