@@ -8,8 +8,8 @@ let package = Package(
     name: "SkinnyAI",
     platforms: [.macOS(.v13)],
     dependencies: [
-        // Pinned to a main commit for the wide-character reflow fix; switch back to `from:` once a release includes it.
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", revision: "4d5eeea89ed7c0fabffea9c8415cc392a6a06a31"),
+        // 1.99.0 is a pre-2.0 release (2.0 changes APIs); stay on it until the app is moved over deliberately.
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.99.0"),
     ],
     targets: [
         .executableTarget(

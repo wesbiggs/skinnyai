@@ -58,3 +58,7 @@ Drag a file from Finder into the terminal. Its path is recognized as it arrives 
 | Anything else | Refused: these APIs have no way to take it |
 
 Files are capped at 20 MB. Only a *paste* (which is what a drop is) attaches PDFs and text files; a path typed into a message attaches only images, so mentioning `~/.ssh/config` in a question doesn't upload it. When a drop doesn't register in your terminal, `/attach <path>` queues a file for your next message. A line starting with `/` that contains an image path is treated as a message, not a command. PDFs and images aren't kept in saved sessions or shared models, only their text.
+
+## Pager
+
+A reply taller than the terminal stops at the end of each screen, while it streams, with a `:` prompt like `less`. Space shows the next page, Enter one more line, b the page before (the screen is redrawn, so what was above the reply is cleared), and q (or Esc, Ctrl+C) stops showing the reply; the whole reply is still received and kept, and `/page` shows it again, a screen at a time. The same applies to long output from `/help`, `/show`, `/list`, `/mcp` and a bare `/set` (the replayed chat from `/load` is not paged). Paging only happens in a terminal. `/set nopager`, `--no-pager`, or `SKINNY_PAGER=false` turns it off.

@@ -16,6 +16,7 @@ import { pickDefaultModel } from './models.js';
 import { chatIdOf, chatProjectOf, newMessageId } from './chatdb.js';
 import { SESSIONS_ENCRYPTED, SESSION_DIR, autosaveName, chatFileExists, deleteLocalSession, formatModelfile, isAutosaveName, LOCKED_MESSAGE, legacySessionPath, listLocalSessions, localSessionExists, readLocalSession, redactLocalSession, resumeHint, saveLocalSession, sessionPath, sessionStamp, sessionsLocked, tidyTitle, uniqueSessionName } from './sessions.js';
 import { lineEditor } from './editor.js';
+import { pageText, withPager } from './pager.js';
 import { requestBuilders } from './requests.js';
 import { streaming } from './stream.js';
 import { formatMarkdown } from './export.js';
@@ -63,6 +64,8 @@ export class OllamaChat {
     // undefined = automatic: tell the model today's date whenever tools are on.
     this.injectDate = options.date;
     this.markdown = options.markdown !== false;
+    // Long command output waits for a key a screenful at a time (on a terminal).
+    this.pager = options.pager !== false;
     // Off by default: drawing an image means fetching whatever URL the model
     // wrote, and a prompt injection (say, in a page fetch_page read) could
     // use that to send conversation details to a server in the URL.
@@ -436,6 +439,25 @@ export class OllamaChat {
     }
   }
 
+  // /page: the latest reply again, in the pager (for one skipped with q).
+  async pageLastReply() {
+    const reply = this.history.findLast((m) => m.role === 'assistant' && m.content);
+    if (!reply) {
+      console.log('\nThere is no reply to show yet.\n');
+      return;
+    }
+    const held = [];
+    const write = process.stdout.write;
+    process.stdout.write = (chunk) => (held.push(String(chunk)), true);
+    try {
+      await this.writeWrapped('assistant', reply.content, 0);
+    } finally {
+      process.stdout.write = write;
+    }
+    process.stdout.write('\n');
+    await pageText(`${held.join('')}\n\n`);
+  }
+
   renderOptions() {
     return { markdown: this.markdown, images: this.images };
   }
@@ -696,6 +718,7 @@ export class OllamaChat {
   printCommandList() {
     console.log('  /set            Set session variables');
     console.log('  /show           Show model information');
+    console.log('  /page           Show the latest reply again, a screen at a time');
     console.log('  /load <model>   Load a session or model');
     console.log('  /save [name]    Save your current session to a file on this machine');
     console.log('  /share [name]   Save your current session as a model on the Ollama server');
@@ -745,6 +768,8 @@ export class OllamaChat {
     console.log('  /set nomarkdown        Show responses as raw text');
     console.log('  /set images            Draw ![images](url or file path) inline (iTerm2, WezTerm, kitty, Ghostty, the SkinnyAI app)');
     console.log('  /set noimages          Show images as links (default)');
+    console.log('  /set pager             Stop at the end of each screen, for replies and long command output (default)');
+    console.log('  /set nopager           Print command output without stopping');
     console.log('  /set debug             Log requests, offered tools, and tool calls to a file');
     console.log('  /set nodebug           Stop logging (default)');
     console.log('  /set autosave          Save the session to a local file after each reply');
@@ -782,6 +807,7 @@ export class OllamaChat {
       ['date', dateSetting],
       ['markdown', onOff(this.markdown)],
       ['images', images],
+      ['pager', onOff(this.pager)],
       ...(this.debug ? [['debug log', DEBUG_LOG]] : []),
       ['autosave', this.autosave ? `on (${this.sessionName ? `'${this.sessionName}'` : 'named after the next reply'})` : 'off'],
       ['profile', CONFIG ? PROFILE.name : 'none (no config.json)']
@@ -1278,7 +1304,7 @@ export class OllamaChat {
   // The settings a profile decides (the ones ENV_SETTINGS names), which
   // /set profile replaces as a set.
   static PROFILE_FIELDS = ['model', 'modelIsDefault', 'api', 'host', 'keepAlive', 'showThinking', 'stopOnExit', 'toolsEnabled',
-    'mcpEnabled', 'injectDate', 'markdown', 'images', 'autosave', 'titles'];
+    'mcpEnabled', 'injectDate', 'markdown', 'images', 'pager', 'autosave', 'titles'];
 
   // /set profile: lists the profiles, or switches to one, as if launched with
   // --profile. The conversation carries over (adapted to the new model, see
@@ -1491,6 +1517,14 @@ export class OllamaChat {
         this.images = false;
         console.log("Set 'noimages' mode.\n");
         break;
+      case 'pager':
+        this.pager = true;
+        console.log("Set 'pager' mode (replies and long command output stop at the end of each screen).\n");
+        break;
+      case 'nopager':
+        this.pager = false;
+        console.log("Set 'nopager' mode.\n");
+        break;
       case 'autosave':
         this.autosave = true;
         console.log(this.sessionName
@@ -1571,10 +1605,13 @@ export class OllamaChat {
         await this.load(rest.join(' '));
         return true;
       case '/list':
-        await this.list();
+        await withPager(this.pager, () => this.list());
         return true;
       case '/mcp':
-        this.printMcp();
+        await withPager(this.pager, () => this.printMcp());
+        return true;
+      case '/page':
+        await this.pageLastReply();
         return true;
       case '/saveimage':
         await this.saveImage(trimmed.slice(rawCmd.length));
@@ -1583,14 +1620,15 @@ export class OllamaChat {
         this.attach(trimmed.slice(rawCmd.length));
         return true;
       case '/show':
-        await this.show(rest);
+        await withPager(this.pager, () => this.show(rest));
         return true;
       case '/set':
-        await this.handleSet(rest, trimmed.slice(rawCmd.length).trim());
+        // Only the bare listing is paged: the subcommands can ask questions.
+        await withPager(this.pager && rest.length === 0, () => this.handleSet(rest, trimmed.slice(rawCmd.length).trim()));
         return true;
       case '/help':
       case '/?':
-        this.printHelp(rest[0]?.toLowerCase());
+        await withPager(this.pager, () => this.printHelp(rest[0]?.toLowerCase()));
         return true;
       default:
         return null; // Not a command

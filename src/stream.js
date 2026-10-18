@@ -6,6 +6,7 @@ import { newCallId, parseArguments } from './history.js';
 import { isOllamaCom, ollamaApiKey, readErrorBody, streamingPost } from './http.js';
 import { runTool } from './mcp.js';
 import { createMarkdownRenderer } from './markdown.js';
+import { replyPager } from './pager.js';
 import { ANSI, CHROME_COLOR, createWordWrapper, stripControls, supportsColor } from './style.js';
 
 // Sending a request and showing the reply as it streams in, and running the
@@ -88,6 +89,7 @@ export const streaming = {
   // Returns any tool calls the model made (empty if it just answered).
   async streamTurn(allowTools = true) {
     let spinner = this.startSpinner();
+    const pager = replyPager(this.pager);
     // Ctrl+C while a reply streams stops that reply (what has arrived is kept)
     // instead of ending the whole chat.
     const controller = new AbortController();
@@ -248,6 +250,7 @@ export const streaming = {
             thinkingStarted = true;
           }
           thinkingWrapper.write(stripControls(thinking));
+          await pager?.wait();
         }
         const content = isOpenAI ? choice?.delta?.content : json.message?.content;
         if (content) {
@@ -259,6 +262,7 @@ export const streaming = {
             started = true;
           }
           await renderer.write(content);
+          await pager?.wait();
           fullResponse += content;
         }
         if (isOpenAI) {
@@ -345,6 +349,7 @@ export const streaming = {
     } finally {
       process.removeListener('SIGINT', interrupt);
       this.stopSpinner(spinner);
+      await pager?.close();
     }
   },
 

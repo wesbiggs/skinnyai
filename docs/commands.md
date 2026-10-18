@@ -39,6 +39,7 @@ The command set mirrors the native `ollama run` terminal, plus a few extras.
 | `/set date` / `/set nodate` | Tell the model today's date, or don't (default: only when tools are on) |
 | `/set markdown` / `/set nomarkdown` | Render markdown, or show raw text |
 | `/set images` / `/set noimages` | Draw inline images ([display](display.md#inline-images)) |
+| `/set pager` / `/set nopager` | Stop at the end of each screen for long replies and command output (default on; [display](display.md#pager)) |
 | `/set autosave` / `/set noautosave` | Save after every reply ([sessions](sessions.md#autosave)) |
 | `/set debug` / `/set nodebug` | Start or stop writing the [debug log](troubleshooting.md#debug-log) |
 

@@ -14,6 +14,7 @@ export const ENV_SETTINGS = {
   SKINNY_MCP: ['mcp', 'boolean'],
   SKINNY_DEBUG: ['debug', 'boolean'],
   SKINNY_IMAGES: ['images', 'boolean'],
+  SKINNY_PAGER: ['pager', 'boolean'],
   SKINNY_AUTOSAVE: ['autosave', 'boolean'],
   SKINNY_TITLES: ['titles', 'boolean'],
   SKINNY_HIDE_THINKING: ['hideThinking', 'boolean'],
@@ -52,6 +53,7 @@ export const BOOLEAN_FLAGS = {
   '--mcp': ['mcp', true], '--no-mcp': ['mcp', false],
   '--debug': ['debug', true], '--no-debug': ['debug', false],
   '--images': ['images', true], '--no-images': ['images', false],
+  '--pager': ['pager', true], '--no-pager': ['pager', false],
   '--autosave': ['autosave', true], '--no-autosave': ['autosave', false],
   '--titles': ['titles', true], '--no-titles': ['titles', false],
   '--hide-thinking': ['hideThinking', true], '--show-thinking': ['hideThinking', false],
@@ -142,6 +144,8 @@ Options:
                        that support it: iTerm2, WezTerm, kitty, Ghostty (same
                        as running \`/set images\`). Off by default, since it
                        fetches whatever image URLs the model writes.
+  --no-pager           Don't stop at the end of each screen for long replies and
+                       command output (/help, /show, /list); same as \`/set nopager\`
   -x, --stop-on-exit   Unload the model from Ollama when the session ends
                        (same effect as \`ollama stop\`)
   --autosave           Save the session to a local file after each reply
@@ -192,7 +196,7 @@ Defaults:
   SKINNY_PROFILE=NAME. A top-level "shared" block (same shape) is what every
   profile starts from, and "startupEnv" holds settings applied once at launch
   (NODE_EXTRA_CA_CERTS, colors, SKINNY_TRUSTED_HOSTS, SKINNY_IMAGE_DIR). Also: SKINNY_API, SKINNY_KEEP_ALIVE,
-  SKINNY_DATE, SKINNY_MARKDOWN, SKINNY_IMAGES, SKINNY_HIDE_THINKING,
+  SKINNY_DATE, SKINNY_MARKDOWN, SKINNY_IMAGES, SKINNY_PAGER, SKINNY_HIDE_THINKING,
   SKINNY_STOP_ON_EXIT, SKINNY_MCP, SKINNY_DEBUG, SKINNY_PROJECT_KEYS and SKINNY_KEY_STORE (project keys for /sync; see docs/sync.md),
   SKINNY_TRUSTED_HOSTS (hosts, comma-separated, that images and fetch_page may
   reach even though they resolve to a private address), SKINNY_IMAGE_DIR (where /saveimage writes by default: ~/Pictures/skinnyai), and
