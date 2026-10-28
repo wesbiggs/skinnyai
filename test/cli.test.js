@@ -59,6 +59,14 @@ describe('piped input', () => {
     expect(chatRequests()[1].body.messages.map((m) => m.content)).toEqual(['one', 'You said: **one**', 'two']);
   });
 
+  it('replays the last turns or the whole chat with /page', async () => {
+    const { stdout } = await run(['m', ...openai()], 'one\ntwo\nthree\n/page 2\n/page all\n/page 0\n');
+    const [, two, all, bad] = stdout.split(/> \/page \S+\n/);
+    expect(two).toBe('\n> two\n\nYou said: **two**\n\n> three\n\nYou said: **three**\n\n');
+    expect(all).toBe('\n> one\n\nYou said: **one**\n\n' + two.slice(1));
+    expect(bad).toContain('Usage: /page');
+  });
+
   it('writes markdown raw when output is redirected', async () => {
     const { stdout } = await run(['m', ...openai()], 'md\n');
     expect(stdout).toContain('# Title\n\n**bold** and a table:\n\n| a | b |\n|---|---|\n| 1 | 2 |');

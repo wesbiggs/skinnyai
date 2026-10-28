@@ -423,7 +423,12 @@ export class OllamaChat {
 
   async printRestoredHistory(messages, heading) {
     console.log(`${heading}\n`);
+    await this.printMessages(messages);
+  }
 
+  // The conversation as it looked when typed: prompts and replies (tool
+  // calls, results and thinking aren't shown).
+  async printMessages(messages) {
     for (const message of messages) {
       if (message.role === 'system') {
         console.log(`💬 System: ${message.content}\n`);
@@ -440,7 +445,9 @@ export class OllamaChat {
   }
 
   // /page: the latest reply again, in the pager (for one skipped with q).
-  async pageLastReply() {
+  // /page N: the last N turns (prompt and reply); /page all: the whole chat.
+  async page(arg) {
+    if (arg) return this.pageTurns(arg);
     const reply = this.history.findLast((m) => m.role === 'assistant' && m.content);
     if (!reply) {
       console.log('\nThere is no reply to show yet.\n');
@@ -456,6 +463,24 @@ export class OllamaChat {
     }
     process.stdout.write('\n');
     await pageText(`${held.join('')}\n\n`);
+  }
+
+  async pageTurns(arg) {
+    const all = arg.toLowerCase() === 'all';
+    const count = all ? Infinity : Number(arg);
+    if (!all && !(Number.isInteger(count) && count > 0)) {
+      console.log("\nUsage: /page [N|all] (the latest reply, the last N turns, or the whole chat)\n");
+      return;
+    }
+    const starts = this.history.flatMap((m, i) => (m.role === 'user' ? [i] : []));
+    if (starts.length === 0) {
+      console.log('\nThere is no conversation to show yet.\n');
+      return;
+    }
+    const from = count >= starts.length ? 0 : starts[starts.length - count];
+    const messages = this.history.slice(from).filter((m) => from === 0 || m.role !== 'system');
+    process.stdout.write('\n');
+    await withPager(true, () => this.printMessages(messages));
   }
 
   renderOptions() {
@@ -718,7 +743,7 @@ export class OllamaChat {
   printCommandList() {
     console.log('  /set            Set session variables');
     console.log('  /show           Show model information');
-    console.log('  /page           Show the latest reply again, a screen at a time');
+    console.log('  /page [N|all]   Show the latest reply again, a screen at a time (or the last N turns, or the whole chat)');
     console.log('  /load <model>   Load a session or model');
     console.log('  /save [name]    Save your current session to a file on this machine');
     console.log('  /share [name]   Save your current session as a model on the Ollama server');
@@ -1611,7 +1636,7 @@ export class OllamaChat {
         await withPager(this.pager, () => this.printMcp());
         return true;
       case '/page':
-        await this.pageLastReply();
+        await this.page(rest[0]);
         return true;
       case '/saveimage':
         await this.saveImage(trimmed.slice(rawCmd.length));

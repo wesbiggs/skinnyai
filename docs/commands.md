@@ -6,6 +6,7 @@ The command set mirrors the native `ollama run` terminal, plus a few extras.
 |---------|-------------|
 | `/set` | Set session variables (below) |
 | `/show` | Show model or session information (below) |
+| `/page [N\|all]` | Show the latest reply again, the last N turns, or the whole chat, a screen at a time ([display](display.md#pager)) |
 | `/load` | With no name, shows the same list as `/list` |
 | `/load <name>` | Restore a saved session, or switch to a different model (restoring its saved session/system message if any) |
 | `/save [name]` | Save the session to a local file ([sessions](sessions.md)) |
