@@ -42,6 +42,11 @@ describe('inline styles', () => {
     expect(stripAnsi(output)).toBe('Go → there, α × 2 $USD x, km/h, \\frac{a}{b}. $5, $7.');
   });
 
+  it('draws LaTeX labeled arrows with their label, across words', async () => {
+    const output = await render(skinnyai, 'Client $\\xrightarrow{Small Request}$ Server $\\xleftarrow{\\text{ok}}$ done');
+    expect(stripAnsi(output)).toBe('Client ─Small Request─→ Server ←─ok─ done');
+  });
+
   it('treats __dunder__ as bold, like CommonMark', async () => {
     const output = await render(skinnyai, 'and __dunder__ is bold');
     expect(stripAnsi(output)).toBe('and dunder is bold');

@@ -156,10 +156,17 @@ export const LATEX_SYMBOLS = (() => {
 })();
 // Commands whose braced argument is just text: \text{km} shows as km.
 export const LATEX_TEXT_COMMANDS = new Set(['text', 'textbf', 'textit', 'mathrm', 'mathbf', 'mathit', 'mathsf', 'operatorname', 'mbox']);
+// Arrows whose braced argument is a label drawn on the arrow: what goes
+// before and after it, so \xrightarrow{yes} shows as ─yes─→.
+export const LATEX_LABELED_ARROWS = new Map(Object.entries({
+  xrightarrow: ['─', '─→'], xleftarrow: ['←─', '─'], xleftrightarrow: ['←─', '─→'],
+  xRightarrow: ['═', '═⇒'], xLeftarrow: ['⇐═', '═'], xLeftrightarrow: ['⇐═', '═⇒'],
+  xlongrightarrow: ['─', '─⟶'], xlongleftarrow: ['⟵─', '─'], xmapsto: ['↦─', '─→']
+}));
 
 // Renders inline markdown within one word (or one whole table cell) at a
 // time: **bold**, *italic* / _italic_, ~~strike~~, `code`, \-escapes, and
-// the symbols in $...$ math (see LATEX_SYMBOLS).
+// the symbols and labeled arrows in $...$ math (see LATEX_SYMBOLS).
 // Italic also switches to the role's narration color, so RP-style
 // '*narration*' keeps its distinct look. State carries across calls, so a
 // span can cover several words; endLine() drops it, so an unclosed marker
@@ -174,7 +181,7 @@ export function createInlineStyler(role) {
   let lineBold = false; // headings/table headers
   let link = false; // underlined while inside a [link](url)
   let math = false; // inside $...$
-  let mathBraces = []; // open { in math; true when the brace belongs to \text{...} and is dropped
+  let mathBraces = []; // open { in math: what its } shows as (null: a literal brace, '' for \text{...})
 
   function sgr() {
     if (!supportsColor) return '';
@@ -233,7 +240,14 @@ export function createInlineStyler(role) {
           const name = end > i + 1 ? chars.slice(i + 1, end).join('') : chars[i + 1];
           if (end === i + 1) end++;
           if (LATEX_TEXT_COMMANDS.has(name) && chars[end] === '{') {
-            mathBraces.push(true);
+            mathBraces.push('');
+            i = end;
+            continue;
+          }
+          if (LATEX_LABELED_ARROWS.has(name) && chars[end] === '{') {
+            const [before, after] = LATEX_LABELED_ARROWS.get(name);
+            out += before;
+            mathBraces.push(after);
             i = end;
             continue;
           }
@@ -243,9 +257,13 @@ export function createInlineStyler(role) {
             continue;
           }
         } else if (ch === '{') {
-          mathBraces.push(false);
-        } else if (ch === '}' && mathBraces.pop()) {
-          continue;
+          mathBraces.push(null);
+        } else if (ch === '}') {
+          const close = mathBraces.pop();
+          if (close != null) {
+            out += close;
+            continue;
+          }
         }
         out += ch;
         continue;
